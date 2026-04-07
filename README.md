@@ -444,8 +444,8 @@ pedantic = { level = "deny", priority = -1 }
 unwrap_used = "deny"
 ```
 
-Six `#[allow(clippy::)]` suppressions remain; each has an inline comment explaining
-why the lint cannot be resolved without harming correctness or readability.
+All clippy suppressions have an inline comment explaining why the lint cannot be resolved without harming correctness
+or readability.
 
 ---
 
@@ -454,9 +454,3 @@ why the lint cannot be resolved without harming correctness or readability.
 ```bash
 cargo test
 ```
-
-10 tests:
-
-- **dialect** (5): compress basic/with-metadata, emotion detection, flag detection, known entities
-- **extract** (3): decision extraction, emotional extraction, problem-resolved → milestone
-- **integration** (2): schema creation, inverted index search
