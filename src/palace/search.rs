@@ -248,6 +248,20 @@ mod async_tests {
     }
 
     #[tokio::test]
+    async fn search_with_room_filter() {
+        let (_db, conn) = crate::test_helpers::test_db().await;
+        seed_drawers(&conn).await;
+        let results = search_memories(&conn, "programming", None, Some("backend"), 10)
+            .await
+            .expect("search");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].wing, "project_a");
+        assert_eq!(results[0].room, "backend");
+        assert_eq!(results[0].source_file, "main.rs");
+        assert!(results[0].relevance > 0.0);
+    }
+
+    #[tokio::test]
     async fn search_no_results() {
         let (_db, conn) = crate::test_helpers::test_db().await;
         seed_drawers(&conn).await;

@@ -110,6 +110,11 @@ mod tests {
 
         // Filter out empty lines to check role markers
         let non_empty_lines: Vec<&str> = lines.iter().copied().filter(|l| !l.is_empty()).collect();
+        assert!(
+            non_empty_lines.len() >= 5,
+            "expected at least 5 non-empty lines, got {}",
+            non_empty_lines.len()
+        );
 
         // Verify role alternation by checking > markers
         // U1 is "user" (has > marker)
@@ -132,5 +137,22 @@ mod tests {
         assert!(
             !non_empty_lines[4].starts_with('>') && non_empty_lines[4].contains("back to second")
         );
+    }
+
+    #[test]
+    fn skips_malformed_entries() {
+        let data: serde_json::Value = serde_json::from_str(
+            r#"[
+                {"type":"message","user":"U1","text":"first valid"},
+                "not an object",
+                null,
+                42,
+                {"type":"message","user":"U2","text":"second valid"}
+            ]"#,
+        )
+        .expect("valid json");
+        let result = try_parse(&data).expect("should parse");
+        assert!(result.contains("first valid"));
+        assert!(result.contains("second valid"));
     }
 }
