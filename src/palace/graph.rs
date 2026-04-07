@@ -220,6 +220,36 @@ pub async fn find_tunnels(
     Ok(tunnels)
 }
 
+/// Summary statistics about the palace graph.
+pub async fn graph_stats(conn: &Connection) -> Result<GraphStats> {
+    let (nodes, edges) = build_graph(conn).await?;
+
+    let tunnel_rooms = nodes.values().filter(|n| n.wings.len() >= 2).count();
+
+    let mut wing_counts: HashMap<String, usize> = HashMap::new();
+    for node in nodes.values() {
+        for w in &node.wings {
+            *wing_counts.entry(w.clone()).or_insert(0) += 1;
+        }
+    }
+
+    let mut top_tunnels: Vec<RoomNode> = nodes
+        .values()
+        .filter(|n| n.wings.len() >= 2)
+        .cloned()
+        .collect();
+    top_tunnels.sort_by(|a, b| b.wings.len().cmp(&a.wings.len()));
+    top_tunnels.truncate(10);
+
+    Ok(GraphStats {
+        total_rooms: nodes.len(),
+        tunnel_rooms,
+        total_edges: edges.len(),
+        rooms_per_wing: wing_counts,
+        top_tunnels,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,34 +305,4 @@ mod tests {
         assert_eq!(tunnels[0].room, "backend");
         assert_eq!(tunnels[0].wings.len(), 2);
     }
-}
-
-/// Summary statistics about the palace graph.
-pub async fn graph_stats(conn: &Connection) -> Result<GraphStats> {
-    let (nodes, edges) = build_graph(conn).await?;
-
-    let tunnel_rooms = nodes.values().filter(|n| n.wings.len() >= 2).count();
-
-    let mut wing_counts: HashMap<String, usize> = HashMap::new();
-    for node in nodes.values() {
-        for w in &node.wings {
-            *wing_counts.entry(w.clone()).or_insert(0) += 1;
-        }
-    }
-
-    let mut top_tunnels: Vec<RoomNode> = nodes
-        .values()
-        .filter(|n| n.wings.len() >= 2)
-        .cloned()
-        .collect();
-    top_tunnels.sort_by(|a, b| b.wings.len().cmp(&a.wings.len()));
-    top_tunnels.truncate(10);
-
-    Ok(GraphStats {
-        total_rooms: nodes.len(),
-        tunnel_rooms,
-        total_edges: edges.len(),
-        rooms_per_wing: wing_counts,
-        top_tunnels,
-    })
 }

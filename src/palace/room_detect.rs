@@ -243,6 +243,7 @@ pub fn is_skip_dir(name: &str) -> bool {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use tempfile;
 
     #[test]
     fn is_skip_dir_matches_known_dirs() {
@@ -329,20 +330,19 @@ mod tests {
 
     #[test]
     fn detect_rooms_from_folders_creates_rooms() {
-        let dir = std::env::temp_dir().join("mempalace_test_rooms");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("frontend")).expect("create frontend");
-        std::fs::create_dir_all(dir.join("backend")).expect("create backend");
-        std::fs::create_dir_all(dir.join("docs")).expect("create docs");
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let dir_path = dir.path();
+        std::fs::create_dir_all(dir_path.join("frontend")).expect("create frontend");
+        std::fs::create_dir_all(dir_path.join("backend")).expect("create backend");
+        std::fs::create_dir_all(dir_path.join("docs")).expect("create docs");
 
-        let rooms = detect_rooms_from_folders(&dir);
+        let rooms = detect_rooms_from_folders(dir_path);
         let names: Vec<&str> = rooms.iter().map(|r| r.name.as_str()).collect();
 
         assert!(names.contains(&"frontend"));
         assert!(names.contains(&"backend"));
         assert!(names.contains(&"documentation"));
         assert!(names.contains(&"general"));
-
-        let _ = std::fs::remove_dir_all(&dir);
+        // TempDir auto-cleans up when dropped
     }
 }

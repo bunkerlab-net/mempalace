@@ -118,16 +118,15 @@ mod tests {
     #[test]
     fn normalize_passthrough_with_markers() {
         // Text with >= 3 lines starting with > should pass through
-        let dir = std::env::temp_dir().join("mempalace_norm_test");
-        std::fs::create_dir_all(&dir).ok();
-        let path = dir.join("test.txt");
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let path = dir.path().join("test.txt");
         std::fs::write(
             &path,
             "> hello\nresponse\n\n> second\nreply\n\n> third\nanother",
         )
-        .ok();
+        .expect("write test file");
         let result = normalize(&path).expect("normalize");
         assert!(result.contains("> hello"));
-        let _ = std::fs::remove_dir_all(&dir);
+        // TempDir auto-cleans up when dropped
     }
 }

@@ -34,3 +34,6 @@ regex = "1"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
