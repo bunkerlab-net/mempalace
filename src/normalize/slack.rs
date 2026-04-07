@@ -15,7 +15,9 @@ pub fn try_parse(data: &serde_json::Value) -> Option<String> {
     let mut last_role: Option<String> = None;
 
     for item in items {
-        let obj = item.as_object()?;
+        let Some(obj) = item.as_object() else {
+            continue;
+        };
         if obj.get("type").and_then(|t| t.as_str()) != Some("message") {
             continue;
         }
@@ -37,19 +39,20 @@ pub fn try_parse(data: &serde_json::Value) -> Option<String> {
             continue;
         }
 
-        if !seen_users.contains_key(&user_id) {
-            let role = if seen_users.is_empty() {
+        let role = if let Some(existing_role) = seen_users.get(&user_id) {
+            existing_role.clone()
+        } else {
+            let new_role = if seen_users.is_empty() {
                 "user".to_string()
             } else if last_role.as_deref() == Some("user") {
                 "assistant".to_string()
             } else {
                 "user".to_string()
             };
-            seen_users.insert(user_id.clone(), role);
-        }
-
-        let role = seen_users[&user_id].clone();
-        last_role = Some(role.clone());
+            seen_users.insert(user_id.clone(), new_role.clone());
+            last_role = Some(new_role.clone());
+            new_role
+        };
         messages.push((role, text));
     }
 
@@ -103,18 +106,31 @@ mod tests {
         )
         .expect("valid json");
         let result = try_parse(&data).expect("should parse");
-        // U1 is first, assigned "user" role
-        assert!(result.contains("first message"));
-        // U2 is second, assigned "assistant" role (alternates from "user")
-        assert!(result.contains("second message"));
-        // U3 is third, assigned "user" role (alternates from "assistant")
-        assert!(result.contains("third message"));
-        // Verify role alternation by checking for role markers
         let lines: Vec<&str> = result.lines().collect();
-        // Should have messages from all users in the transcript
-        assert!(result.contains("back to first"));
-        assert!(result.contains("back to second"));
-        // Verify structure contains expected markers for different speakers
-        assert!(lines.len() >= 5);
+
+        // Filter out empty lines to check role markers
+        let non_empty_lines: Vec<&str> = lines.iter().copied().filter(|l| !l.is_empty()).collect();
+
+        // Verify role alternation by checking > markers
+        // U1 is "user" (has > marker)
+        assert!(
+            non_empty_lines[0].starts_with('>') && non_empty_lines[0].contains("first message")
+        );
+        // U2 is "assistant" (no > marker)
+        assert!(
+            !non_empty_lines[1].starts_with('>') && non_empty_lines[1].contains("second message")
+        );
+        // U3 is "user" (has > marker)
+        assert!(
+            non_empty_lines[2].starts_with('>') && non_empty_lines[2].contains("third message")
+        );
+        // U1 remains "user" (has > marker)
+        assert!(
+            non_empty_lines[3].starts_with('>') && non_empty_lines[3].contains("back to first")
+        );
+        // U2 remains "assistant" (no > marker)
+        assert!(
+            !non_empty_lines[4].starts_with('>') && non_empty_lines[4].contains("back to second")
+        );
     }
 }

@@ -216,6 +216,8 @@ mod async_tests {
             .expect("search");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].wing, "project_a");
+        assert_eq!(results[0].source_file, "main.rs");
+        assert!(results[0].relevance > 0.0);
     }
 
     #[tokio::test]
@@ -228,6 +230,8 @@ mod async_tests {
             .expect("search");
         assert!(!results.is_empty());
         assert_eq!(results[0].wing, "project_a");
+        assert_eq!(results[0].source_file, "main.rs");
+        assert!(results[0].relevance > 0.0);
     }
 
     #[tokio::test]
@@ -239,6 +243,8 @@ mod async_tests {
             .expect("search");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].room, "frontend");
+        assert_eq!(results[0].source_file, "app.tsx");
+        assert!(results[0].relevance > 0.0);
     }
 
     #[tokio::test]
