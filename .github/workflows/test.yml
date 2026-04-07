@@ -45,7 +45,7 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-test-${{ steps.rustc.outputs.fingerprint }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-test-
+            ${{ runner.os }}-cargo-lint-
 
       - name: Install Binstall
         env:
