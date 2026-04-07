@@ -28,7 +28,7 @@ Semantic search is deferred until an embedded model is available without network
 ## Installation
 
 ```bash
-git clone <repo>
+git clone https://github.com/bunkerlab-net/mempalace.git
 cd mempalace
 cargo build --release
 # binary is at: target/release/mempalace
