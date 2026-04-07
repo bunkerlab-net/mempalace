@@ -273,7 +273,7 @@ mod tests {
 
     #[tokio::test]
     async fn build_graph_creates_nodes_and_edges() {
-        let conn = crate::test_helpers::test_db().await;
+        let (_db, conn) = crate::test_helpers::test_db().await;
         seed_graph(&conn).await;
         let (nodes, edges) = build_graph(&conn).await.expect("build_graph");
         // "backend" spans 2 wings, "frontend" in 1, "database" in 1
@@ -287,18 +287,35 @@ mod tests {
 
     #[tokio::test]
     async fn traverse_reaches_connected_rooms() {
-        let conn = crate::test_helpers::test_db().await;
+        let (_db, conn) = crate::test_helpers::test_db().await;
         seed_graph(&conn).await;
         let results = traverse(&conn, "frontend", 2).await.expect("traverse");
         // frontend (hop 0) → backend (hop 1, shared proj_a) → database (hop 2, shared proj_b)
         assert!(!results.is_empty());
         assert_eq!(results[0].room, "frontend");
         assert_eq!(results[0].hop, 0);
+
+        // Verify hop 1: backend reached via shared proj_a wing
+        let hop1 = results
+            .iter()
+            .find(|r| r.room == "backend" && r.hop == 1)
+            .expect("backend at hop 1");
+        assert!(hop1.wings.contains(&"proj_a".to_string()));
+        assert!(hop1.wings.contains(&"proj_b".to_string()));
+        assert_eq!(hop1.connected_via, Some(vec!["proj_a".to_string()]));
+
+        // Verify hop 2: database reached via shared proj_b wing
+        let hop2 = results
+            .iter()
+            .find(|r| r.room == "database" && r.hop == 2)
+            .expect("database at hop 2");
+        assert!(hop2.wings.contains(&"proj_b".to_string()));
+        assert_eq!(hop2.connected_via, Some(vec!["proj_b".to_string()]));
     }
 
     #[tokio::test]
     async fn find_tunnels_returns_multi_wing_rooms() {
-        let conn = crate::test_helpers::test_db().await;
+        let (_db, conn) = crate::test_helpers::test_db().await;
         seed_graph(&conn).await;
         let tunnels = find_tunnels(&conn, None, None).await.expect("find_tunnels");
         assert_eq!(tunnels.len(), 1);

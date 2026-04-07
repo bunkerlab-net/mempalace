@@ -1,8 +1,10 @@
 use turso::Connection;
 
 /// Create an in-memory turso database with the full schema applied.
-pub async fn test_db() -> Connection {
+/// Returns (Database, Connection) tuple to keep the Database alive for the test lifetime.
+pub async fn test_db() -> (turso::Database, Connection) {
     let db = turso::Builder::new_local(":memory:")
+        .experimental_triggers(true)
         .build()
         .await
         .expect("failed to create in-memory db");
@@ -10,7 +12,5 @@ pub async fn test_db() -> Connection {
     crate::schema::ensure_schema(&conn)
         .await
         .expect("failed to apply schema");
-    // Leak the Database so the Connection stays valid for the test lifetime.
-    std::mem::forget(db);
-    conn
+    (db, conn)
 }

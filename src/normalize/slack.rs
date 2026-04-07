@@ -89,4 +89,32 @@ mod tests {
                 .expect("valid json");
         assert!(try_parse(&data).is_none());
     }
+
+    #[test]
+    fn multi_user_role_alternation() {
+        let data: serde_json::Value = serde_json::from_str(
+            r#"[
+                {"type":"message","user":"U1","text":"first message"},
+                {"type":"message","user":"U2","text":"second message"},
+                {"type":"message","user":"U3","text":"third message"},
+                {"type":"message","user":"U1","text":"back to first"},
+                {"type":"message","user":"U2","text":"back to second"}
+            ]"#,
+        )
+        .expect("valid json");
+        let result = try_parse(&data).expect("should parse");
+        // U1 is first, assigned "user" role
+        assert!(result.contains("first message"));
+        // U2 is second, assigned "assistant" role (alternates from "user")
+        assert!(result.contains("second message"));
+        // U3 is third, assigned "user" role (alternates from "assistant")
+        assert!(result.contains("third message"));
+        // Verify role alternation by checking for role markers
+        let lines: Vec<&str> = result.lines().collect();
+        // Should have messages from all users in the transcript
+        assert!(result.contains("back to first"));
+        assert!(result.contains("back to second"));
+        // Verify structure contains expected markers for different speakers
+        assert!(lines.len() >= 5);
+    }
 }

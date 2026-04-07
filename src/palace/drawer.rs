@@ -200,7 +200,7 @@ mod async_tests {
 
     #[tokio::test]
     async fn add_drawer_inserts_row() {
-        let conn = crate::test_helpers::test_db().await;
+        let (_db, conn) = crate::test_helpers::test_db().await;
         let p = DrawerParams {
             id: "d1",
             wing: "test_wing",
@@ -226,7 +226,7 @@ mod async_tests {
 
     #[tokio::test]
     async fn add_drawer_duplicate_returns_false() {
-        let conn = crate::test_helpers::test_db().await;
+        let (_db, conn) = crate::test_helpers::test_db().await;
         let p = DrawerParams {
             id: "dup1",
             wing: "w",
@@ -245,7 +245,7 @@ mod async_tests {
 
     #[tokio::test]
     async fn index_words_creates_entries() {
-        let conn = crate::test_helpers::test_db().await;
+        let (_db, conn) = crate::test_helpers::test_db().await;
         // Insert a drawer first
         conn.execute(
             "INSERT INTO drawers (id, wing, room, content) VALUES ('iw1', 'w', 'r', 'test')",
@@ -272,7 +272,7 @@ mod async_tests {
 
     #[tokio::test]
     async fn file_already_mined_returns_correctly() {
-        let conn = crate::test_helpers::test_db().await;
+        let (_db, conn) = crate::test_helpers::test_db().await;
         assert!(
             !file_already_mined(&conn, "nonexistent.rs")
                 .await

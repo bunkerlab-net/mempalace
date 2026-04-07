@@ -209,7 +209,7 @@ mod async_tests {
 
     #[tokio::test]
     async fn search_single_word() {
-        let conn = crate::test_helpers::test_db().await;
+        let (_db, conn) = crate::test_helpers::test_db().await;
         seed_drawers(&conn).await;
         let results = search_memories(&conn, "rust", None, None, 10)
             .await
@@ -220,7 +220,7 @@ mod async_tests {
 
     #[tokio::test]
     async fn search_multi_word_relevance() {
-        let conn = crate::test_helpers::test_db().await;
+        let (_db, conn) = crate::test_helpers::test_db().await;
         seed_drawers(&conn).await;
         // "programming" appears in both, but searching "rust programming" should rank s1 higher
         let results = search_memories(&conn, "rust programming", None, None, 10)
@@ -232,7 +232,7 @@ mod async_tests {
 
     #[tokio::test]
     async fn search_with_wing_filter() {
-        let conn = crate::test_helpers::test_db().await;
+        let (_db, conn) = crate::test_helpers::test_db().await;
         seed_drawers(&conn).await;
         let results = search_memories(&conn, "programming", Some("project_b"), None, 10)
             .await
@@ -243,7 +243,7 @@ mod async_tests {
 
     #[tokio::test]
     async fn search_no_results() {
-        let conn = crate::test_helpers::test_db().await;
+        let (_db, conn) = crate::test_helpers::test_db().await;
         seed_drawers(&conn).await;
         let results = search_memories(&conn, "elephant", None, None, 10)
             .await

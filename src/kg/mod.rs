@@ -43,7 +43,7 @@ mod async_tests {
 
     #[tokio::test]
     async fn add_entity_inserts_and_returns_id() {
-        let conn = crate::test_helpers::test_db().await;
+        let (_db, conn) = crate::test_helpers::test_db().await;
         let id = add_entity(&conn, "Alice Smith", "person", None)
             .await
             .expect("add_entity");
@@ -61,7 +61,7 @@ mod async_tests {
 
     #[tokio::test]
     async fn add_triple_creates_entities_automatically() {
-        let conn = crate::test_helpers::test_db().await;
+        let (_db, conn) = crate::test_helpers::test_db().await;
         let _tid = add_triple(
             &conn,
             &TripleParams {
@@ -87,7 +87,7 @@ mod async_tests {
 
     #[tokio::test]
     async fn add_triple_dedup_returns_existing_id() {
-        let conn = crate::test_helpers::test_db().await;
+        let (_db, conn) = crate::test_helpers::test_db().await;
         let params = TripleParams {
             subject: "Bob",
             predicate: "likes",
@@ -105,7 +105,7 @@ mod async_tests {
 
     #[tokio::test]
     async fn invalidate_sets_valid_to() {
-        let conn = crate::test_helpers::test_db().await;
+        let (_db, conn) = crate::test_helpers::test_db().await;
         let _tid = add_triple(
             &conn,
             &TripleParams {
