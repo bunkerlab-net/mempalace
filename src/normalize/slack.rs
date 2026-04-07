@@ -6,8 +6,12 @@ use super::messages_to_transcript;
 
 /// Try to parse a Slack JSON message export into transcript text.
 ///
+/// Valid messages are JSON objects with `type == "message"`, non-empty `text`,
+/// and non-empty `user` (or `username`) id. Non-objects, non-message types,
+/// empty text, and empty user fields are silently skipped.
+///
 /// Assigns the first user as `"user"` and alternates role assignment for
-/// subsequent users. Returns `None` if fewer than 2 messages.
+/// subsequent users. Returns `None` if fewer than 2 valid messages.
 pub fn try_parse(data: &serde_json::Value) -> Option<String> {
     let items = data.as_array()?;
     let mut messages: Vec<(String, String)> = Vec::new();
