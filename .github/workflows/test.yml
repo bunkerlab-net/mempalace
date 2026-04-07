@@ -1,4 +1,4 @@
-name: Lint
+name: Test
 
 on:
   workflow_call:
@@ -6,8 +6,8 @@ on:
 permissions: {}
 
 jobs:
-  lint:
-    name: Lint
+  test:
+    name: Test
     runs-on: ubuntu-24.04
 
     permissions:
@@ -22,7 +22,7 @@ jobs:
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
         with:
           toolchain: stable
-          components: clippy, rustfmt
+          components: llvm-tools-preview
 
       - name: Capture rustc fingerprint
         id: rustc
@@ -42,13 +42,15 @@ jobs:
         uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            ~/.cargo
             target
-          key: ${{ runner.os }}-cargo-lint-${{ steps.rustc.outputs.fingerprint }}-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-test-${{ steps.rustc.outputs.fingerprint }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-lint-
+            ${{ runner.os }}-cargo-test
 
-      - run: cargo clippy
-      - run: cargo fmt --check
-      - run: hk check --all --skip-step no_commit_protected_branch
+      - name: Install Binstall
+        run: curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
+      - name: Install Nextest
+        run: cargo binstall -y --force cargo-nextest cargo-llvm-cov
+
+      - run: cargo nextest run
