@@ -40,4 +40,17 @@ jobs:
           install: true
           version: ${{ env.MISE_VERISON }}
 
+      - name: Cache Cargo
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - run: cargo clippy
+      - run: cargo fmt --check
       - run: hk check --all --skip-step no_commit_protected_branch
