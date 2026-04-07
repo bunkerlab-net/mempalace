@@ -3,7 +3,7 @@
 A local-first memory palace for AI assistants. Single static binary backed by embedded SQLite (turso).
 No Python, no ChromaDB, no API keys.
 
-**Drop-in replacement for [mempalace](https://github.com/milla-jovovich/mempalace) with a ~13MB binary instead of a ~100MB Python environment.**
+**Drop-in replacement for [milla-jovovich/mempalace](https://github.com/milla-jovovich/mempalace) with a ~13MB binary instead of a ~100MB Python environment.**
 
 ---
 
