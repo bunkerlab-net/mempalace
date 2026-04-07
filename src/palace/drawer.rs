@@ -145,7 +145,6 @@ pub struct DrawerParams<'a> {
     pub ingest_mode: &'a str,
 }
 
-/// Add a drawer and index its words.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,6 +290,7 @@ mod async_tests {
     }
 }
 
+/// Add a drawer and index its words.
 pub async fn add_drawer(conn: &Connection, p: &DrawerParams<'_>) -> Result<bool> {
     // SQLite only has i64 integers, so we cast chunk_index (usize) to i32 at the SQL boundary.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
