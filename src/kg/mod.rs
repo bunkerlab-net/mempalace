@@ -1,3 +1,5 @@
+//! Temporal knowledge graph — entities, relationship triples, and time-bounded facts.
+
 pub mod query;
 
 use turso::Connection;
@@ -8,6 +10,133 @@ use crate::error::Result;
 /// Normalize an entity name to an ID: lowercase, spaces→underscores, strip apostrophes.
 pub fn entity_id(name: &str) -> String {
     name.to_lowercase().replace(' ', "_").replace('\'', "")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn entity_id_lowercases_and_replaces_spaces() {
+        assert_eq!(entity_id("John Doe"), "john_doe");
+    }
+
+    #[test]
+    fn entity_id_strips_apostrophes() {
+        assert_eq!(entity_id("O'Brien"), "obrien");
+    }
+
+    #[test]
+    fn entity_id_already_normalized() {
+        assert_eq!(entity_id("simple"), "simple");
+    }
+
+    #[test]
+    fn entity_id_empty_string() {
+        assert_eq!(entity_id(""), "");
+    }
+}
+
+#[cfg(test)]
+mod async_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn add_entity_inserts_and_returns_id() {
+        let conn = crate::test_helpers::test_db().await;
+        let id = add_entity(&conn, "Alice Smith", "person", None)
+            .await
+            .expect("add_entity");
+        assert_eq!(id, "alice_smith");
+
+        let rows = crate::db::query_all(
+            &conn,
+            "SELECT name FROM entities WHERE id = ?1",
+            turso::params!["alice_smith"],
+        )
+        .await
+        .expect("query");
+        assert_eq!(rows.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn add_triple_creates_entities_automatically() {
+        let conn = crate::test_helpers::test_db().await;
+        let _tid = add_triple(
+            &conn,
+            &TripleParams {
+                subject: "Alice",
+                predicate: "works at",
+                object: "Acme Corp",
+                valid_from: Some("2024-01-01"),
+                valid_to: None,
+                confidence: 0.9,
+                source_closet: None,
+                source_file: None,
+            },
+        )
+        .await
+        .expect("add_triple");
+
+        // Both entities should exist
+        let entities = crate::db::query_all(&conn, "SELECT id FROM entities ORDER BY id", ())
+            .await
+            .expect("query");
+        assert_eq!(entities.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn add_triple_dedup_returns_existing_id() {
+        let conn = crate::test_helpers::test_db().await;
+        let params = TripleParams {
+            subject: "Bob",
+            predicate: "likes",
+            object: "Rust",
+            valid_from: None,
+            valid_to: None,
+            confidence: 1.0,
+            source_closet: None,
+            source_file: None,
+        };
+        let id1 = add_triple(&conn, &params).await.expect("first");
+        let id2 = add_triple(&conn, &params).await.expect("second");
+        assert_eq!(id1, id2);
+    }
+
+    #[tokio::test]
+    async fn invalidate_sets_valid_to() {
+        let conn = crate::test_helpers::test_db().await;
+        let _tid = add_triple(
+            &conn,
+            &TripleParams {
+                subject: "Carol",
+                predicate: "works at",
+                object: "OldCo",
+                valid_from: None,
+                valid_to: None,
+                confidence: 1.0,
+                source_closet: None,
+                source_file: None,
+            },
+        )
+        .await
+        .expect("add");
+
+        invalidate(&conn, "Carol", "works at", "OldCo", Some("2024-06-01"))
+            .await
+            .expect("invalidate");
+
+        let rows = crate::db::query_all(
+            &conn,
+            "SELECT valid_to FROM triples WHERE subject = 'carol' AND predicate = 'works_at'",
+            (),
+        )
+        .await
+        .expect("query");
+        assert_eq!(rows.len(), 1);
+        let vt: String = rows[0].get(0).expect("get valid_to");
+        assert_eq!(vt, "2024-06-01");
+    }
 }
 
 /// Add or update an entity node.
@@ -30,13 +159,21 @@ pub async fn add_entity(
 
 /// Parameters for [`add_triple`].
 pub struct TripleParams<'a> {
+    /// The entity performing or originating the relationship.
     pub subject: &'a str,
+    /// The relationship type (e.g. `"works_at"`, `"likes"`).
     pub predicate: &'a str,
+    /// The target entity of the relationship.
     pub object: &'a str,
+    /// When this fact became true (ISO date string, or `None` for unknown).
     pub valid_from: Option<&'a str>,
+    /// When this fact stopped being true (`None` if still current).
     pub valid_to: Option<&'a str>,
+    /// Confidence score between 0.0 and 1.0.
     pub confidence: f64,
+    /// Optional closet (drawer) that sourced this fact.
     pub source_closet: Option<&'a str>,
+    /// Optional file path that sourced this fact.
     pub source_file: Option<&'a str>,
 }
 

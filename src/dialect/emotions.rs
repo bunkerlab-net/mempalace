@@ -1,6 +1,8 @@
+//! Emotion and flag signal mappings for AAAK dialect detection.
+
 use std::collections::HashMap;
 
-/// Emotion long-form → short code mapping.
+/// Full emotion vocabulary: maps long-form names (e.g. `"vulnerability"`) to short codes (e.g. `"vul"`).
 #[allow(dead_code)]
 pub fn emotion_codes() -> HashMap<&'static str, &'static str> {
     HashMap::from([

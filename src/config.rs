@@ -1,3 +1,5 @@
+//! Configuration loading for global (`~/.mempalace/config.json`) and per-project (`mempalace.yaml`) settings.
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -5,15 +7,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 
-/// Global mempalace configuration (~/.mempalace/config.json).
+/// Global mempalace configuration (`~/.mempalace/config.json`).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MempalaceConfig {
+    /// Path to the palace `SQLite` database file.
     #[serde(default = "default_palace_path")]
     pub palace_path: PathBuf,
 
+    /// Collection name (legacy from Python version).
     #[serde(default = "default_collection_name")]
     pub collection_name: String,
 
+    /// Entity name → short code mappings for AAAK dialect compression.
     #[serde(default)]
     pub people_map: HashMap<String, String>,
 }
@@ -89,20 +94,66 @@ impl Default for MempalaceConfig {
     }
 }
 
-/// Per-project config (mempalace.yaml).
+/// Per-project config (`mempalace.yaml`).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ProjectConfig {
+    /// Wing name — the project-level namespace in the palace.
     pub wing: String,
+    /// Room definitions for this project.
     pub rooms: Vec<RoomConfig>,
 }
 
+/// A room within a wing — a category for filing drawers.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RoomConfig {
+    /// Room name (e.g. `"backend"`, `"frontend"`).
     pub name: String,
+    /// Human-readable description.
     #[serde(default)]
     pub description: String,
+    /// Keywords used for content-based room detection.
     #[serde(default)]
     pub keywords: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config_has_palace_path() {
+        let cfg = MempalaceConfig::default();
+        let path_str = cfg.palace_path.to_string_lossy();
+        assert!(path_str.contains(".mempalace"));
+        assert!(path_str.ends_with("palace.db"));
+    }
+
+    #[test]
+    fn config_dir_ends_with_mempalace() {
+        let dir = config_dir();
+        assert!(dir.to_string_lossy().ends_with(".mempalace"));
+    }
+
+    #[test]
+    fn project_config_yaml_round_trip() {
+        let yaml = r#"
+wing: my_project
+rooms:
+  - name: backend
+    description: Server code
+    keywords:
+      - api
+      - server
+  - name: frontend
+    description: UI code
+    keywords: []
+"#;
+        let cfg: ProjectConfig = serde_yaml::from_str(yaml).expect("parse yaml");
+        assert_eq!(cfg.wing, "my_project");
+        assert_eq!(cfg.rooms.len(), 2);
+        assert_eq!(cfg.rooms[0].name, "backend");
+        assert!(cfg.rooms[0].keywords.contains(&"api".to_string()));
+    }
 }
 
 impl ProjectConfig {

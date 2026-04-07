@@ -1,3 +1,5 @@
+//! AAAK Dialect — compresses plain text into symbolic memory format (~30x compression).
+
 pub mod emotions;
 pub mod topics;
 
@@ -17,12 +19,16 @@ pub struct Dialect {
     skip_names: Vec<String>,
 }
 
-/// Optional metadata for compression context.
+/// Optional metadata attached to the AAAK header line.
 #[derive(Default)]
 pub struct CompressMetadata<'a> {
+    /// Path of the original source file.
     pub source_file: &'a str,
+    /// Wing (project namespace).
     pub wing: &'a str,
+    /// Room (category).
     pub room: &'a str,
+    /// Date string (e.g. `"2024-01-15"`).
     pub date: &'a str,
 }
 

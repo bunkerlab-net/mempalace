@@ -238,3 +238,111 @@ pub fn detect_room(
 pub fn is_skip_dir(name: &str) -> bool {
     SKIP_DIRS.contains(&name)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn is_skip_dir_matches_known_dirs() {
+        assert!(is_skip_dir(".git"));
+        assert!(is_skip_dir("node_modules"));
+        assert!(is_skip_dir("target"));
+        assert!(is_skip_dir("__pycache__"));
+    }
+
+    #[test]
+    fn is_skip_dir_rejects_normal_dirs() {
+        assert!(!is_skip_dir("src"));
+        assert!(!is_skip_dir("lib"));
+        assert!(!is_skip_dir("app"));
+    }
+
+    #[test]
+    fn normalize_name_lowercases_and_replaces_dashes() {
+        assert_eq!(normalize_name("Front-End"), "front_end");
+        assert_eq!(normalize_name("MY-PROJECT"), "my_project");
+        assert_eq!(normalize_name("already_lower"), "already_lower");
+    }
+
+    #[test]
+    fn detect_room_priority1_folder_path() {
+        let rooms = vec![
+            RoomConfig {
+                name: "backend".to_string(),
+                description: String::new(),
+                keywords: vec!["backend".to_string()],
+            },
+            RoomConfig {
+                name: "frontend".to_string(),
+                description: String::new(),
+                keywords: vec!["frontend".to_string()],
+            },
+        ];
+        let project = PathBuf::from("/project");
+        let filepath = PathBuf::from("/project/backend/server.rs");
+        assert_eq!(detect_room(&filepath, "", &rooms, &project), "backend");
+    }
+
+    #[test]
+    fn detect_room_priority2_filename() {
+        let rooms = vec![RoomConfig {
+            name: "testing".to_string(),
+            description: String::new(),
+            keywords: vec!["testing".to_string()],
+        }];
+        let project = PathBuf::from("/project");
+        // File at root (no folder match), but filename contains room name
+        let filepath = PathBuf::from("/project/testing_utils.rs");
+        assert_eq!(detect_room(&filepath, "", &rooms, &project), "testing");
+    }
+
+    #[test]
+    fn detect_room_priority3_keyword_scoring() {
+        let rooms = vec![RoomConfig {
+            name: "backend".to_string(),
+            description: String::new(),
+            keywords: vec!["database".to_string(), "server".to_string()],
+        }];
+        let project = PathBuf::from("/project");
+        let filepath = PathBuf::from("/project/misc/stuff.txt");
+        let content =
+            "The database server handles requests and the database pool manages connections";
+        assert_eq!(detect_room(&filepath, content, &rooms, &project), "backend");
+    }
+
+    #[test]
+    fn detect_room_fallback_to_general() {
+        let rooms = vec![RoomConfig {
+            name: "backend".to_string(),
+            description: String::new(),
+            keywords: vec!["server".to_string()],
+        }];
+        let project = PathBuf::from("/project");
+        let filepath = PathBuf::from("/project/random/file.txt");
+        assert_eq!(
+            detect_room(&filepath, "nothing relevant here", &rooms, &project),
+            "general"
+        );
+    }
+
+    #[test]
+    fn detect_rooms_from_folders_creates_rooms() {
+        let dir = std::env::temp_dir().join("mempalace_test_rooms");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("frontend")).expect("create frontend");
+        std::fs::create_dir_all(dir.join("backend")).expect("create backend");
+        std::fs::create_dir_all(dir.join("docs")).expect("create docs");
+
+        let rooms = detect_rooms_from_folders(&dir);
+        let names: Vec<&str> = rooms.iter().map(|r| r.name.as_str()).collect();
+
+        assert!(names.contains(&"frontend"));
+        assert!(names.contains(&"backend"));
+        assert!(names.contains(&"documentation"));
+        assert!(names.contains(&"general"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

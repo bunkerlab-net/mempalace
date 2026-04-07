@@ -1,3 +1,5 @@
+//! Error types and `Result` alias for the mempalace crate.
+
 use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]

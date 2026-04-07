@@ -10,6 +10,9 @@ mod mcp;
 mod normalize;
 mod palace;
 mod schema;
+#[cfg(test)]
+#[allow(dead_code)]
+mod test_helpers;
 
 use clap::Parser;
 use cli::{Cli, Command};

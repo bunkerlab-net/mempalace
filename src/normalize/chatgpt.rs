@@ -1,8 +1,13 @@
+//! Parser for `ChatGPT` conversation JSON exports.
+
 use std::collections::HashSet;
 
 use super::messages_to_transcript;
 
-/// Parse `ChatGPT` conversations.json with mapping tree.
+/// Try to parse a `ChatGPT` conversations.json mapping tree into transcript text.
+///
+/// Traverses the node tree from root through `children` links, extracting
+/// user and assistant messages. Returns `None` if fewer than 2 messages.
 pub fn try_parse(data: &serde_json::Value) -> Option<String> {
     let mapping = data.as_object()?.get("mapping")?.as_object()?;
 
@@ -77,5 +82,52 @@ pub fn try_parse(data: &serde_json::Value) -> Option<String> {
         Some(messages_to_transcript(&refs))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_chatgpt_mapping_tree() {
+        let data: serde_json::Value = serde_json::from_str(
+            r#"{
+                "mapping": {
+                    "root": {
+                        "parent": null,
+                        "message": null,
+                        "children": ["msg1"]
+                    },
+                    "msg1": {
+                        "parent": "root",
+                        "message": {
+                            "author": {"role": "user"},
+                            "content": {"parts": ["what is rust?"]}
+                        },
+                        "children": ["msg2"]
+                    },
+                    "msg2": {
+                        "parent": "msg1",
+                        "message": {
+                            "author": {"role": "assistant"},
+                            "content": {"parts": ["Rust is a systems programming language."]}
+                        },
+                        "children": []
+                    }
+                }
+            }"#,
+        )
+        .expect("valid json");
+        let result = try_parse(&data).expect("should parse");
+        assert!(result.contains("> what is rust?"));
+        assert!(result.contains("Rust is a systems programming language."));
+    }
+
+    #[test]
+    fn returns_none_without_mapping() {
+        let data: serde_json::Value =
+            serde_json::from_str(r#"{"title":"chat"}"#).expect("valid json");
+        assert!(try_parse(&data).is_none());
     }
 }

@@ -1,3 +1,5 @@
+//! Topic extraction for AAAK dialect compression.
+
 use std::collections::{HashMap, HashSet};
 
 use regex::Regex;

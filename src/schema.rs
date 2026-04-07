@@ -1,3 +1,5 @@
+//! `SQLite` schema DDL — creates the five core tables and their indexes.
+
 use turso::Connection;
 
 use crate::error::Result;
@@ -67,6 +69,7 @@ CREATE TABLE IF NOT EXISTS compressed (
 );
 ";
 
+/// Create all tables and indexes if they don't already exist.
 pub async fn ensure_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(SCHEMA).await?;
     Ok(())

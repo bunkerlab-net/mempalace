@@ -1,3 +1,5 @@
+//! CLI command definitions and handlers for the `mempalace` binary.
+
 pub mod compress;
 pub mod init;
 pub mod search;

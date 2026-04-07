@@ -1,3 +1,5 @@
+//! Knowledge graph query operations — entity lookup, timeline, and statistics.
+
 use serde::Serialize;
 use turso::Connection;
 
@@ -5,24 +7,39 @@ use super::entity_id;
 use crate::db;
 use crate::error::Result;
 
+/// A single fact (triple) returned from a knowledge graph query.
 #[derive(Debug, Serialize)]
 pub struct Fact {
+    /// Whether this is an `"outgoing"` or `"incoming"` relationship.
     pub direction: String,
+    /// The subject entity name.
     pub subject: String,
+    /// The relationship type.
     pub predicate: String,
+    /// The object entity name.
     pub object: String,
+    /// When this fact became true.
     pub valid_from: Option<String>,
+    /// When this fact stopped being true (`None` if still current).
     pub valid_to: Option<String>,
+    /// Confidence score (0.0–1.0).
     pub confidence: f64,
+    /// Whether this fact is currently active (no `valid_to`).
     pub current: bool,
 }
 
+/// Aggregate statistics about the knowledge graph.
 #[derive(Debug, Serialize)]
 pub struct KgStats {
+    /// Total entity count.
     pub entities: i64,
+    /// Total triple count.
     pub triples: i64,
+    /// Triples with no `valid_to` (still active).
     pub current_facts: i64,
+    /// Triples with a `valid_to` set.
     pub expired_facts: i64,
+    /// Distinct predicate values across all triples.
     pub relationship_types: Vec<String>,
 }
 

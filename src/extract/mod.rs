@@ -1,3 +1,6 @@
+//! Memory type classifier — extracts and classifies memories into five types:
+//! decision, preference, milestone, problem, and emotional.
+
 pub mod markers;
 
 use std::collections::HashSet;
@@ -10,8 +13,11 @@ use markers::{
 
 /// A classified memory extracted from text.
 pub struct Memory {
+    /// The extracted text content.
     pub content: String,
+    /// Classification: `"decision"`, `"preference"`, `"milestone"`, `"problem"`, or `"emotional"`.
     pub kind: String,
+    /// Sequential index among extracted memories.
     pub chunk_index: usize,
 }
 
@@ -373,6 +379,63 @@ mod tests {
         assert!(!memories.is_empty());
         // Resolved problem should be reclassified as milestone
         assert_eq!(memories[0].kind, "milestone");
+    }
+
+    #[test]
+    fn test_extract_prose_strips_code_blocks() {
+        let text = "Some prose here.\n```\nlet x = 1;\n```\nMore prose.";
+        let result = extract_prose(text);
+        assert!(result.contains("Some prose here."));
+        assert!(result.contains("More prose."));
+        assert!(!result.contains("let x = 1"));
+    }
+
+    #[test]
+    fn test_get_sentiment_positive() {
+        assert_eq!(
+            get_sentiment("I'm so proud and excited about this breakthrough"),
+            "positive"
+        );
+    }
+
+    #[test]
+    fn test_get_sentiment_negative() {
+        assert_eq!(
+            get_sentiment("The bug crashed everything and it's broken"),
+            "negative"
+        );
+    }
+
+    #[test]
+    fn test_get_sentiment_neutral() {
+        assert_eq!(get_sentiment("The meeting is at three o'clock"), "neutral");
+    }
+
+    #[test]
+    fn test_has_resolution_true() {
+        assert!(has_resolution("We fixed the issue by updating the config"));
+        assert!(has_resolution("After debugging, I figured it out"));
+        assert!(has_resolution("The solution was to increase pool size"));
+    }
+
+    #[test]
+    fn test_has_resolution_false() {
+        assert!(!has_resolution("The system is still broken"));
+        assert!(!has_resolution("We need to investigate further"));
+    }
+
+    #[test]
+    fn test_split_into_segments_by_paragraphs() {
+        let text = "First paragraph.\n\nSecond paragraph.\n\nThird paragraph.";
+        let segments = split_into_segments(text);
+        assert_eq!(segments.len(), 3);
+    }
+
+    #[test]
+    fn test_split_into_segments_by_turns() {
+        let text = "> question one\nanswer one\n> question two\nanswer two\n> question three\nanswer three";
+        let segments = split_into_segments(text);
+        assert!(segments.len() >= 3);
     }
 
     #[test]

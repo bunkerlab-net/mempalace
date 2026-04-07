@@ -1,6 +1,11 @@
+//! Parser for Claude.ai JSON conversation exports.
+
 use super::messages_to_transcript;
 
-/// Parse Claude.ai JSON export: [{"role": "user", "content": "..."}]
+/// Try to parse Claude.ai JSON export into transcript text.
+///
+/// Accepts either a JSON array of messages or an object with a `"messages"`
+/// or `"chat_messages"` key. Returns `None` if fewer than 2 messages.
 pub fn try_parse(data: &serde_json::Value) -> Option<String> {
     let items = if let Some(arr) = data.as_array() {
         arr.clone()
@@ -39,6 +44,40 @@ pub fn try_parse(data: &serde_json::Value) -> Option<String> {
         Some(messages_to_transcript(&refs))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_array_format() {
+        let data: serde_json::Value = serde_json::from_str(
+            r#"[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"}]"#,
+        )
+        .expect("valid json");
+        let result = try_parse(&data).expect("should parse");
+        assert!(result.contains("> hi"));
+        assert!(result.contains("hello"));
+    }
+
+    #[test]
+    fn parse_object_with_messages_key() {
+        let data: serde_json::Value = serde_json::from_str(
+            r#"{"messages":[{"role":"human","content":"q"},{"role":"ai","content":"a"}]}"#,
+        )
+        .expect("valid json");
+        let result = try_parse(&data).expect("should parse");
+        assert!(result.contains("> q"));
+        assert!(result.contains("a"));
+    }
+
+    #[test]
+    fn returns_none_for_unrecognized_format() {
+        let data: serde_json::Value =
+            serde_json::from_str(r#"{"something":"else"}"#).expect("valid json");
+        assert!(try_parse(&data).is_none());
     }
 }
 

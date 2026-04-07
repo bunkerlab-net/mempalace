@@ -1,3 +1,5 @@
+//! Core memory filing system — chunking, room detection, search, and graph traversal.
+
 pub mod chunker;
 pub mod convo_miner;
 pub mod drawer;

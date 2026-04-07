@@ -9,38 +9,55 @@ use crate::error::Result;
 /// A room node in the palace graph.
 #[derive(Debug, Clone, Serialize)]
 pub struct RoomNode {
+    /// Room name.
     pub room: String,
+    /// Wings that contain this room.
     pub wings: Vec<String>,
+    /// Total drawer count across all wings.
     pub count: usize,
 }
 
-/// A tunnel edge: a room that spans multiple wings.
+/// A tunnel edge: a room that spans multiple wings, connecting them.
 #[derive(Debug, Clone, Serialize)]
 pub struct TunnelEdge {
+    /// The shared room name.
     pub room: String,
+    /// First wing in the pair.
     pub wing_a: String,
+    /// Second wing in the pair.
     pub wing_b: String,
+    /// Total drawer count in this room.
     pub count: usize,
 }
 
-/// A traversal result entry.
+/// A single entry from a BFS traversal of the palace graph.
 #[derive(Debug, Clone, Serialize)]
 pub struct TraversalResult {
+    /// Room name.
     pub room: String,
+    /// Wings containing this room.
     pub wings: Vec<String>,
+    /// Drawer count.
     pub count: usize,
+    /// Number of hops from the start room (0 = start).
     pub hop: usize,
+    /// Wings shared with the previous hop that caused this connection.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connected_via: Option<Vec<String>>,
 }
 
-/// Palace graph statistics.
+/// Summary statistics about the palace graph.
 #[derive(Debug, Clone, Serialize)]
 pub struct GraphStats {
+    /// Total distinct rooms (excluding "general").
     pub total_rooms: usize,
+    /// Rooms that span two or more wings.
     pub tunnel_rooms: usize,
+    /// Total tunnel edges (wing-pair connections).
     pub total_edges: usize,
+    /// Room count per wing.
     pub rooms_per_wing: HashMap<String, usize>,
+    /// Top rooms by number of wings spanned.
     pub top_tunnels: Vec<RoomNode>,
 }
 
@@ -201,6 +218,63 @@ pub async fn find_tunnels(
     tunnels.sort_by(|a, b| b.count.cmp(&a.count));
     tunnels.truncate(50);
     Ok(tunnels)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn seed_graph(conn: &Connection) {
+        // Create drawers across wings and rooms to build a graph
+        for (id, wing, room) in [
+            ("g1", "proj_a", "backend"),
+            ("g2", "proj_a", "frontend"),
+            ("g3", "proj_b", "backend"), // "backend" spans both wings — tunnel
+            ("g4", "proj_b", "database"),
+        ] {
+            conn.execute(
+                "INSERT INTO drawers (id, wing, room, content) VALUES (?1, ?2, ?3, 'content')",
+                turso::params![id, wing, room],
+            )
+            .await
+            .expect("seed drawer");
+        }
+    }
+
+    #[tokio::test]
+    async fn build_graph_creates_nodes_and_edges() {
+        let conn = crate::test_helpers::test_db().await;
+        seed_graph(&conn).await;
+        let (nodes, edges) = build_graph(&conn).await.expect("build_graph");
+        // "backend" spans 2 wings, "frontend" in 1, "database" in 1
+        assert!(nodes.contains_key("backend"));
+        assert!(nodes.contains_key("frontend"));
+        assert!(nodes.contains_key("database"));
+        // "backend" creates a tunnel edge between proj_a and proj_b
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].room, "backend");
+    }
+
+    #[tokio::test]
+    async fn traverse_reaches_connected_rooms() {
+        let conn = crate::test_helpers::test_db().await;
+        seed_graph(&conn).await;
+        let results = traverse(&conn, "frontend", 2).await.expect("traverse");
+        // frontend (hop 0) → backend (hop 1, shared proj_a) → database (hop 2, shared proj_b)
+        assert!(!results.is_empty());
+        assert_eq!(results[0].room, "frontend");
+        assert_eq!(results[0].hop, 0);
+    }
+
+    #[tokio::test]
+    async fn find_tunnels_returns_multi_wing_rooms() {
+        let conn = crate::test_helpers::test_db().await;
+        seed_graph(&conn).await;
+        let tunnels = find_tunnels(&conn, None, None).await.expect("find_tunnels");
+        assert_eq!(tunnels.len(), 1);
+        assert_eq!(tunnels[0].room, "backend");
+        assert_eq!(tunnels[0].wings.len(), 2);
+    }
 }
 
 /// Summary statistics about the palace graph.

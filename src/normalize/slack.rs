@@ -1,8 +1,13 @@
+//! Parser for Slack JSON message exports.
+
 use std::collections::HashMap;
 
 use super::messages_to_transcript;
 
-/// Parse Slack JSON export: [{"type": "message", "user": "...", "text": "..."}]
+/// Try to parse a Slack JSON message export into transcript text.
+///
+/// Assigns the first user as `"user"` and alternates role assignment for
+/// subsequent users. Returns `None` if fewer than 2 messages.
 pub fn try_parse(data: &serde_json::Value) -> Option<String> {
     let items = data.as_array()?;
     let mut messages: Vec<(String, String)> = Vec::new();
@@ -56,5 +61,32 @@ pub fn try_parse(data: &serde_json::Value) -> Option<String> {
         Some(messages_to_transcript(&refs))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_slack_messages() {
+        let data: serde_json::Value = serde_json::from_str(
+            r#"[
+                {"type":"message","user":"U1","text":"hello team"},
+                {"type":"message","user":"U2","text":"hi there"}
+            ]"#,
+        )
+        .expect("valid json");
+        let result = try_parse(&data).expect("should parse");
+        assert!(result.contains("> hello team"));
+        assert!(result.contains("hi there"));
+    }
+
+    #[test]
+    fn returns_none_for_single_message() {
+        let data: serde_json::Value =
+            serde_json::from_str(r#"[{"type":"message","user":"U1","text":"alone"}]"#)
+                .expect("valid json");
+        assert!(try_parse(&data).is_none());
     }
 }

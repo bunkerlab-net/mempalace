@@ -6,12 +6,17 @@ use turso::Connection;
 use crate::db;
 use crate::error::Result;
 
-/// A single search result.
+/// A single search result from the inverted index.
 pub struct SearchResult {
+    /// The drawer's text content.
     pub text: String,
+    /// The wing (project namespace) this drawer belongs to.
     pub wing: String,
+    /// The room (category) this drawer belongs to.
     pub room: String,
+    /// Original source filename (basename only).
     pub source_file: String,
+    /// Relevance score — sum of matched word counts.
     pub relevance: f64,
 }
 
@@ -126,6 +131,125 @@ fn tokenize_query(query: &str) -> Vec<String> {
         .map(str::to_lowercase)
         .filter(|w| !is_stop_word(w))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tokenize_query_basic() {
+        let tokens = tokenize_query("rust programming language");
+        assert!(tokens.contains(&"rust".to_string()));
+        assert!(tokens.contains(&"programming".to_string()));
+        assert!(tokens.contains(&"language".to_string()));
+    }
+
+    #[test]
+    fn tokenize_query_filters_stop_words() {
+        let tokens = tokenize_query("the and for");
+        assert!(tokens.is_empty());
+    }
+
+    #[test]
+    fn tokenize_query_empty_input() {
+        assert!(tokenize_query("").is_empty());
+        assert!(tokenize_query("   ").is_empty());
+    }
+
+    #[test]
+    fn tokenize_query_mixed_content_and_stop_words() {
+        let tokens = tokenize_query("the quick brown fox");
+        // "the" is stop word, "fox" is < 3? no it's 3 chars so it passes
+        assert!(!tokens.contains(&"the".to_string()));
+        assert!(tokens.contains(&"quick".to_string()));
+        assert!(tokens.contains(&"brown".to_string()));
+        assert!(tokens.contains(&"fox".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod async_tests {
+    use super::*;
+
+    async fn seed_drawers(conn: &Connection) {
+        // Insert two drawers with indexed words
+        crate::palace::drawer::add_drawer(
+            conn,
+            &crate::palace::drawer::DrawerParams {
+                id: "s1",
+                wing: "project_a",
+                room: "backend",
+                content: "rust programming language is fast and safe",
+                source_file: "main.rs",
+                chunk_index: 0,
+                added_by: "test",
+                ingest_mode: "projects",
+            },
+        )
+        .await
+        .expect("seed s1");
+
+        crate::palace::drawer::add_drawer(
+            conn,
+            &crate::palace::drawer::DrawerParams {
+                id: "s2",
+                wing: "project_b",
+                room: "frontend",
+                content: "react programming framework with components",
+                source_file: "app.tsx",
+                chunk_index: 0,
+                added_by: "test",
+                ingest_mode: "projects",
+            },
+        )
+        .await
+        .expect("seed s2");
+    }
+
+    #[tokio::test]
+    async fn search_single_word() {
+        let conn = crate::test_helpers::test_db().await;
+        seed_drawers(&conn).await;
+        let results = search_memories(&conn, "rust", None, None, 10)
+            .await
+            .expect("search");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].wing, "project_a");
+    }
+
+    #[tokio::test]
+    async fn search_multi_word_relevance() {
+        let conn = crate::test_helpers::test_db().await;
+        seed_drawers(&conn).await;
+        // "programming" appears in both, but searching "rust programming" should rank s1 higher
+        let results = search_memories(&conn, "rust programming", None, None, 10)
+            .await
+            .expect("search");
+        assert!(!results.is_empty());
+        assert_eq!(results[0].wing, "project_a");
+    }
+
+    #[tokio::test]
+    async fn search_with_wing_filter() {
+        let conn = crate::test_helpers::test_db().await;
+        seed_drawers(&conn).await;
+        let results = search_memories(&conn, "programming", Some("project_b"), None, 10)
+            .await
+            .expect("search");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].room, "frontend");
+    }
+
+    #[tokio::test]
+    async fn search_no_results() {
+        let conn = crate::test_helpers::test_db().await;
+        seed_drawers(&conn).await;
+        let results = search_memories(&conn, "elephant", None, None, 10)
+            .await
+            .expect("search");
+        assert!(results.is_empty());
+    }
 }
 
 fn is_stop_word(word: &str) -> bool {

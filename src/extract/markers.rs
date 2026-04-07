@@ -1,4 +1,8 @@
-/// Marker regex patterns for each memory type.
+//! Regex marker patterns used by the memory type classifier.
+//!
+//! Each constant is an array of regex patterns that signal a particular memory type.
+
+/// Patterns indicating decision-making: choices, trade-offs, rationale.
 pub const DECISION_MARKERS: &[&str] = &[
     r"\blet'?s (use|go with|try|pick|choose|switch to)\b",
     r"\bwe (should|decided|chose|went with|picked|settled on)\b",
@@ -23,6 +27,7 @@ pub const DECISION_MARKERS: &[&str] = &[
     r"\bdefault\b",
 ];
 
+/// Patterns indicating personal preferences: coding style, tool choices, conventions.
 pub const PREFERENCE_MARKERS: &[&str] = &[
     r"\bi prefer\b",
     r"\balways use\b",
@@ -42,6 +47,7 @@ pub const PREFERENCE_MARKERS: &[&str] = &[
     r"\buse\b.*\binstead of\b",
 ];
 
+/// Patterns indicating milestones: breakthroughs, completions, achievements.
 pub const MILESTONE_MARKERS: &[&str] = &[
     r"\bit works\b",
     r"\bit worked\b",
@@ -79,6 +85,7 @@ pub const MILESTONE_MARKERS: &[&str] = &[
     r"\d+% (reduction|improvement|faster|better|smaller)",
 ];
 
+/// Patterns indicating problems: bugs, errors, failures, and their resolutions.
 pub const PROBLEM_MARKERS: &[&str] = &[
     r"\b(bug|error|crash|fail|broke|broken|issue|problem)\b",
     r"\bdoesn'?t work\b",
@@ -100,6 +107,7 @@ pub const PROBLEM_MARKERS: &[&str] = &[
     r"\b(had|need) to\b.*\binstead\b",
 ];
 
+/// Patterns indicating emotional content: feelings, vulnerability, personal expression.
 pub const EMOTION_MARKERS: &[&str] = &[
     r"\blove\b",
     r"\bscared\b",

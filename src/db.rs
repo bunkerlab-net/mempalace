@@ -1,3 +1,5 @@
+//! Database connection helpers for the embedded turso/SQLite engine.
+
 use turso::{Builder, Connection, Database};
 
 use crate::error::Result;
