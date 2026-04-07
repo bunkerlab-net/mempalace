@@ -45,7 +45,7 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-test-${{ steps.rustc.outputs.fingerprint }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-test
+            ${{ runner.os }}-cargo-test-
 
       - name: Install Binstall
         run: curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
