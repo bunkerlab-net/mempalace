@@ -33,7 +33,7 @@ jobs:
         env:
           MISE_JOBS: 4
         with:
-          cache_key_prefix: mise-lint
+          cache_key_prefix: mise
           cache: true
           experimental: true
           install: true
