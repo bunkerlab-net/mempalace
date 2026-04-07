@@ -3,7 +3,7 @@
 A local-first memory palace for AI assistants. Single static binary backed by embedded SQLite (turso).
 No Python, no ChromaDB, no API keys.
 
-**Drop-in replacement for [mempalace](https://github.com/milla-jovovich/mempalace) with a ~2MB binary instead of a ~100MB Python environment.**
+**Drop-in replacement for [mempalace](https://github.com/milla-jovovich/mempalace) with a ~13MB binary instead of a ~100MB Python environment.**
 
 ---
 
@@ -422,7 +422,7 @@ src/
 | Search                         | ChromaDB semantic / embedding | Keyword inverted index (BM25-style) |
 | `mempalace_search` score field | `similarity` (0–1 cosine)     | `similarity` (word hit count)       |
 | Storage                        | ChromaDB + SQLite             | Single turso (SQLite) file          |
-| Binary size                    | ~100MB Python env             | ~2MB binary                         |
+| Binary size                    | ~100MB Python env             | ~13MB binary                        |
 | Concurrency                    | SQLite locking issues         | Resolved at turso layer             |
 | Duplicate detection            | 0.9 cosine threshold          | Keyword overlap threshold           |
 | Entity registry                | Wikipedia lookups             | Heuristic only (deferred)           |
