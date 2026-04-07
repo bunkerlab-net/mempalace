@@ -1,18 +1,12 @@
 name: Lint
 
 on:
-  push:
-    branches:
-      - master
-  pull_request:
-    branches:
-      - master
+  workflow_call:
 
 permissions: {}
 
 jobs:
-  lint:
-    name: Lint
+  run:
     runs-on: ubuntu-24.04
 
     permissions:
@@ -38,11 +32,10 @@ jobs:
         env:
           MISE_JOBS: 4
         with:
-          cache_key_prefix: mise-lint
+          cache_key_prefix: mise
           cache: true
           experimental: true
           install: true
-          version: ${{ env.MISE_VERISON }}
 
       - name: Cache Cargo
         uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
@@ -51,9 +44,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ steps.rustc.outputs.fingerprint }}-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-lint-${{ steps.rustc.outputs.fingerprint }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-
+            ${{ runner.os }}-cargo-lint-
 
       - run: cargo clippy
       - run: cargo fmt --check

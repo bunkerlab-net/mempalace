@@ -1,0 +1,25 @@
+name: Cargo
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+
+permissions: {}
+
+jobs:
+  lint:
+    name: Lint
+    uses: ./.github/workflows/lint.yml
+    permissions:
+      contents: read
+
+  test:
+    name: Test
+    needs: [lint]
+    uses: ./.github/workflows/test.yml
+    permissions:
+      contents: read

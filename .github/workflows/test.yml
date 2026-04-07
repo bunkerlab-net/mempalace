@@ -1,0 +1,66 @@
+name: Test
+
+on:
+  workflow_call:
+
+permissions: {}
+
+jobs:
+  run:
+    runs-on: ubuntu-24.04
+
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: stable
+          components: llvm-tools-preview
+
+      - name: Capture rustc fingerprint
+        id: rustc
+        run: echo "fingerprint=$(rustc -Vv | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Mise
+        uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4.0.1
+        env:
+          MISE_JOBS: 4
+        with:
+          cache_key_prefix: mise
+          cache: true
+          experimental: true
+          install: true
+
+      - name: Cache Cargo
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: |
+            ~/.cargo
+            target
+          key: ${{ runner.os }}-cargo-test-${{ steps.rustc.outputs.fingerprint }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-test-
+
+      - name: Install Binstall
+        env:
+          BINSTALL_VERSION: v1.17.9 # https://github.com/cargo-bins/cargo-binstall/releases/latest
+          BINSTALL_SHA: c2e963fbab3bdd8653b59c28d349bf85740cf4998e5e398d250dcd2884cd667d
+        run: |
+          commit_sha=$(curl -fsSL --proto '=https' --tlsv1.2 \
+            "https://api.github.com/repos/cargo-bins/cargo-binstall/git/ref/tags/${BINSTALL_VERSION}" \
+            | jq -r '.object.sha')
+          curl -fsSL --proto '=https' --tlsv1.2 \
+            "https://raw.githubusercontent.com/cargo-bins/cargo-binstall/${commit_sha}/install-from-binstall-release.sh" \
+            -o /tmp/binstall-install.sh
+          echo "${BINSTALL_SHA}  /tmp/binstall-install.sh" | sha256sum --check
+          bash /tmp/binstall-install.sh
+      - name: Install Nextest
+        run: cargo binstall -y --force cargo-nextest cargo-llvm-cov
+
+      - run: cargo nextest run
