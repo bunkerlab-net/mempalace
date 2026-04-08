@@ -49,9 +49,8 @@ fn two_connections_to_same_file() {
         let path_str = db_path.to_str().expect("non-utf8 path");
 
         // First "process" opens the database and holds the connection.
-        let (db1, conn1) = open_db_setup(path_str).await;
-        // Keep db1 alive so the lock stays held for the duration of the test.
-        let _db1 = db1;
+        // Keep _db1 alive so the lock stays held for the duration of the test.
+        let (_db1, conn1) = open_db_setup(path_str).await;
 
         conn1
             .execute(
