@@ -11,6 +11,13 @@ on:
 permissions: {}
 
 jobs:
+  audit:
+    name: Audit
+    uses: ./.github/workflows/audit.yml
+    permissions:
+      contents: read
+      issues: write
+
   lint:
     name: Lint
     uses: ./.github/workflows/lint.yml
