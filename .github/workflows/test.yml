@@ -74,6 +74,8 @@ jobs:
           echo "${BINSTALL_SHA}  /tmp/binstall-install.sh" | shasum -a 256 --check
           bash /tmp/binstall-install.sh
       - name: Install Nextest
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: cargo binstall -y --force cargo-nextest cargo-llvm-cov
 
       - run: cargo nextest run
