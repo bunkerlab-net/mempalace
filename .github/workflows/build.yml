@@ -1,0 +1,56 @@
+name: Build
+
+on:
+  workflow_call:
+
+permissions: {}
+
+jobs:
+  run:
+    runs-on: ${{ matrix.runs-on }}
+
+    permissions:
+      contents: read
+
+    strategy:
+      matrix:
+        runs-on: [ubuntu-24.04, ubuntu-24.04-arm, macos-26]
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+
+      - name: Capture rustc fingerprint
+        id: rustc
+        run: echo "fingerprint=$(rustc -Vv | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Cargo
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-build-${{ steps.rustc.outputs.fingerprint }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-build-
+
+      - run: cargo build --release
+
+      - id: artifact-name
+        run: |-
+          os=$(echo "${{ runner.os }}" | tr '[:upper:]' '[:lower:]')
+          arch=$(uname -m)
+          echo "name=mempalace-$os-$arch" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: ${{ steps.artifact-name.outputs.name }}
+          path: target/release/mempalace
