@@ -10,7 +10,7 @@ categories = ["command-line-utilities", "database"]
 rust-version = "1.85"
 
 [lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
 warnings = "deny"
 
 [lints.clippy]
