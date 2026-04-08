@@ -2,6 +2,8 @@ name: Audit
 
 on:
   workflow_call:
+  schedule:
+    - cron: "0 0 * * *" # daily at midnight
 
 permissions: {}
 
