@@ -15,6 +15,13 @@ jobs:
     strategy:
       matrix:
         runs-on: [ubuntu-24.04, ubuntu-24.04-arm, macos-26]
+        include:
+          - runs-on: ubuntu-24.04
+            arch: x86-64
+          - runs-on: ubuntu-24.04-arm
+            arch: arm64
+          - runs-on: macos-26
+            arch: arm64
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -29,7 +36,7 @@ jobs:
 
       - name: Capture rustc fingerprint
         id: rustc
-        run: echo "fingerprint=$(rustc -Vv | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+        run: echo "fingerprint=$(rustc -Vv | shasum -a 256 | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       - name: Setup Mise
         uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4.0.1
@@ -47,9 +54,9 @@ jobs:
           path: |
             ~/.cargo
             target
-          key: ${{ runner.os }}-cargo-test-${{ runner.arch }}-${{ steps.rustc.outputs.fingerprint }}-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-test-${{ matrix.arch }}-${{ steps.rustc.outputs.fingerprint }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-test-${{ runner.arch }}-
+            ${{ runner.os }}-cargo-test-${{ matrix.arch }}-
 
       - name: Install Binstall
         env:
