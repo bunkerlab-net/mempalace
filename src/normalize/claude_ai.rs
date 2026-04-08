@@ -14,7 +14,8 @@ use super::messages_to_transcript;
 pub fn try_parse(data: &serde_json::Value) -> Option<String> {
     let items = if let Some(arr) = data.as_array() {
         // Privacy export: array of conversation objects, each with a chat_messages key.
-        if arr.first().and_then(|v| v.get("chat_messages")).is_some() {
+        // Check if ANY element contains "chat_messages" to detect privacy export format.
+        if arr.iter().any(|v| v.get("chat_messages").is_some()) {
             arr.iter()
                 .filter_map(|conv| conv.get("chat_messages")?.as_array())
                 .flatten()

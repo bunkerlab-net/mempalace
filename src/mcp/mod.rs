@@ -94,9 +94,15 @@ async fn handle_request(conn: &Connection, request: &Value) -> Option<Value> {
 
             let result = tools::dispatch(conn, tool_name, &tool_args).await;
 
-            // Sanitize: log real error to stderr, return generic message to client.
-            let sanitized = if result.get("error").is_some() {
-                eprintln!("tool error [{tool_name}]: {result}");
+            // Sanitize: log minimal error metadata to stderr, return generic message to client.
+            let sanitized = if let Some(error_val) = result.get("error") {
+                let error_msg = error_val
+                    .as_str()
+                    .unwrap_or("unknown")
+                    .chars()
+                    .take(100)
+                    .collect::<String>();
+                eprintln!("tool error: tool={tool_name} error={error_msg}");
                 json!({"error": "Internal tool error"})
             } else {
                 result

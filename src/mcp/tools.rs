@@ -52,8 +52,14 @@ fn int_arg(args: &Value, key: &str, default: i64) -> i64 {
         .and_then(|v| {
             v.as_i64()
                 .or_else(|| {
-                    #[allow(clippy::cast_possible_truncation)]
-                    v.as_f64().map(|f| f as i64)
+                    v.as_f64().and_then(|f| {
+                        if f.is_finite() {
+                            #[allow(clippy::cast_possible_truncation)]
+                            Some(f as i64)
+                        } else {
+                            None
+                        }
+                    })
                 })
                 .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
         })
