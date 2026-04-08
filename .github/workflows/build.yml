@@ -25,7 +25,6 @@ jobs:
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
         with:
           toolchain: stable
-          components: clippy, rustfmt
 
       - name: Capture rustc fingerprint
         id: rustc
@@ -38,19 +37,20 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-build-${{ steps.rustc.outputs.fingerprint }}-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-build-${{ runner.arch }}-${{ steps.rustc.outputs.fingerprint }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-build-
+            ${{ runner.os }}-cargo-build-${{ runner.arch }}-
 
       - run: cargo build --release
 
       - id: artifact-name
         run: |-
           os=$(echo "${{ runner.os }}" | tr '[:upper:]' '[:lower:]')
-          arch=$(uname -m)
+          arch=${{ runner.arch }}
           echo "name=mempalace-$os-$arch" >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
+          if-no-files-found: error
           name: ${{ steps.artifact-name.outputs.name }}
           path: target/release/mempalace
