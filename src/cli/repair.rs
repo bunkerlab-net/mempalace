@@ -55,7 +55,7 @@ pub async fn run(conn: &Connection, palace_path: &Path) -> Result<()> {
         .collect();
 
     // Clear and rebuild within a transaction for atomicity
-    conn.execute("BEGIN TRANSACTION", ()).await?;
+    conn.execute("BEGIN IMMEDIATE", ()).await?;
 
     if let Err(e) = async {
         conn.execute("DELETE FROM drawer_words", ()).await?;

@@ -112,12 +112,12 @@ mod tests {
     #[test]
     fn parse_object_with_messages_key() {
         let data: serde_json::Value = serde_json::from_str(
-            r#"{"messages":[{"role":"human","content":"q"},{"role":"ai","content":"a"}]}"#,
+            r#"{"messages":[{"role":"human","content":"q"},{"role":"ai","content":"assistant_reply_42"}]}"#,
         )
         .expect("valid json");
         let result = try_parse(&data).expect("should parse");
         assert!(result.contains("> q"));
-        assert!(result.contains('a'));
+        assert!(result.contains("assistant_reply_42"));
     }
 
     #[test]
