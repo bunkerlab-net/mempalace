@@ -96,15 +96,15 @@ async fn handle_request(conn: &Connection, request: &Value) -> Option<Value> {
             let result = tools::dispatch(conn, tool_name, &tool_args).await;
 
             // Sanitize: only mask genuinely fatal/unstructured tool errors.
-            // Preserve structured failures (e.g., {"success": false, "error": ...}).
+            // Preserve clean error-only responses and structured failures.
             let sanitized = if let Some(error_val) = result.get("error") {
-                // Check if this is a simple unstructured error or a structured failure
-                let is_unstructured = result
+                // Check if this is a clean error-only response: single "error" key with string value
+                let is_error_only = result
                     .as_object()
-                    .is_none_or(|obj| obj.len() == 1 || obj.get("success").is_none());
+                    .is_some_and(|obj| obj.len() == 1 && error_val.is_string());
 
-                if is_unstructured {
-                    // Unstructured error: sanitize it
+                if is_error_only {
+                    // Error-only with string value: return sanitized version
                     let error_msg = error_val
                         .as_str()
                         .unwrap_or("unknown")
@@ -112,10 +112,11 @@ async fn handle_request(conn: &Connection, request: &Value) -> Option<Value> {
                         .take(100)
                         .collect::<String>();
                     eprintln!("tool error: tool={tool_name} error={error_msg}");
-                    json!({"error": "Internal tool error"})
+                    json!({"error": error_msg})
                 } else {
-                    // Structured failure: keep it as-is
-                    result
+                    // Unstructured, complex, or non-string error: mask it
+                    eprintln!("tool error: tool={tool_name} error={error_val}");
+                    json!({"error": "Internal tool error"})
                 }
             } else {
                 result

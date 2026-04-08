@@ -54,7 +54,12 @@ fn int_arg(args: &Value, key: &str, default: i64) -> i64 {
                 .and_then(|n| if n > 0 { Some(n) } else { None })
                 .or_else(|| {
                     v.as_f64().and_then(|f| {
-                        if f.is_finite() && f.fract() == 0.0 && f > 0.0 {
+                        // cast_precision_loss: comparing i64::MAX as f64 is safe for a boundary check
+                        #[allow(clippy::cast_precision_loss)]
+                        let max_i64 = i64::MAX as f64;
+                        if f.is_finite() && f.fract() == 0.0 && f > 0.0 && f <= max_i64 {
+                            // cast_possible_truncation: safe here because we've verified f is finite,
+                            // whole, positive, and within i64::MAX bounds before casting
                             #[allow(clippy::cast_possible_truncation)]
                             Some(f as i64)
                         } else {
@@ -69,7 +74,13 @@ fn int_arg(args: &Value, key: &str, default: i64) -> i64 {
                             .and_then(|n| if n > 0 { Some(n) } else { None })
                             .or_else(|| {
                                 s.parse::<f64>().ok().and_then(|f| {
-                                    if f.is_finite() && f.fract() == 0.0 && f > 0.0 {
+                                    // cast_precision_loss: comparing i64::MAX as f64 is safe for a boundary check
+                                    #[allow(clippy::cast_precision_loss)]
+                                    let max_i64 = i64::MAX as f64;
+                                    if f.is_finite() && f.fract() == 0.0 && f > 0.0 && f <= max_i64
+                                    {
+                                        // cast_possible_truncation: safe here because we've verified f is finite,
+                                        // whole, positive, and within i64::MAX bounds before casting
                                         #[allow(clippy::cast_possible_truncation)]
                                         Some(f as i64)
                                     } else {
