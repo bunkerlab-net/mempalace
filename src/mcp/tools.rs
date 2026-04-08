@@ -287,7 +287,7 @@ async fn tool_add_drawer(conn: &Connection, args: &Value) -> Value {
     };
 
     if wing.is_empty() || room.is_empty() || content.is_empty() {
-        return json!({"success": false, "error": "wing, room, and content are required"});
+        return json!({"success": false, "error": "wing, room, and content are required", "public": true});
     }
 
     // Reject if a highly-similar drawer already exists (mirrors Python behaviour).
@@ -334,7 +334,7 @@ async fn tool_add_drawer(conn: &Connection, args: &Value) -> Value {
 async fn tool_delete_drawer(conn: &Connection, args: &Value) -> Value {
     let drawer_id = str_arg(args, "drawer_id");
     if drawer_id.is_empty() {
-        return json!({"success": false, "error": "drawer_id is required"});
+        return json!({"success": false, "error": "drawer_id is required", "public": true});
     }
 
     match conn
@@ -527,7 +527,7 @@ async fn tool_diary_write(conn: &Connection, args: &Value) -> Value {
     };
 
     if agent_name.is_empty() || entry.is_empty() {
-        return json!({"success": false, "error": "agent_name and entry are required"});
+        return json!({"success": false, "error": "agent_name and entry are required", "public": true});
     }
 
     let wing = format!("wing_{}", agent_name.to_lowercase().replace(' ', "_"));
@@ -561,7 +561,7 @@ async fn tool_diary_read(conn: &Connection, args: &Value) -> Value {
     let last_n = int_arg(args, "last_n", 10);
 
     if agent_name.is_empty() {
-        return json!({"error": "agent_name is required"});
+        return json!({"error": "agent_name is required", "public": true});
     }
 
     let wing = format!("wing_{}", agent_name.to_lowercase().replace(' ', "_"));

@@ -103,7 +103,6 @@ async fn handle_request(conn: &Connection, request: &Value) -> Option<Value> {
                     .get("public")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
-                let is_failure = result.get("success").and_then(Value::as_bool) == Some(false);
                 let error_msg: String = error_val
                     .as_str()
                     .unwrap_or("unknown")
@@ -111,7 +110,7 @@ async fn handle_request(conn: &Connection, request: &Value) -> Option<Value> {
                     .take(100)
                     .collect();
                 eprintln!("tool error: tool={tool_name} error={error_msg}");
-                if is_public || is_failure {
+                if is_public {
                     json!({"error": error_msg})
                 } else {
                     json!({"error": "Internal tool error"})

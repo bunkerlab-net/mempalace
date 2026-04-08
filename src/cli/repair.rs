@@ -39,25 +39,27 @@ pub async fn run(conn: &Connection, palace_path: &Path) -> Result<()> {
 
     println!("Backup created: {}", backup_path.display());
 
-    // Read all drawers
-    let rows = query_all(conn, "SELECT id, content FROM drawers", ()).await?;
-    let total = rows.len();
-    println!("Found {total} drawers to re-index");
-
-    // Collect id+content before clearing index (borrow lifetime)
-    let drawers: Vec<(String, String)> = rows
-        .iter()
-        .map(|row| {
-            let id: String = row.get(0).unwrap_or_default();
-            let content: String = row.get(1).unwrap_or_default();
-            (id, content)
-        })
-        .collect();
-
-    // Clear and rebuild within a transaction for atomicity
+    // Clear and rebuild within a transaction for atomicity.
+    // BEGIN IMMEDIATE is taken before the SELECT so the snapshot is protected
+    // by the same exclusive lock that performs the delete and rebuild.
     conn.execute("BEGIN IMMEDIATE", ()).await?;
 
     if let Err(e) = async {
+        let rows = query_all(conn, "SELECT id, content FROM drawers", ()).await?;
+        let total = rows.len();
+        println!("Found {total} drawers to re-index");
+
+        // Collect id+content before clearing index (borrow lifetime).
+        // Propagate column errors rather than silently producing empty IDs.
+        let drawers: Vec<(String, String)> = rows
+            .iter()
+            .map(|row| -> Result<(String, String)> {
+                let id: String = row.get(0)?;
+                let content: String = row.get(1)?;
+                Ok((id, content))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
         conn.execute("DELETE FROM drawer_words", ()).await?;
         println!("Cleared existing index");
 
@@ -68,6 +70,7 @@ pub async fn run(conn: &Connection, palace_path: &Path) -> Result<()> {
                 println!("  [{}/{}] re-indexed", i + 1, total);
             }
         }
+        println!("\nRepair complete: {total} drawers re-indexed");
         Ok::<(), crate::error::Error>(())
     }
     .await
@@ -81,6 +84,5 @@ pub async fn run(conn: &Connection, palace_path: &Path) -> Result<()> {
 
     conn.execute("COMMIT", ()).await?;
 
-    println!("\nRepair complete: {total} drawers re-indexed");
     Ok(())
 }
