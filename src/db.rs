@@ -17,7 +17,11 @@ pub async fn open_db(path: &str) -> Result<(Database, Connection)> {
     let conn = db.connect()?;
 
     // Only enable WAL for file-backed databases; in-memory DBs do not support it
-    if !path.is_empty() && path != ":memory:" {
+    let is_in_memory = path.is_empty()
+        || path == ":memory:"
+        || path.starts_with("file::memory:")
+        || (path.starts_with("file:") && path.contains("mode=memory"));
+    if !is_in_memory {
         let mut wal_rows = conn.query("PRAGMA journal_mode=WAL", ()).await?;
         while wal_rows.next().await?.is_some() {}
     }

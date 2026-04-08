@@ -1,8 +1,9 @@
 //! MCP server — JSON-RPC 2.0 over stdio exposing palace tools.
 //!
-//! Error handling policy: tool errors are logged to stderr with full detail but
-//! the client receives only a generic `"Internal tool error"` message so that
-//! internal paths and database details are never leaked over the protocol.
+//! Error handling policy: tool errors are logged to stderr with limited/truncated
+//! detail (first 100 chars) and the client receives only a generic `"Internal tool error"`
+//! message for unstructured errors, so that internal paths and database details are
+//! never leaked over the protocol.
 
 pub mod protocol;
 pub mod tools;
@@ -94,16 +95,28 @@ async fn handle_request(conn: &Connection, request: &Value) -> Option<Value> {
 
             let result = tools::dispatch(conn, tool_name, &tool_args).await;
 
-            // Sanitize: log minimal error metadata to stderr, return generic message to client.
+            // Sanitize: only mask genuinely fatal/unstructured tool errors.
+            // Preserve structured failures (e.g., {"success": false, "error": ...}).
             let sanitized = if let Some(error_val) = result.get("error") {
-                let error_msg = error_val
-                    .as_str()
-                    .unwrap_or("unknown")
-                    .chars()
-                    .take(100)
-                    .collect::<String>();
-                eprintln!("tool error: tool={tool_name} error={error_msg}");
-                json!({"error": "Internal tool error"})
+                // Check if this is a simple unstructured error or a structured failure
+                let is_unstructured = result
+                    .as_object()
+                    .is_none_or(|obj| obj.len() == 1 || obj.get("success").is_none());
+
+                if is_unstructured {
+                    // Unstructured error: sanitize it
+                    let error_msg = error_val
+                        .as_str()
+                        .unwrap_or("unknown")
+                        .chars()
+                        .take(100)
+                        .collect::<String>();
+                    eprintln!("tool error: tool={tool_name} error={error_msg}");
+                    json!({"error": "Internal tool error"})
+                } else {
+                    // Structured failure: keep it as-is
+                    result
+                }
             } else {
                 result
             };

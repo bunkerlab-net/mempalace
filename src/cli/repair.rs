@@ -10,18 +10,29 @@ use crate::palace::drawer;
 
 /// Backup the palace database and rebuild the inverted word index.
 pub async fn run(conn: &Connection, palace_path: &Path) -> Result<()> {
-    // Backup: copy main DB file and WAL sidecars to ensure a consistent snapshot
+    // Backup: checkpoint WAL to ensure backup is self-contained
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)", ()).await?;
+
     let backup_path = palace_path.with_extension("db.bak");
     std::fs::copy(palace_path, &backup_path)?;
+
+    // Build backup sidecar names from backup_path to avoid overwriting source files
+    let backup_filename = backup_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("palace.db.bak");
+    let backup_parent = backup_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
 
     let wal_path = palace_path.with_extension("db-wal");
     let shm_path = palace_path.with_extension("db-shm");
     if wal_path.exists() {
-        let backup_wal = backup_path.with_extension("db-wal");
+        let backup_wal = backup_parent.join(format!("{backup_filename}-wal"));
         std::fs::copy(&wal_path, &backup_wal)?;
     }
     if shm_path.exists() {
-        let backup_shm = backup_path.with_extension("db-shm");
+        let backup_shm = backup_parent.join(format!("{backup_filename}-shm"));
         std::fs::copy(&shm_path, &backup_shm)?;
     }
 
@@ -60,7 +71,10 @@ pub async fn run(conn: &Connection, palace_path: &Path) -> Result<()> {
     }
     .await
     {
-        conn.execute("ROLLBACK", ()).await?;
+        // Attempt rollback and preserve the original error
+        if let Err(rollback_err) = conn.execute("ROLLBACK", ()).await {
+            eprintln!("Rollback failed: {rollback_err}");
+        }
         return Err(e);
     }
 

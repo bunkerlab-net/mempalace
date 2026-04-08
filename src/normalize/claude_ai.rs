@@ -100,6 +100,19 @@ mod tests {
     }
 
     #[test]
+    fn parse_privacy_export_multiple_conversations() {
+        let data: serde_json::Value = serde_json::from_str(
+            r#"[{"chat_messages":[{"role":"user","content":"first"},{"role":"assistant","content":"reply1"}]},{"chat_messages":[{"role":"user","content":"second"},{"role":"assistant","content":"reply2"}]}]"#,
+        )
+        .expect("valid json");
+        let result = try_parse(&data).expect("should parse");
+        assert!(result.contains("> first"));
+        assert!(result.contains("reply1"));
+        assert!(result.contains("> second"));
+        assert!(result.contains("reply2"));
+    }
+
+    #[test]
     fn returns_none_for_unrecognized_format() {
         let data: serde_json::Value =
             serde_json::from_str(r#"{"something":"else"}"#).expect("valid json");

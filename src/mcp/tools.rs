@@ -42,18 +42,19 @@ fn str_arg<'a>(args: &'a Value, key: &str) -> &'a str {
     args.get(key).and_then(|v| v.as_str()).unwrap_or("")
 }
 
-/// Extract an integer argument, coercing floats and strings.
+/// Extract a positive integer argument, coercing floats and strings.
 ///
 /// MCP JSON transport sometimes delivers integers as floats (`5.0`) or strings
 /// (`"5"`). Trying all three representations keeps tool calls robust regardless
-/// of what the client sends.
+/// of what the client sends. Only accepts finite, whole, positive integers (>0).
 fn int_arg(args: &Value, key: &str, default: i64) -> i64 {
     args.get(key)
         .and_then(|v| {
             v.as_i64()
+                .and_then(|n| if n > 0 { Some(n) } else { None })
                 .or_else(|| {
                     v.as_f64().and_then(|f| {
-                        if f.is_finite() {
+                        if f.is_finite() && f.fract() == 0.0 && f > 0.0 {
                             #[allow(clippy::cast_possible_truncation)]
                             Some(f as i64)
                         } else {
@@ -61,7 +62,23 @@ fn int_arg(args: &Value, key: &str, default: i64) -> i64 {
                         }
                     })
                 })
-                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                .or_else(|| {
+                    v.as_str().and_then(|s| {
+                        s.parse::<i64>()
+                            .ok()
+                            .and_then(|n| if n > 0 { Some(n) } else { None })
+                            .or_else(|| {
+                                s.parse::<f64>().ok().and_then(|f| {
+                                    if f.is_finite() && f.fract() == 0.0 && f > 0.0 {
+                                        #[allow(clippy::cast_possible_truncation)]
+                                        Some(f as i64)
+                                    } else {
+                                        None
+                                    }
+                                })
+                            })
+                    })
+                })
         })
         .unwrap_or(default)
 }
