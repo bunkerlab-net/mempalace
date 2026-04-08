@@ -95,27 +95,24 @@ async fn handle_request(conn: &Connection, request: &Value) -> Option<Value> {
 
             let result = tools::dispatch(conn, tool_name, &tool_args).await;
 
-            // Sanitize: only mask genuinely fatal/unstructured tool errors.
-            // Preserve clean error-only responses and structured failures.
+            // Sanitize: only expose errors that tools explicitly mark as public.
+            // All other errors are masked so internal paths and database details
+            // are never leaked over the protocol.
             let sanitized = if let Some(error_val) = result.get("error") {
-                // Check if this is a clean error-only response: single "error" key with string value
-                let is_error_only = result
-                    .as_object()
-                    .is_some_and(|obj| obj.len() == 1 && error_val.is_string());
-
-                if is_error_only {
-                    // Error-only with string value: return sanitized version
-                    let error_msg = error_val
-                        .as_str()
-                        .unwrap_or("unknown")
-                        .chars()
-                        .take(100)
-                        .collect::<String>();
-                    eprintln!("tool error: tool={tool_name} error={error_msg}");
+                let is_public = result
+                    .get("public")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let error_msg: String = error_val
+                    .as_str()
+                    .unwrap_or("unknown")
+                    .chars()
+                    .take(100)
+                    .collect();
+                eprintln!("tool error: tool={tool_name} error={error_msg}");
+                if is_public {
                     json!({"error": error_msg})
                 } else {
-                    // Unstructured, complex, or non-string error: mask it
-                    eprintln!("tool error: tool={tool_name} error={error_val}");
                     json!({"error": "Internal tool error"})
                 }
             } else {

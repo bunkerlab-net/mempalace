@@ -10,7 +10,7 @@ async fn test_schema_creation() {
 
     // Run the schema SQL (copied from schema.rs since we can't import bin crate in integration tests)
     conn.execute_batch(
-        r#"
+        r"
         CREATE TABLE IF NOT EXISTS drawers (
             id TEXT PRIMARY KEY,
             wing TEXT NOT NULL,
@@ -65,7 +65,7 @@ async fn test_schema_creation() {
             room TEXT,
             filed_at TEXT DEFAULT (datetime('now'))
         );
-    "#,
+    ",
     )
     .await
     .expect("schema creation failed");
@@ -77,11 +77,17 @@ async fn test_schema_creation() {
             (),
         )
         .await
-        .unwrap();
+        .expect("failed to query tables");
 
     let mut tables = Vec::new();
-    while let Some(row) = rows.next().await.unwrap() {
-        tables.push(row.get_value(0).unwrap().as_text().unwrap().clone());
+    while let Some(row) = rows.next().await.expect("failed to advance rows") {
+        tables.push(
+            row.get_value(0)
+                .expect("missing column 0")
+                .as_text()
+                .expect("column 0 not text")
+                .clone(),
+        );
     }
 
     assert!(tables.contains(&"drawers".to_string()));

@@ -12,6 +12,10 @@ use crate::palace::{drawer, graph, search};
 
 use super::protocol::{AAAK_SPEC, PALACE_PROTOCOL};
 
+/// Largest integer exactly representable as an f64 (2^53 − 1).
+/// Values above this lose precision when stored in f64, so we reject them.
+const MAX_EXACT_INT_F64: f64 = 9_007_199_254_740_991.0;
+
 /// Dispatch a tool call by name and return the JSON result.
 pub async fn dispatch(conn: &Connection, name: &str, args: &Value) -> Value {
     match name {
@@ -34,7 +38,7 @@ pub async fn dispatch(conn: &Connection, name: &str, args: &Value) -> Value {
         "mempalace_graph_stats" => tool_graph_stats(conn).await,
         "mempalace_diary_write" => tool_diary_write(conn, args).await,
         "mempalace_diary_read" => tool_diary_read(conn, args).await,
-        _ => json!({"error": format!("Unknown tool: {name}")}),
+        _ => json!({"error": format!("Unknown tool: {name}"), "public": true}),
     }
 }
 
@@ -54,12 +58,8 @@ fn int_arg(args: &Value, key: &str, default: i64) -> i64 {
                 .and_then(|n| if n > 0 { Some(n) } else { None })
                 .or_else(|| {
                     v.as_f64().and_then(|f| {
-                        // cast_precision_loss: comparing i64::MAX as f64 is safe for a boundary check
-                        #[allow(clippy::cast_precision_loss)]
-                        let max_i64 = i64::MAX as f64;
-                        if f.is_finite() && f.fract() == 0.0 && f > 0.0 && f <= max_i64 {
-                            // cast_possible_truncation: safe here because we've verified f is finite,
-                            // whole, positive, and within i64::MAX bounds before casting
+                        if f.is_finite() && f > 0.0 && f <= MAX_EXACT_INT_F64 && f.fract() == 0.0 {
+                            // Safe: MAX_EXACT_INT_F64 (2^53-1) < i64::MAX, so the value fits exactly
                             #[allow(clippy::cast_possible_truncation)]
                             Some(f as i64)
                         } else {
@@ -74,13 +74,12 @@ fn int_arg(args: &Value, key: &str, default: i64) -> i64 {
                             .and_then(|n| if n > 0 { Some(n) } else { None })
                             .or_else(|| {
                                 s.parse::<f64>().ok().and_then(|f| {
-                                    // cast_precision_loss: comparing i64::MAX as f64 is safe for a boundary check
-                                    #[allow(clippy::cast_precision_loss)]
-                                    let max_i64 = i64::MAX as f64;
-                                    if f.is_finite() && f.fract() == 0.0 && f > 0.0 && f <= max_i64
+                                    if f.is_finite()
+                                        && f > 0.0
+                                        && f <= MAX_EXACT_INT_F64
+                                        && f.fract() == 0.0
                                     {
-                                        // cast_possible_truncation: safe here because we've verified f is finite,
-                                        // whole, positive, and within i64::MAX bounds before casting
+                                        // Safe: MAX_EXACT_INT_F64 (2^53-1) < i64::MAX, so the value fits exactly
                                         #[allow(clippy::cast_possible_truncation)]
                                         Some(f as i64)
                                     } else {

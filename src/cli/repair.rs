@@ -10,8 +10,9 @@ use crate::palace::drawer;
 
 /// Backup the palace database and rebuild the inverted word index.
 pub async fn run(conn: &Connection, palace_path: &Path) -> Result<()> {
-    // Backup: checkpoint WAL to ensure backup is self-contained
-    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)", ()).await?;
+    // Backup: checkpoint WAL to ensure backup is self-contained.
+    // wal_checkpoint returns rows (busy, log, checkpointed) — must use query_all.
+    query_all(conn, "PRAGMA wal_checkpoint(TRUNCATE)", ()).await?;
 
     let backup_path = palace_path.with_extension("db.bak");
     std::fs::copy(palace_path, &backup_path)?;

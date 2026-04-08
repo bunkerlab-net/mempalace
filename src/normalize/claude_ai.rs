@@ -16,9 +16,12 @@ pub fn try_parse(data: &serde_json::Value) -> Option<String> {
         // Privacy export: array of conversation objects, each with a chat_messages key.
         // Only treat as privacy export if ALL elements contain "chat_messages" to avoid
         // misclassifying mixed arrays with some having chat_messages and others not.
-        if arr.iter().all(|v| v.get("chat_messages").is_some()) {
+        if arr
+            .iter()
+            .all(|v| v.get("chat_messages").and_then(|m| m.as_array()).is_some())
+        {
             arr.iter()
-                .filter_map(|conv| conv.get("chat_messages")?.as_array())
+                .filter_map(|conv| conv.get("chat_messages").and_then(|v| v.as_array()))
                 .flatten()
                 .cloned()
                 .collect()
