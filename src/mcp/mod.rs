@@ -1,4 +1,8 @@
 //! MCP server — JSON-RPC 2.0 over stdio exposing palace tools.
+//!
+//! Error handling policy: tool errors are logged to stderr with full detail but
+//! the client receives only a generic `"Internal tool error"` message so that
+//! internal paths and database details are never leaked over the protocol.
 
 pub mod protocol;
 pub mod tools;
@@ -69,7 +73,7 @@ async fn handle_request(conn: &Connection, request: &Value) -> Option<Value> {
             "result": {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "mempalace", "version": "2.0.0-rs"},
+                "serverInfo": {"name": "mempalace", "version": env!("CARGO_PKG_VERSION")},
             }
         })),
 
@@ -89,7 +93,16 @@ async fn handle_request(conn: &Connection, request: &Value) -> Option<Value> {
             let tool_args = params.get("arguments").cloned().unwrap_or(json!({}));
 
             let result = tools::dispatch(conn, tool_name, &tool_args).await;
-            let text = serde_json::to_string_pretty(&result).unwrap_or_default();
+
+            // Sanitize: log real error to stderr, return generic message to client.
+            let sanitized = if result.get("error").is_some() {
+                eprintln!("tool error [{tool_name}]: {result}");
+                json!({"error": "Internal tool error"})
+            } else {
+                result
+            };
+
+            let text = serde_json::to_string_pretty(&sanitized).unwrap_or_default();
 
             Some(json!({
                 "jsonrpc": "2.0",

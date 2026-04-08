@@ -206,12 +206,16 @@ fn walk_convos(dir: &Path, files: &mut Vec<PathBuf>) {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
         if path.is_dir() {
-            if !is_skip_dir(&name) {
+            // Skip global cache dirs plus Claude Code-specific output dirs that
+            // contain tool output and agent memory — not conversation transcripts.
+            if !is_skip_dir(&name) && name != "tool-results" && name != "memory" {
                 walk_convos(&path, files);
             }
         } else if let Some(ext) = path.extension() {
             let ext_lower = ext.to_string_lossy().to_lowercase();
-            if CONVO_EXTENSIONS.contains(&ext_lower.as_str()) {
+            // Skip .meta.json files — these are Claude Code session metadata,
+            // not conversation content.
+            if CONVO_EXTENSIONS.contains(&ext_lower.as_str()) && !name.ends_with(".meta.json") {
                 files.push(path);
             }
         }

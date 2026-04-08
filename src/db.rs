@@ -5,12 +5,16 @@ use turso::{Builder, Connection, Database};
 use crate::error::Result;
 
 /// Open (or create) a local turso database and return a connection.
+///
+/// WAL journal mode is enabled on every new connection for better concurrency
+/// and crash recovery when multiple MCP clients write simultaneously.
 pub async fn open_db(path: &str) -> Result<(Database, Connection)> {
     let db = Builder::new_local(path)
         .experimental_triggers(true)
         .build()
         .await?;
     let conn = db.connect()?;
+    conn.execute("PRAGMA journal_mode=WAL", ()).await?;
     Ok((db, conn))
 }
 

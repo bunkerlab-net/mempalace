@@ -107,16 +107,19 @@ Options:
   --agent <name>         Agent name recorded on each drawer (default: mempalace)
   --limit <n>            Maximum files to process; 0 = no limit (default: 0)
   --dry-run              Preview what would be filed without writing
+  --no-gitignore         Disable .gitignore filtering (include all files)
 ```
 
 **Projects mode** (`--mode projects`): Reads source files (`.py`, `.rs`, `.ts`, `.go`, `.md`, etc.),
 chunks at 800-character boundaries with 100-character overlap, routes each chunk to a room
-via folder/filename/keyword heuristics.
+via folder/filename/keyword heuristics. Respects `.gitignore` rules by default (same engine as
+ripgrep); pass `--no-gitignore` to include all files regardless.
 
 **Convos mode** (`--mode convos`): Reads conversation exports in any of these formats:
 
 - Claude Code JSONL
-- Claude.ai JSON
+- OpenAI Codex CLI JSONL (`~/.codex/sessions/*/rollout-*.jsonl`)
+- Claude.ai JSON (standard export and privacy export)
 - ChatGPT JSON
 - Slack JSON export
 - Plain text with `>` quote markers
@@ -172,7 +175,9 @@ mempalace compress --dry-run
 mempalace compress --config entities.json
 ```
 
-AAAK is a structured symbolic notation (~30× compression) readable by any LLM without a decoder.
+AAAK is a structured symbolic notation readable by any LLM without a decoder.
+Compression ratio depends heavily on how many repeated named entities appear in your content;
+it is **lossy** (original text cannot be reconstructed from AAAK output).
 Entity names are abbreviated to 3-letter codes (ALC, JOR, RIL, etc.).
 Emotions and flags are extracted from content.
 
@@ -208,6 +213,18 @@ Original files are renamed to `.mega_backup`. Run this before `mine --mode convo
 ### `mempalace status`
 
 Prints a palace overview: total drawers, per-wing and per-room counts, knowledge graph stats.
+
+---
+
+### `mempalace repair`
+
+Backs up the palace database and rebuilds the inverted word index from scratch.
+Use this if search results seem wrong after an interrupted mine or a manual DB edit.
+
+```bash
+mempalace repair
+# Creates palace.db.bak, then re-indexes all drawers
+```
 
 ---
 
@@ -370,12 +387,13 @@ src/
   error.rs             thiserror Error enum
 
   cli/                 One file per subcommand
-    init.rs            Room detection → write mempalace.yaml
+    init.rs            Room detection → write mempalace.yaml (--yes skips prompt)
     search.rs          CLI search output
     wakeup.rs          L0 + L1 assembly and print
     compress.rs        AAAK batch compression
     split.rs           Mega-file session splitter
     status.rs          Palace stats display
+    repair.rs          Backup + rebuild inverted index
 
   palace/
     miner.rs           Project file scanner + chunker + drawer writer; MineParams struct
@@ -393,8 +411,9 @@ src/
     query.rs           query_entity(), kg_timeline()
 
   normalize/           Chat export parsers → canonical transcript text
-    claude_code.rs     JSONL (Claude Code)
-    claude_ai.rs       JSON array (Claude.ai)
+    claude_code.rs     JSONL (Claude Code); accepts both "human" and "user" types
+    claude_ai.rs       JSON array (Claude.ai) + privacy export format
+    codex.rs           JSONL (OpenAI Codex CLI)
     chatgpt.rs         ChatGPT export JSON
     slack.rs           Slack export JSON
 
@@ -423,11 +442,15 @@ src/
 | `mempalace_search` score field | `similarity` (0–1 cosine)     | `similarity` (word hit count)       |
 | Storage                        | ChromaDB + SQLite             | Single turso (SQLite) file          |
 | Binary size                    | ~100MB Python env             | ~13MB binary                        |
-| Concurrency                    | SQLite locking issues         | Resolved at turso layer             |
+| Concurrency                    | SQLite locking issues         | WAL mode; resolved at turso layer   |
 | Duplicate detection            | 0.9 cosine threshold          | Keyword overlap threshold           |
 | Entity registry                | Wikipedia lookups             | Heuristic only (deferred)           |
 | Onboarding wizard              | Interactive                   | Not implemented (deferred)          |
 | ChromaDB import                | N/A                           | Not implemented (deferred)          |
+| Gitignore support              | Full (projects)               | Full (`ignore` crate)               |
+| Repair command                 | Yes                           | Yes (`mempalace repair`)            |
+| Conversation formats           | Limited                       | Extended (+ Codex CLI)              |
+| MCP error responses            | Generic                       | Generic                             |
 
 ---
 

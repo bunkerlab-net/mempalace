@@ -4,11 +4,25 @@ use super::messages_to_transcript;
 
 /// Try to parse Claude.ai JSON export into transcript text.
 ///
-/// Accepts either a JSON array of messages or an object with a `"messages"`
-/// or `"chat_messages"` key. Returns `None` if fewer than 2 messages.
+/// Accepts three formats:
+/// - JSON array of message objects (`[{"role":…,"content":…}]`)
+/// - Object with a `"messages"` or `"chat_messages"` key
+/// - Privacy export: top-level array of conversation objects where each object
+///   has a `"chat_messages"` key — all conversations are flattened into one transcript
+///
+/// Returns `None` if fewer than 2 messages are found.
 pub fn try_parse(data: &serde_json::Value) -> Option<String> {
     let items = if let Some(arr) = data.as_array() {
-        arr.clone()
+        // Privacy export: array of conversation objects, each with a chat_messages key.
+        if arr.first().and_then(|v| v.get("chat_messages")).is_some() {
+            arr.iter()
+                .filter_map(|conv| conv.get("chat_messages")?.as_array())
+                .flatten()
+                .cloned()
+                .collect()
+        } else {
+            arr.clone()
+        }
     } else if let Some(obj) = data.as_object() {
         obj.get("messages")
             .or_else(|| obj.get("chat_messages"))
@@ -71,6 +85,17 @@ mod tests {
         let result = try_parse(&data).expect("should parse");
         assert!(result.contains("> q"));
         assert!(result.contains("a"));
+    }
+
+    #[test]
+    fn parse_privacy_export_format() {
+        let data: serde_json::Value = serde_json::from_str(
+            r#"[{"chat_messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"}]}]"#,
+        )
+        .expect("valid json");
+        let result = try_parse(&data).expect("should parse");
+        assert!(result.contains("> hi"));
+        assert!(result.contains("hello"));
     }
 
     #[test]

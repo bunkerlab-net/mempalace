@@ -28,13 +28,13 @@ async fn main() {
     }
 }
 
-/// Open the palace DB, ensuring schema exists.
-async fn open_palace() -> error::Result<(turso::Database, turso::Connection)> {
+/// Open the palace DB, ensuring schema exists. Returns `(db, conn, path)`.
+async fn open_palace() -> error::Result<(turso::Database, turso::Connection, std::path::PathBuf)> {
     let cfg = MempalaceConfig::init()?;
     let db_path = cfg.palace_db_path();
     let (db, conn) = db::open_db(db_path.to_str().unwrap_or(":memory:")).await?;
     schema::ensure_schema(&conn).await?;
-    Ok((db, conn))
+    Ok((db, conn, db_path))
 }
 
 async fn run(cli: Cli) -> error::Result<()> {
@@ -53,8 +53,8 @@ async fn run(cli: Cli) -> error::Result<()> {
             cli::status::run(&conn).await?;
         }
 
-        Command::Init { dir, yes: _ } => {
-            cli::init::run(&dir)?;
+        Command::Init { dir, yes } => {
+            cli::init::run(&dir, yes)?;
         }
 
         Command::Mine {
@@ -65,20 +65,22 @@ async fn run(cli: Cli) -> error::Result<()> {
             agent,
             limit,
             dry_run,
+            no_gitignore,
         } => {
             let opts = palace::miner::MineParams {
                 wing,
                 agent,
                 limit,
                 dry_run,
+                respect_gitignore: !no_gitignore,
             };
             match mode.as_str() {
                 "projects" => {
-                    let (_db, conn) = open_palace().await?;
+                    let (_db, conn, _path) = open_palace().await?;
                     palace::miner::mine(&conn, &dir, &opts).await?;
                 }
                 "convos" => {
-                    let (_db, conn) = open_palace().await?;
+                    let (_db, conn, _path) = open_palace().await?;
                     palace::convo_miner::mine_convos(&conn, &dir, &extract_mode, &opts).await?;
                 }
                 other => {
@@ -94,12 +96,12 @@ async fn run(cli: Cli) -> error::Result<()> {
             room,
             results,
         } => {
-            let (_db, conn) = open_palace().await?;
+            let (_db, conn, _path) = open_palace().await?;
             cli::search::run(&conn, &query, wing.as_deref(), room.as_deref(), results).await?;
         }
 
         Command::WakeUp { wing } => {
-            let (_db, conn) = open_palace().await?;
+            let (_db, conn, _path) = open_palace().await?;
             cli::wakeup::run(&conn, wing.as_deref()).await?;
         }
 
@@ -108,7 +110,7 @@ async fn run(cli: Cli) -> error::Result<()> {
             dry_run,
             config,
         } => {
-            let (_db, conn) = open_palace().await?;
+            let (_db, conn, _path) = open_palace().await?;
             cli::compress::run(
                 &conn,
                 wing.as_deref(),
@@ -127,8 +129,13 @@ async fn run(cli: Cli) -> error::Result<()> {
             cli::split::run(&dir, output_dir.as_deref(), dry_run, min_sessions)?;
         }
 
+        Command::Repair => {
+            let (_db, conn, palace_path) = open_palace().await?;
+            cli::repair::run(&conn, &palace_path).await?;
+        }
+
         Command::Mcp => {
-            let (_db, conn) = open_palace().await?;
+            let (_db, conn, _path) = open_palace().await?;
             mcp::run(&conn).await?;
         }
     }

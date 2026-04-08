@@ -19,21 +19,22 @@ pedantic = { level = "deny", priority = -1 }
 unwrap_used = "deny"
 
 [dependencies]
-turso = "0.5.3"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+ignore = "0.4"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+thiserror = "2"
 tokio = { version = "1", features = [
   "rt-multi-thread",
   "macros",
   "io-std",
   "io-util",
 ] }
-clap = { version = "4", features = ["derive"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-serde_yaml = "0.9"
-regex = "1"
-chrono = { version = "0.4", features = ["serde"] }
+turso = "0.5.3"
 uuid = { version = "1", features = ["v4"] }
-thiserror = "2"
 
 [dev-dependencies]
 tempfile = "3"
