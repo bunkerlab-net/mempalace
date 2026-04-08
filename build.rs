@@ -1,12 +1,16 @@
+/// Build script: embeds the current git short SHA as the `GIT_SHORT_SHA` env var.
+/// Falls back to `"unknown"` when git is unavailable.
 fn main() {
-    let output = std::process::Command::new("git")
+    let sha = std::process::Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
         .output()
-        .expect("failed to run git");
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .unwrap_or_else(|| "unknown".to_string());
 
-    assert!(output.status.success(), "git rev-parse failed");
-
-    let sha = String::from_utf8_lossy(&output.stdout);
     println!("cargo:rustc-env=GIT_SHORT_SHA={}", sha.trim());
     println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-changed=.git/refs/heads");
+    println!("cargo:rerun-if-changed=.git/packed-refs");
 }
