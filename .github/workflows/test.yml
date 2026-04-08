@@ -62,7 +62,7 @@ jobs:
           curl -fsSL --proto '=https' --tlsv1.2 \
             "https://raw.githubusercontent.com/cargo-bins/cargo-binstall/${commit_sha}/install-from-binstall-release.sh" \
             -o /tmp/binstall-install.sh
-          echo "${BINSTALL_SHA}  /tmp/binstall-install.sh" | sha256sum --check
+          echo "${BINSTALL_SHA}  /tmp/binstall-install.sh" | shasum -a 256 --check
           bash /tmp/binstall-install.sh
       - name: Install Nextest
         run: cargo binstall -y --force cargo-nextest cargo-llvm-cov
