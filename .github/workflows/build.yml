@@ -52,7 +52,7 @@ jobs:
 
       - name: Ad-hoc sign binary (macOS)
         if: runner.os == 'macOS'
-        run: codesign --sign - --force --deep target/release/mempalace
+        run: codesign --sign - --force target/release/mempalace
 
       - id: artifact-name
         run: |-
