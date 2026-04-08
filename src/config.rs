@@ -116,6 +116,18 @@ pub struct RoomConfig {
     pub keywords: Vec<String>,
 }
 
+impl ProjectConfig {
+    /// Load from a mempalace.yaml file.
+    pub fn load(path: &Path) -> Result<Self> {
+        if !path.exists() {
+            return Err(Error::ConfigNotFound(path.to_path_buf()));
+        }
+        let data = std::fs::read_to_string(path)?;
+        let cfg: Self = serde_yaml::from_str(&data)?;
+        Ok(cfg)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,7 +148,7 @@ mod tests {
 
     #[test]
     fn project_config_yaml_round_trip() {
-        let yaml = r#"
+        let yaml = r"
 wing: my_project
 rooms:
   - name: backend
@@ -147,7 +159,7 @@ rooms:
   - name: frontend
     description: UI code
     keywords: []
-"#;
+";
         let cfg: ProjectConfig = serde_yaml::from_str(yaml).expect("parse yaml");
         assert_eq!(cfg.wing, "my_project");
         assert_eq!(cfg.rooms.len(), 2);
@@ -165,17 +177,5 @@ rooms:
             assert_eq!(orig.description, rt.description);
             assert_eq!(orig.keywords, rt.keywords);
         }
-    }
-}
-
-impl ProjectConfig {
-    /// Load from a mempalace.yaml file.
-    pub fn load(path: &Path) -> Result<Self> {
-        if !path.exists() {
-            return Err(Error::ConfigNotFound(path.to_path_buf()));
-        }
-        let data = std::fs::read_to_string(path)?;
-        let cfg: Self = serde_yaml::from_str(&data)?;
-        Ok(cfg)
     }
 }

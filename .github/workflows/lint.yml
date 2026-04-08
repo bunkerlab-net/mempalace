@@ -48,6 +48,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-lint-
 
-      - run: cargo clippy
-      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --all-features
+      - run: cargo fmt --check --all
       - run: hk check --all --skip-step no_commit_protected_branch

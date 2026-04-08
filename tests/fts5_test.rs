@@ -1,4 +1,6 @@
 /// Verify inverted index search works with turso (FTS5 is not supported).
+// Sequential setup → insert → query narrative; splitting into helpers would obscure the test flow.
+#[allow(clippy::too_many_lines)]
 #[tokio::test]
 async fn test_inverted_index_search() {
     let db = turso::Builder::new_local(":memory:")
@@ -13,18 +15,18 @@ async fn test_inverted_index_search() {
         (),
     )
     .await
-    .unwrap();
+    .expect("failed to create docs table");
 
     conn.execute(
         "CREATE TABLE doc_words (word TEXT NOT NULL, doc_id TEXT NOT NULL, count INTEGER DEFAULT 1, PRIMARY KEY (word, doc_id))",
         (),
     )
     .await
-    .unwrap();
+    .expect("failed to create doc_words table");
 
     conn.execute("CREATE INDEX idx_w ON doc_words(word)", ())
         .await
-        .unwrap();
+        .expect("failed to create index");
 
     // Insert docs
     conn.execute(
@@ -32,14 +34,14 @@ async fn test_inverted_index_search() {
         (),
     )
     .await
-    .unwrap();
+    .expect("failed to insert doc 1");
 
     conn.execute(
         "INSERT INTO docs VALUES ('2', 'rust programming language is fast and safe', 'tech', 'backend')",
         (),
     )
     .await
-    .unwrap();
+    .expect("failed to insert doc 2");
 
     // Build inverted index for doc 1
     for (word, count) in [
@@ -55,7 +57,7 @@ async fn test_inverted_index_search() {
             turso::params![word, count],
         )
         .await
-        .unwrap();
+        .expect("failed to insert word for doc 1");
     }
 
     // Build inverted index for doc 2
@@ -71,7 +73,7 @@ async fn test_inverted_index_search() {
             turso::params![word, count],
         )
         .await
-        .unwrap();
+        .expect("failed to insert word for doc 2");
     }
 
     // Search for "fox" — should find doc 1
@@ -81,10 +83,20 @@ async fn test_inverted_index_search() {
             (),
         )
         .await
-        .unwrap();
+        .expect("failed to query for 'fox'");
 
-    let row = rows.next().await.unwrap().expect("no results for 'fox'");
-    assert_eq!(row.get_value(0).unwrap().as_text().unwrap(), "1");
+    let row = rows
+        .next()
+        .await
+        .expect("failed to advance rows")
+        .expect("no results for 'fox'");
+    assert_eq!(
+        row.get_value(0)
+            .expect("missing column 0")
+            .as_text()
+            .expect("column 0 not text"),
+        "1"
+    );
 
     // Search for "rust fast" — should find doc 2
     let mut rows = conn
@@ -93,16 +105,22 @@ async fn test_inverted_index_search() {
             (),
         )
         .await
-        .unwrap();
+        .expect("failed to query for 'rust fast'");
 
     let row = rows
         .next()
         .await
-        .unwrap()
+        .expect("failed to advance rows")
         .expect("no results for 'rust fast'");
-    assert_eq!(row.get_value(0).unwrap().as_text().unwrap(), "2");
-    let relevance = row.get_value(2).unwrap();
-    assert_eq!(*relevance.as_integer().unwrap(), 2); // matched 2 words
+    assert_eq!(
+        row.get_value(0)
+            .expect("missing column 0")
+            .as_text()
+            .expect("column 0 not text"),
+        "2"
+    );
+    let relevance = row.get_value(2).expect("missing relevance column");
+    assert_eq!(*relevance.as_integer().expect("relevance not integer"), 2); // matched 2 words
 
     // Search for "elephant" — should return nothing
     let mut rows = conn
@@ -111,10 +129,10 @@ async fn test_inverted_index_search() {
             (),
         )
         .await
-        .unwrap();
+        .expect("failed to query for 'elephant'");
 
     assert!(
-        rows.next().await.unwrap().is_none(),
+        rows.next().await.expect("failed to advance rows").is_none(),
         "should find no results for 'elephant'"
     );
 

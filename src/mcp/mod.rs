@@ -1,4 +1,9 @@
 //! MCP server — JSON-RPC 2.0 over stdio exposing palace tools.
+//!
+//! Error handling policy: tool errors are logged to stderr with limited/truncated
+//! detail (first 100 chars) and the client receives only a generic `"Internal tool error"`
+//! message for unstructured errors, so that internal paths and database details are
+//! never leaked over the protocol.
 
 pub mod protocol;
 pub mod tools;
@@ -69,7 +74,7 @@ async fn handle_request(conn: &Connection, request: &Value) -> Option<Value> {
             "result": {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "mempalace", "version": "2.0.0-rs"},
+                "serverInfo": {"name": "mempalace", "version": env!("CARGO_PKG_VERSION")},
             }
         })),
 
@@ -89,7 +94,32 @@ async fn handle_request(conn: &Connection, request: &Value) -> Option<Value> {
             let tool_args = params.get("arguments").cloned().unwrap_or(json!({}));
 
             let result = tools::dispatch(conn, tool_name, &tool_args).await;
-            let text = serde_json::to_string_pretty(&result).unwrap_or_default();
+
+            // Sanitize: only expose errors that tools explicitly mark as public.
+            // All other errors are masked so internal paths and database details
+            // are never leaked over the protocol.
+            let sanitized = if let Some(error_val) = result.get("error") {
+                let is_public = result
+                    .get("public")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let error_msg: String = error_val
+                    .as_str()
+                    .unwrap_or("unknown")
+                    .chars()
+                    .take(100)
+                    .collect();
+                eprintln!("tool error: tool={tool_name} error={error_msg}");
+                if is_public {
+                    json!({"error": error_msg})
+                } else {
+                    json!({"error": "Internal tool error"})
+                }
+            } else {
+                result
+            };
+
+            let text = serde_json::to_string_pretty(&sanitized).unwrap_or_default();
 
             Some(json!({
                 "jsonrpc": "2.0",

@@ -5,9 +5,8 @@
 [formatting]
 reorder_keys = false
 
-# Only reorder keys in the [tools] and [env] sections
 [[rule]]
-keys = ["env", "tools"]
+keys = ["env", "tools", "dependencies", "dev-dependencies"]
 
 [rule.formatting]
 reorder_keys = true

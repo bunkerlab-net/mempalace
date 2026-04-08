@@ -3,6 +3,7 @@
 pub mod chatgpt;
 pub mod claude_ai;
 pub mod claude_code;
+pub mod codex;
 pub mod slack;
 
 use std::path::Path;
@@ -48,6 +49,11 @@ pub fn normalize(filepath: &Path) -> Result<String> {
 fn try_normalize_json(content: &str) -> Option<String> {
     // Try Claude Code JSONL first
     if let Some(result) = claude_code::try_parse(content) {
+        return Some(result);
+    }
+
+    // Try Codex CLI JSONL
+    if let Some(result) = codex::try_parse(content) {
         return Some(result);
     }
 

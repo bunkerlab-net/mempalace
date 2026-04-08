@@ -12,6 +12,10 @@ use crate::palace::{drawer, graph, search};
 
 use super::protocol::{AAAK_SPEC, PALACE_PROTOCOL};
 
+/// Largest integer exactly representable as an f64 (2^53 − 1).
+/// Values above this lose precision when stored in f64, so we reject them.
+const MAX_EXACT_INT_F64: f64 = 9_007_199_254_740_991.0;
+
 /// Dispatch a tool call by name and return the JSON result.
 pub async fn dispatch(conn: &Connection, name: &str, args: &Value) -> Value {
     match name {
@@ -34,7 +38,7 @@ pub async fn dispatch(conn: &Connection, name: &str, args: &Value) -> Value {
         "mempalace_graph_stats" => tool_graph_stats(conn).await,
         "mempalace_diary_write" => tool_diary_write(conn, args).await,
         "mempalace_diary_read" => tool_diary_read(conn, args).await,
-        _ => json!({"error": format!("Unknown tool: {name}")}),
+        _ => json!({"error": format!("Unknown tool: {name}"), "public": true}),
     }
 }
 
@@ -42,9 +46,50 @@ fn str_arg<'a>(args: &'a Value, key: &str) -> &'a str {
     args.get(key).and_then(|v| v.as_str()).unwrap_or("")
 }
 
+/// Extract a positive integer argument, coercing floats and strings.
+///
+/// MCP JSON transport sometimes delivers integers as floats (`5.0`) or strings
+/// (`"5"`). Trying all three representations keeps tool calls robust regardless
+/// of what the client sends. Only accepts finite, whole, positive integers (>0).
 fn int_arg(args: &Value, key: &str, default: i64) -> i64 {
     args.get(key)
-        .and_then(serde_json::Value::as_i64)
+        .and_then(|v| {
+            v.as_i64()
+                .and_then(|n| if n > 0 { Some(n) } else { None })
+                .or_else(|| {
+                    v.as_f64().and_then(|f| {
+                        if f.is_finite() && f > 0.0 && f <= MAX_EXACT_INT_F64 && f.fract() == 0.0 {
+                            // Safe: MAX_EXACT_INT_F64 (2^53-1) < i64::MAX, so the value fits exactly
+                            #[allow(clippy::cast_possible_truncation)]
+                            Some(f as i64)
+                        } else {
+                            None
+                        }
+                    })
+                })
+                .or_else(|| {
+                    v.as_str().and_then(|s| {
+                        s.parse::<i64>()
+                            .ok()
+                            .and_then(|n| if n > 0 { Some(n) } else { None })
+                            .or_else(|| {
+                                s.parse::<f64>().ok().and_then(|f| {
+                                    if f.is_finite()
+                                        && f > 0.0
+                                        && f <= MAX_EXACT_INT_F64
+                                        && f.fract() == 0.0
+                                    {
+                                        // Safe: MAX_EXACT_INT_F64 (2^53-1) < i64::MAX, so the value fits exactly
+                                        #[allow(clippy::cast_possible_truncation)]
+                                        Some(f as i64)
+                                    } else {
+                                        None
+                                    }
+                                })
+                            })
+                    })
+                })
+        })
         .unwrap_or(default)
 }
 
@@ -242,7 +287,7 @@ async fn tool_add_drawer(conn: &Connection, args: &Value) -> Value {
     };
 
     if wing.is_empty() || room.is_empty() || content.is_empty() {
-        return json!({"success": false, "error": "wing, room, and content are required"});
+        return json!({"success": false, "error": "wing, room, and content are required", "public": true});
     }
 
     // Reject if a highly-similar drawer already exists (mirrors Python behaviour).
@@ -289,7 +334,7 @@ async fn tool_add_drawer(conn: &Connection, args: &Value) -> Value {
 async fn tool_delete_drawer(conn: &Connection, args: &Value) -> Value {
     let drawer_id = str_arg(args, "drawer_id");
     if drawer_id.is_empty() {
-        return json!({"success": false, "error": "drawer_id is required"});
+        return json!({"success": false, "error": "drawer_id is required", "public": true});
     }
 
     match conn
@@ -482,7 +527,7 @@ async fn tool_diary_write(conn: &Connection, args: &Value) -> Value {
     };
 
     if agent_name.is_empty() || entry.is_empty() {
-        return json!({"success": false, "error": "agent_name and entry are required"});
+        return json!({"success": false, "error": "agent_name and entry are required", "public": true});
     }
 
     let wing = format!("wing_{}", agent_name.to_lowercase().replace(' ', "_"));
@@ -516,7 +561,7 @@ async fn tool_diary_read(conn: &Connection, args: &Value) -> Value {
     let last_n = int_arg(args, "last_n", 10);
 
     if agent_name.is_empty() {
-        return json!({"error": "agent_name is required"});
+        return json!({"error": "agent_name is required", "public": true});
     }
 
     let wing = format!("wing_{}", agent_name.to_lowercase().replace(' ', "_"));

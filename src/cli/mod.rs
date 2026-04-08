@@ -2,6 +2,7 @@
 
 pub mod compress;
 pub mod init;
+pub mod repair;
 pub mod search;
 pub mod split;
 pub mod status;
@@ -30,7 +31,7 @@ pub enum Command {
         dir: PathBuf,
 
         /// Auto-accept detected rooms without prompting (non-interactive / CI mode)
-        #[arg(long)]
+        #[arg(long, short = 'y')]
         yes: bool,
     },
 
@@ -62,6 +63,10 @@ pub enum Command {
         /// Preview what would be filed without writing to the palace
         #[arg(long)]
         dry_run: bool,
+
+        /// Disable .gitignore filtering (include all files regardless of gitignore rules)
+        #[arg(long)]
+        no_gitignore: bool,
     },
 
     /// Search the palace
@@ -124,6 +129,9 @@ pub enum Command {
 
     /// Show palace overview and stats
     Status,
+
+    /// Rebuild the inverted index (repair corrupted palace)
+    Repair,
 
     /// Run as MCP server (JSON-RPC over stdio)
     Mcp,

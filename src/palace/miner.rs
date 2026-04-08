@@ -19,6 +19,8 @@ pub struct MineParams {
     pub limit: usize,
     /// If `true`, show what would be filed without writing to the palace.
     pub dry_run: bool,
+    /// If `true`, respect `.gitignore` rules when scanning (default: true).
+    pub respect_gitignore: bool,
 }
 
 const READABLE_EXTENSIONS: &[&str] = &[
@@ -38,9 +40,67 @@ const SKIP_FILES: &[&str] = &[
 ];
 
 /// Scan a project directory for all readable files.
+///
+/// When `respect_gitignore` is `true`, `.gitignore` rules are applied via the
+/// `ignore` crate (same engine as ripgrep). `SKIP_DIRS` and `SKIP_FILES` are always
+/// applied regardless.
 pub fn scan_project(project_dir: &Path) -> Vec<PathBuf> {
+    scan_project_with_opts(project_dir, true)
+}
+
+/// Scan with explicit gitignore control.
+pub fn scan_project_with_opts(project_dir: &Path, respect_gitignore: bool) -> Vec<PathBuf> {
+    if respect_gitignore {
+        walk_dir_gitignore(project_dir)
+    } else {
+        let mut files = Vec::new();
+        walk_dir(project_dir, &mut files);
+        files
+    }
+}
+
+fn walk_dir_gitignore(project_dir: &Path) -> Vec<PathBuf> {
+    let walker = ignore::WalkBuilder::new(project_dir)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .hidden(false) // We handle skip dirs ourselves
+        .build();
+
     let mut files = Vec::new();
-    walk_dir(project_dir, &mut files);
+    for entry in walker.flatten() {
+        if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+            continue;
+        }
+        let path = entry.path();
+
+        // Check all path components against SKIP_DIRS
+        let skip = path.components().any(|c| {
+            let s = c.as_os_str().to_string_lossy();
+            is_skip_dir(s.as_ref())
+        });
+        if skip {
+            continue;
+        }
+
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        if SKIP_FILES.contains(&name.as_str()) {
+            continue;
+        }
+
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        if READABLE_EXTENSIONS.contains(&ext.as_str()) {
+            files.push(path.to_path_buf());
+        }
+    }
     files
 }
 
@@ -85,7 +145,7 @@ pub async fn mine(conn: &Connection, project_dir: &Path, opts: &MineParams) -> R
 
     let wing = opts.wing.as_deref().unwrap_or(&config.wing);
     let rooms = &config.rooms;
-    let all_files = scan_project(&project_dir);
+    let all_files = scan_project_with_opts(&project_dir, opts.respect_gitignore);
     let files: Vec<_> = if opts.limit == 0 {
         all_files
     } else {

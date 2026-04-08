@@ -1,10 +1,11 @@
+use std::io::Write as _;
 use std::path::Path;
 
 use crate::config::ProjectConfig;
 use crate::error::Result;
 use crate::palace::room_detect::detect_rooms_from_folders;
 
-pub fn run(dir: &Path) -> Result<()> {
+pub fn run(dir: &Path, yes: bool) -> Result<()> {
     let dir = dir.canonicalize().map_err(|e| {
         crate::error::Error::Other(format!("directory not found: {}: {e}", dir.display()))
     })?;
@@ -32,6 +33,18 @@ pub fn run(dir: &Path) -> Result<()> {
         println!("          {}", room.description);
     }
     println!("\n-------------------------------------------------------");
+
+    if !yes {
+        print!("\n  Proceed? [Y/n] ");
+        std::io::stdout().flush()?;
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        let trimmed = input.trim().to_lowercase();
+        if trimmed == "n" || trimmed == "no" {
+            println!("  Aborted.");
+            return Ok(());
+        }
+    }
 
     // Save config
     let config = ProjectConfig {

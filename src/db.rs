@@ -5,12 +5,27 @@ use turso::{Builder, Connection, Database};
 use crate::error::Result;
 
 /// Open (or create) a local turso database and return a connection.
+///
+/// For file-backed databases, WAL journal mode is enabled for better concurrency
+/// and crash recovery when multiple MCP clients write simultaneously.
+/// In-memory databases skip the WAL pragma since it is not applicable.
 pub async fn open_db(path: &str) -> Result<(Database, Connection)> {
     let db = Builder::new_local(path)
         .experimental_triggers(true)
         .build()
         .await?;
     let conn = db.connect()?;
+
+    // Only enable WAL for file-backed databases; in-memory DBs do not support it
+    let is_in_memory = path.is_empty()
+        || path == ":memory:"
+        || path.starts_with("file::memory:")
+        || (path.starts_with("file:") && path.contains("mode=memory"));
+    if !is_in_memory {
+        let mut wal_rows = conn.query("PRAGMA journal_mode=WAL", ()).await?;
+        while wal_rows.next().await?.is_some() {}
+    }
+
     Ok((db, conn))
 }
 

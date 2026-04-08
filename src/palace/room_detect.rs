@@ -91,6 +91,17 @@ const SKIP_DIRS: &[&str] = &[
     "coverage",
     ".mempalace",
     "target",
+    ".ruff_cache",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".cache",
+    ".tox",
+    ".nox",
+    ".idea",
+    ".vscode",
+    ".ipynb_checkpoints",
+    ".eggs",
+    "htmlcov",
 ];
 
 fn normalize_name(name: &str) -> String {
@@ -251,6 +262,10 @@ mod tests {
         assert!(is_skip_dir("node_modules"));
         assert!(is_skip_dir("target"));
         assert!(is_skip_dir("__pycache__"));
+        assert!(is_skip_dir(".mypy_cache"));
+        assert!(is_skip_dir(".ruff_cache"));
+        assert!(is_skip_dir(".idea"));
+        assert!(is_skip_dir("htmlcov"));
     }
 
     #[test]
