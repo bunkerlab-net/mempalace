@@ -15,7 +15,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(
     name = "mempalace",
-    version,
+    version = concat!(env!("CARGO_PKG_VERSION"), "-", env!("GIT_SHORT_SHA")),
     about = "A memory palace for AI assistants"
 )]
 pub struct Cli {
