@@ -14,7 +14,8 @@ pub async fn open_db(path: &str) -> Result<(Database, Connection)> {
         .build()
         .await?;
     let conn = db.connect()?;
-    conn.execute("PRAGMA journal_mode=WAL", ()).await?;
+    let mut wal_rows = conn.query("PRAGMA journal_mode=WAL", ()).await?;
+    while wal_rows.next().await?.is_some() {}
     Ok((db, conn))
 }
 
