@@ -45,6 +45,40 @@ pub fn try_parse(content: &str) -> Option<String> {
     }
 }
 
+fn extract_content(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s.trim().to_string(),
+        serde_json::Value::Array(arr) => arr
+            .iter()
+            .filter_map(|item| {
+                if let Some(s) = item.as_str() {
+                    Some(s.to_string())
+                } else if let Some(obj) = item.as_object() {
+                    if obj.get("type").and_then(|t| t.as_str()) == Some("text") {
+                        obj.get("text")
+                            .and_then(|t| t.as_str())
+                            .map(std::string::ToString::to_string)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+            .trim()
+            .to_string(),
+        serde_json::Value::Object(obj) => obj
+            .get("text")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string(),
+        _ => String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -88,39 +122,5 @@ mod tests {
 {"type":"assistant","message":{"content":"reply"}}"#;
         let result = try_parse(jsonl).expect("should parse");
         assert!(result.contains("> array msg"));
-    }
-}
-
-fn extract_content(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::String(s) => s.trim().to_string(),
-        serde_json::Value::Array(arr) => arr
-            .iter()
-            .filter_map(|item| {
-                if let Some(s) = item.as_str() {
-                    Some(s.to_string())
-                } else if let Some(obj) = item.as_object() {
-                    if obj.get("type").and_then(|t| t.as_str()) == Some("text") {
-                        obj.get("text")
-                            .and_then(|t| t.as_str())
-                            .map(std::string::ToString::to_string)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(" ")
-            .trim()
-            .to_string(),
-        serde_json::Value::Object(obj) => obj
-            .get("text")
-            .and_then(|t| t.as_str())
-            .unwrap_or("")
-            .trim()
-            .to_string(),
-        _ => String::new(),
     }
 }

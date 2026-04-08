@@ -63,6 +63,34 @@ pub fn try_parse(data: &serde_json::Value) -> Option<String> {
     }
 }
 
+fn extract_content(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s.trim().to_string(),
+        serde_json::Value::Array(arr) => arr
+            .iter()
+            .filter_map(|item| {
+                if let Some(s) = item.as_str() {
+                    Some(s.to_string())
+                } else if let Some(obj) = item.as_object() {
+                    if obj.get("type").and_then(|t| t.as_str()) == Some("text") {
+                        obj.get("text")
+                            .and_then(|t| t.as_str())
+                            .map(std::string::ToString::to_string)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+            .trim()
+            .to_string(),
+        _ => String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,7 +114,7 @@ mod tests {
         .expect("valid json");
         let result = try_parse(&data).expect("should parse");
         assert!(result.contains("> q"));
-        assert!(result.contains("a"));
+        assert!(result.contains('a'));
     }
 
     #[test]
@@ -118,33 +146,5 @@ mod tests {
         let data: serde_json::Value =
             serde_json::from_str(r#"{"something":"else"}"#).expect("valid json");
         assert!(try_parse(&data).is_none());
-    }
-}
-
-fn extract_content(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::String(s) => s.trim().to_string(),
-        serde_json::Value::Array(arr) => arr
-            .iter()
-            .filter_map(|item| {
-                if let Some(s) = item.as_str() {
-                    Some(s.to_string())
-                } else if let Some(obj) = item.as_object() {
-                    if obj.get("type").and_then(|t| t.as_str()) == Some("text") {
-                        obj.get("text")
-                            .and_then(|t| t.as_str())
-                            .map(std::string::ToString::to_string)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(" ")
-            .trim()
-            .to_string(),
-        _ => String::new(),
     }
 }
