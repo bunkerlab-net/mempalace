@@ -17,6 +17,7 @@ fn current_thread_runtime() -> tokio::runtime::Runtime {
 /// Child-process protocol (invoked via `_MEMPALACE_TEST_OPEN_PATH`):
 ///   exit 0 — open succeeded (expected)
 ///   exit 1 — open failed (unexpected)
+#[allow(unsafe_code)]
 #[test]
 fn two_connections_to_same_file() {
     // --- Child-process path -------------------------------------------
@@ -30,6 +31,16 @@ fn two_connections_to_same_file() {
     }
 
     // --- Parent-process path ------------------------------------------
+    // Ensure the env var is not set so the parent acquires a real fcntl
+    // lock. Without this, an externally set LIMBO_DISABLE_FILE_LOCK would
+    // cause the parent to skip locking and make the test a no-op.
+    //
+    // SAFETY: nextest runs each integration test in its own subprocess, so
+    // no other threads exist at this point.
+    unsafe {
+        std::env::remove_var("LIMBO_DISABLE_FILE_LOCK");
+    }
+
     // Open the database normally (no LIMBO_DISABLE_FILE_LOCK), which
     // acquires an exclusive fcntl lock. Then spawn a child with the env
     // var set and confirm it can open the same file.
