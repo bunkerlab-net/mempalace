@@ -114,12 +114,17 @@ fn is_stop_word(word: &str) -> bool {
     )
 }
 
-/// Return the stored `source_mtime` for the first drawer from `source_file`,
-/// or `None` when the file has never been mined or has no stored mtime.
+/// Return the agreed-upon `source_mtime` for all drawers from `source_file`,
+/// or `None` when the file has never been mined or its mtime cannot be trusted.
+///
+/// A multi-chunk file produces multiple drawer rows.  All chunks written in the
+/// same mine pass share an identical mtime, so this function verifies that every
+/// row carries the same non-NULL value.  Any NULL or disagreement between rows
+/// signals that the data is inconsistent and the file should be re-mined.
 async fn stored_mtime(conn: &Connection, source_file: &str) -> Result<Option<f64>> {
     let rows = db::query_all(
         conn,
-        "SELECT source_mtime FROM drawers WHERE source_file = ?1 LIMIT 1",
+        "SELECT source_mtime FROM drawers WHERE source_file = ?1",
         turso::params![source_file],
     )
     .await?;
@@ -128,9 +133,22 @@ async fn stored_mtime(conn: &Connection, source_file: &str) -> Result<Option<f64
         return Ok(None);
     }
 
-    // `source_mtime` is nullable — older drawers won't have it set.
-    // `get()` returns Err when the column value is NULL, so map to None.
-    Ok(rows[0].get(0).ok())
+    let mut agreed: Option<f64> = None;
+    for row in &rows {
+        // `get()` returns Err for NULL — map to None and force a re-mine.
+        let Some(m): Option<f64> = row.get(0).ok() else {
+            return Ok(None);
+        };
+        // mtime values come from the OS (no floating-point arithmetic), so
+        // bitwise equality is safe for detecting inconsistency between rows.
+        #[allow(clippy::float_cmp)]
+        let disagrees = agreed.is_some_and(|a| a != m);
+        if disagrees {
+            return Ok(None);
+        }
+        agreed = Some(m);
+    }
+    Ok(agreed)
 }
 
 /// Return the modification time of a file as seconds since the Unix epoch.
@@ -417,6 +435,36 @@ mod async_tests {
         .expect("insert");
 
         assert!(!file_already_mined(&conn, &path).await.expect("check"));
+    }
+
+    /// When two chunks of the same file disagree on their stored mtime, the
+    /// file must be re-mined (inconsistent state should never happen in
+    /// practice but the guard ensures correctness).
+    #[tokio::test]
+    async fn file_already_mined_disagreeing_mtimes_returns_false() {
+        let (_db, conn) = crate::test_helpers::test_db().await;
+        let tmp = tempfile::NamedTempFile::new().expect("tmp file");
+        let path = tmp.path().to_string_lossy().to_string();
+
+        conn.execute(
+            "INSERT INTO drawers (id, wing, room, content, source_file, source_mtime) \
+             VALUES ('chunk0', 'w', 'r', 'c0', ?1, 1000.0)",
+            turso::params![path.as_str()],
+        )
+        .await
+        .expect("insert chunk0");
+        conn.execute(
+            "INSERT INTO drawers (id, wing, room, content, source_file, source_mtime) \
+             VALUES ('chunk1', 'w', 'r', 'c1', ?1, 2000.0)",
+            turso::params![path.as_str()],
+        )
+        .await
+        .expect("insert chunk1");
+
+        assert!(
+            !file_already_mined(&conn, &path).await.expect("check"),
+            "disagreeing mtimes must trigger re-mine"
+        );
     }
 }
 
