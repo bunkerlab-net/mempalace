@@ -16,6 +16,8 @@ use turso::Connection;
 
 use crate::error::{Error, Result};
 
+const MAX_MCP_BODY_LEN: usize = 8 * 1024 * 1024;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TransportMode {
     LineDelimitedJson,
@@ -88,7 +90,7 @@ where
                 return Ok(None);
             };
 
-            if looks_like_json(&first_line) {
+            if looks_like_json(&first_line) || !looks_like_mcp_header(&first_line) {
                 *transport_mode = Some(TransportMode::LineDelimitedJson);
                 Ok(Some(first_line))
             } else {
@@ -163,6 +165,11 @@ where
 
     let body_len = content_length
         .ok_or_else(|| Error::Other("missing Content-Length header in MCP request".to_string()))?;
+    if body_len > MAX_MCP_BODY_LEN {
+        return Err(Error::Other(format!(
+            "MCP request body exceeds {MAX_MCP_BODY_LEN} bytes"
+        )));
+    }
 
     let mut body = vec![0_u8; body_len];
     reader.read_exact(&mut body).await?;
@@ -216,6 +223,13 @@ fn trim_line_endings(line: &str) -> &str {
 fn looks_like_json(line: &str) -> bool {
     let trimmed = line.trim_start();
     trimmed.starts_with('{') || trimmed.starts_with('[')
+}
+
+fn looks_like_mcp_header(line: &str) -> bool {
+    match line.split_once(':') {
+        Some((name, _)) => name.eq_ignore_ascii_case("Content-Length"),
+        None => false,
+    }
 }
 
 async fn handle_request(conn: &Connection, request: &Value) -> Option<Value> {
@@ -329,6 +343,36 @@ mod tests {
 
         assert_eq!(mode, Some(TransportMode::HeaderFramed));
         assert_eq!(request, body);
+    }
+
+    #[tokio::test]
+    async fn malformed_non_header_input_stays_in_line_mode() {
+        let input = b"oops\n";
+        let mut reader = BufReader::new(&input[..]);
+        let mut mode = None;
+
+        let request = read_request(&mut reader, &mut mode)
+            .await
+            .expect("read request")
+            .expect("request body");
+
+        assert_eq!(mode, Some(TransportMode::LineDelimitedJson));
+        assert_eq!(request, "oops");
+    }
+
+    #[tokio::test]
+    async fn rejects_oversized_framed_requests() {
+        let input = format!("Content-Length: {}\r\n\r\n", MAX_MCP_BODY_LEN + 1);
+        let mut reader = BufReader::new(input.as_bytes());
+
+        let error = read_framed_request(&mut reader, None)
+            .await
+            .expect_err("oversized frame should fail");
+
+        match error {
+            Error::Other(message) => assert!(message.contains("exceeds")),
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[tokio::test]
