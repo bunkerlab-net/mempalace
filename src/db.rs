@@ -1,5 +1,7 @@
 //! Database connection helpers for the embedded turso/SQLite engine.
 
+use std::time::Duration;
+
 use turso::{Builder, Connection, Database};
 
 use crate::error::Result;
@@ -9,6 +11,9 @@ use crate::error::Result;
 /// For file-backed databases, WAL journal mode is enabled for better concurrency
 /// and crash recovery when multiple MCP clients write simultaneously.
 /// In-memory databases skip the WAL pragma since it is not applicable.
+///
+/// Callers are expected to have set `LIMBO_DISABLE_FILE_LOCK` before the Tokio
+/// runtime starts (see `main()`).
 pub async fn open_db(path: &str) -> Result<(Database, Connection)> {
     let db = Builder::new_local(path)
         .experimental_triggers(true)
@@ -25,6 +30,10 @@ pub async fn open_db(path: &str) -> Result<(Database, Connection)> {
         let mut wal_rows = conn.query("PRAGMA journal_mode=WAL", ()).await?;
         while wal_rows.next().await?.is_some() {}
     }
+
+    // Allow waiting up to 5 seconds for write locks when another process is
+    // writing, instead of failing immediately.
+    conn.busy_timeout(Duration::from_secs(5))?;
 
     Ok((db, conn))
 }
