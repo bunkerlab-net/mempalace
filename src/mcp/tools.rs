@@ -631,7 +631,7 @@ mod tests {
         assert!(
             result["drawer_id"]
                 .as_str()
-                .unwrap()
+                .expect("drawer_id must be a string")
                 .starts_with("drawer_personal_notes_")
         );
         assert!(
@@ -669,7 +669,9 @@ mod tests {
             "content": content,
         });
         let result = tool_add_drawer(&conn, &args).await;
-        let id = result["drawer_id"].as_str().unwrap();
+        let id = result["drawer_id"]
+            .as_str()
+            .expect("drawer_id must be a string");
 
         let digest = md5::compute(content.as_bytes());
         let hex = format!("{digest:x}");

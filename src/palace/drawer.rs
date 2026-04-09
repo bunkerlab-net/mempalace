@@ -362,7 +362,7 @@ mod async_tests {
         );
     }
 
-    /// Drawers mined before mtime tracking was added have NULL source_mtime.
+    /// Drawers mined before mtime tracking was added have NULL `source_mtime`.
     /// They must be re-mined so the mtime gets recorded.
     #[tokio::test]
     async fn file_already_mined_null_mtime_returns_false() {
