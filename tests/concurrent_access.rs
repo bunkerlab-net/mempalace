@@ -86,6 +86,7 @@ fn two_connections_to_same_file() {
 /// Child-process protocol (invoked via `_MEMPALACE_TEST_LOCK_PATH`):
 ///   exit 0 — open was blocked by the lock (expected)
 ///   exit 1 — open succeeded despite the lock (unexpected)
+#[allow(unsafe_code)]
 #[test]
 fn second_open_fails_without_lock_disabled() {
     // --- Child-process path -------------------------------------------
@@ -99,6 +100,16 @@ fn second_open_fails_without_lock_disabled() {
     }
 
     // --- Parent-process path ------------------------------------------
+    // Ensure the env var is not set so the parent acquires a real fcntl
+    // lock. Without this, an externally set LIMBO_DISABLE_FILE_LOCK would
+    // cause the parent to skip locking and make the test fail misleadingly.
+    //
+    // SAFETY: nextest runs each integration test in its own subprocess, so
+    // no other threads exist at this point.
+    unsafe {
+        std::env::remove_var("LIMBO_DISABLE_FILE_LOCK");
+    }
+
     current_thread_runtime().block_on(async {
         let dir = tempfile::tempdir().expect("failed to create temp dir");
         let db_path = dir.path().join("palace.db");
