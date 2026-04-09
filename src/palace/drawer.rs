@@ -472,11 +472,19 @@ mod async_tests {
 ///
 /// Returns `true` when the drawer was inserted, `false` when a drawer with the
 /// same `id` already exists (idempotent — no error is raised).
+///
+/// The INSERT and word indexing are wrapped in a savepoint so that a failed
+/// `index_words` call rolls back the drawer too, leaving no unsearchable
+/// orphans.  Savepoints nest correctly if the caller is already inside a
+/// transaction.
 pub async fn add_drawer(conn: &Connection, p: &DrawerParams<'_>) -> Result<bool> {
     // SQLite only has i64 integers, so we cast chunk_index (usize) to i32 at the SQL boundary.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let chunk_index_sql = p.chunk_index as i32;
-    let result = conn
+
+    conn.execute("SAVEPOINT add_drawer", ()).await?;
+
+    let rows_affected = conn
         .execute(
             "INSERT OR IGNORE INTO drawers \
              (id, wing, room, content, source_file, chunk_index, added_by, ingest_mode, source_mtime) \
@@ -493,12 +501,32 @@ pub async fn add_drawer(conn: &Connection, p: &DrawerParams<'_>) -> Result<bool>
                 p.source_mtime
             ],
         )
-        .await?;
+        .await;
 
-    if result > 0 {
-        index_words(conn, p.id, p.content).await?;
-        Ok(true)
-    } else {
-        Ok(false)
+    let rows_affected = match rows_affected {
+        Ok(n) => n,
+        Err(e) => {
+            let _ = conn.execute("ROLLBACK TO SAVEPOINT add_drawer", ()).await;
+            let _ = conn.execute("RELEASE SAVEPOINT add_drawer", ()).await;
+            return Err(e.into());
+        }
+    };
+
+    if rows_affected == 0 {
+        // Already exists — nothing was written; release the savepoint and report.
+        conn.execute("RELEASE SAVEPOINT add_drawer", ()).await?;
+        return Ok(false);
+    }
+
+    match index_words(conn, p.id, p.content).await {
+        Ok(()) => {
+            conn.execute("RELEASE SAVEPOINT add_drawer", ()).await?;
+            Ok(true)
+        }
+        Err(e) => {
+            let _ = conn.execute("ROLLBACK TO SAVEPOINT add_drawer", ()).await;
+            let _ = conn.execute("RELEASE SAVEPOINT add_drawer", ()).await;
+            Err(e)
+        }
     }
 }

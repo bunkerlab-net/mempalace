@@ -296,25 +296,6 @@ async fn tool_add_drawer(conn: &Connection, args: &Value) -> Value {
     let hex = format!("{digest:x}");
     let id = format!("drawer_{wing}_{room}_{}", &hex[..16]);
 
-    // If the drawer already exists, return success without re-inserting.
-    if let Ok(rows) = query_all(
-        conn,
-        "SELECT 1 FROM drawers WHERE id = ?1 LIMIT 1",
-        [id.clone()],
-    )
-    .await
-    {
-        if !rows.is_empty() {
-            return json!({
-                "success": true,
-                "reason": "already_exists",
-                "drawer_id": id,
-                "wing": wing,
-                "room": room,
-            });
-        }
-    }
-
     let params = drawer::DrawerParams {
         id: &id,
         wing,
@@ -331,8 +312,17 @@ async fn tool_add_drawer(conn: &Connection, args: &Value) -> Value {
         source_mtime: None,
     };
 
+    // Branch on add_drawer's bool rather than doing a separate SELECT first.
+    // The INSERT OR IGNORE inside add_drawer is atomic, so this is race-free.
     match drawer::add_drawer(conn, &params).await {
-        Ok(_) => json!({"success": true, "drawer_id": id, "wing": wing, "room": room}),
+        Ok(true) => json!({"success": true, "drawer_id": id, "wing": wing, "room": room}),
+        Ok(false) => json!({
+            "success": true,
+            "reason": "already_exists",
+            "drawer_id": id,
+            "wing": wing,
+            "room": room,
+        }),
         Err(e) => json!({"success": false, "error": e.to_string()}),
     }
 }
