@@ -222,7 +222,11 @@ pub fn detect_room(
     }
 
     // Priority 3: keyword scoring
-    let content_lower = &content[..content.len().min(2000)].to_lowercase();
+    let content_lower = content
+        .chars()
+        .take(2000)
+        .collect::<String>()
+        .to_lowercase();
     let mut best_room = "general".to_string();
     let mut best_score = 0usize;
 
@@ -326,6 +330,23 @@ mod tests {
         let content =
             "The database server handles requests and the database pool manages connections";
         assert_eq!(detect_room(&filepath, content, &rooms, &project), "backend");
+    }
+
+    #[test]
+    fn detect_room_keyword_scoring_handles_utf8_without_panicking() {
+        let rooms = vec![RoomConfig {
+            name: "architecture".to_string(),
+            description: String::new(),
+            keywords: vec!["architecture".to_string(), "module".to_string()],
+        }];
+        let project = PathBuf::from("/project");
+        let filepath = PathBuf::from("/project/misc/notes.txt");
+        let content =
+            &"🔥 architecture review of the payment module with São Paulo notes. ".repeat(80);
+        assert_eq!(
+            detect_room(&filepath, content, &rooms, &project),
+            "architecture"
+        );
     }
 
     #[test]

@@ -84,7 +84,11 @@ const TOPIC_KEYWORDS: &[(&str, &[&str])] = &[
 ];
 
 fn detect_convo_room(content: &str) -> String {
-    let content_lower = &content[..content.len().min(3000)].to_lowercase();
+    let content_lower = content
+        .chars()
+        .take(3000)
+        .collect::<String>()
+        .to_lowercase();
     let mut best = ("general", 0usize);
     for &(room, keywords) in TOPIC_KEYWORDS {
         let score: usize = keywords
@@ -358,4 +362,15 @@ pub async fn mine_convos(
     println!("=======================================================\n");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detect_convo_room_handles_utf8_without_panicking() {
+        let content = "🚀 Planejamento técnico com decisão sobre API e arquitetura. ".repeat(200);
+        assert_eq!(detect_convo_room(&content), "technical");
+    }
 }
