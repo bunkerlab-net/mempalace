@@ -312,6 +312,7 @@ pub async fn mine_convos(
                         chunk_index: chunk.chunk_index,
                         added_by: &opts.agent,
                         ingest_mode: "convos",
+                        source_mtime: None,
                     },
                 )
                 .await?;

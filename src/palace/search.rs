@@ -185,6 +185,7 @@ mod async_tests {
                 chunk_index: 0,
                 added_by: "test",
                 ingest_mode: "projects",
+                source_mtime: None,
             },
         )
         .await
@@ -201,6 +202,7 @@ mod async_tests {
                 chunk_index: 0,
                 added_by: "test",
                 ingest_mode: "projects",
+                source_mtime: None,
             },
         )
         .await

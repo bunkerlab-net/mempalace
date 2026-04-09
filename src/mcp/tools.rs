@@ -290,26 +290,31 @@ async fn tool_add_drawer(conn: &Connection, args: &Value) -> Value {
         return json!({"success": false, "error": "wing, room, and content are required", "public": true});
     }
 
-    // Reject if a highly-similar drawer already exists (mirrors Python behaviour).
-    if let Ok(results) = search::search_memories(conn, content, None, None, 5).await {
-        let dups: Vec<Value> = results
-            .iter()
-            .filter(|r| r.relevance > 3.0)
-            .map(|r| {
-                let preview = if r.text.len() > 200 {
-                    format!("{}...", &r.text[..200])
-                } else {
-                    r.text.clone()
-                };
-                json!({"wing": r.wing, "room": r.room, "content": preview})
-            })
-            .collect();
-        if !dups.is_empty() {
-            return json!({"success": false, "reason": "duplicate", "matches": dups});
+    // Deterministic ID: same content in the same wing/room always produces the
+    // same ID, making the call idempotent (mirrors Python mcp_server behaviour).
+    let digest = md5::compute(content.as_bytes());
+    let hex = format!("{digest:x}");
+    let id = format!("drawer_{wing}_{room}_{}", &hex[..16]);
+
+    // If the drawer already exists, return success without re-inserting.
+    if let Ok(rows) = query_all(
+        conn,
+        "SELECT 1 FROM drawers WHERE id = ?1 LIMIT 1",
+        [id.clone()],
+    )
+    .await
+    {
+        if !rows.is_empty() {
+            return json!({
+                "success": true,
+                "reason": "already_exists",
+                "drawer_id": id,
+                "wing": wing,
+                "room": room,
+            });
         }
     }
 
-    let id = Uuid::new_v4().to_string();
     let params = drawer::DrawerParams {
         id: &id,
         wing,
@@ -323,6 +328,7 @@ async fn tool_add_drawer(conn: &Connection, args: &Value) -> Value {
         chunk_index: 0,
         added_by,
         ingest_mode: "mcp",
+        source_mtime: None,
     };
 
     match drawer::add_drawer(conn, &params).await {
@@ -599,5 +605,116 @@ async fn tool_diary_read(conn: &Connection, args: &Value) -> Value {
             })
         }
         Err(e) => json!({"error": e.to_string()}),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn test_conn() -> (turso::Database, turso::Connection) {
+        crate::test_helpers::test_db().await
+    }
+
+    // --- tool_add_drawer ---
+
+    #[tokio::test]
+    async fn add_drawer_inserts_and_returns_success() {
+        let (_db, conn) = test_conn().await;
+        let args = json!({
+            "wing": "personal",
+            "room": "notes",
+            "content": "the quick brown fox jumps over the lazy dog",
+        });
+        let result = tool_add_drawer(&conn, &args).await;
+        assert_eq!(result["success"], true);
+        assert!(
+            result["drawer_id"]
+                .as_str()
+                .unwrap()
+                .starts_with("drawer_personal_notes_")
+        );
+        assert!(
+            result.get("reason").is_none(),
+            "fresh insert must not carry a reason"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_drawer_idempotent_returns_already_exists() {
+        let (_db, conn) = test_conn().await;
+        let args = json!({
+            "wing": "personal",
+            "room": "notes",
+            "content": "idempotent content for testing",
+        });
+        let first = tool_add_drawer(&conn, &args).await;
+        assert_eq!(first["success"], true);
+
+        let second = tool_add_drawer(&conn, &args).await;
+        assert_eq!(second["success"], true);
+        assert_eq!(second["reason"], "already_exists");
+        // The same deterministic ID must be returned both times.
+        assert_eq!(first["drawer_id"], second["drawer_id"]);
+    }
+
+    #[tokio::test]
+    async fn add_drawer_deterministic_id_same_content() {
+        let (_db, conn) = test_conn().await;
+        // Verify the ID is derived from md5(content) and matches our expectation.
+        let content = "fn main() { println!(\"hello\"); }";
+        let args = json!({
+            "wing": "proj",
+            "room": "code",
+            "content": content,
+        });
+        let result = tool_add_drawer(&conn, &args).await;
+        let id = result["drawer_id"].as_str().unwrap();
+
+        let digest = md5::compute(content.as_bytes());
+        let hex = format!("{digest:x}");
+        let expected = format!("drawer_proj_code_{}", &hex[..16]);
+        assert_eq!(id, expected);
+    }
+
+    #[tokio::test]
+    async fn add_drawer_different_content_different_id() {
+        let (_db, conn) = test_conn().await;
+        let ra = tool_add_drawer(
+            &conn,
+            &json!({"wing": "w", "room": "r", "content": "first piece of content"}),
+        )
+        .await;
+        let rb = tool_add_drawer(
+            &conn,
+            &json!({"wing": "w", "room": "r", "content": "second piece of content"}),
+        )
+        .await;
+        assert_ne!(ra["drawer_id"], rb["drawer_id"]);
+    }
+
+    #[tokio::test]
+    async fn add_drawer_missing_required_fields_returns_error() {
+        let (_db, conn) = test_conn().await;
+
+        // Missing content
+        let r = tool_add_drawer(&conn, &json!({"wing": "w", "room": "r"})).await;
+        assert_eq!(r["success"], false);
+
+        // Missing wing
+        let r = tool_add_drawer(
+            &conn,
+            &json!({"room": "r", "content": "some text here for testing"}),
+        )
+        .await;
+        assert_eq!(r["success"], false);
+
+        // Missing room
+        let r = tool_add_drawer(
+            &conn,
+            &json!({"wing": "w", "content": "some text here for testing"}),
+        )
+        .await;
+        assert_eq!(r["success"], false);
     }
 }

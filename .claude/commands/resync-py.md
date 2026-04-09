@@ -1,7 +1,7 @@
 # Resync mempalace-rs with mempalace-py
 
-Analyse all commits in `./mempalace-py` since the last recorded sync commit and port the
-applicable changes to this Rust codebase.
+Analyse all commits in `./mempalace-py` since the last recorded sync commit and port the applicable changes to this
+Rust codebase.
 
 ## How to use
 
@@ -15,17 +15,34 @@ You can optionally pass a base commit to diff from:
 /resync-py [base-commit]
 ```
 
-If no commit is given, look it up from the git log of this repo — the most recent commit
-whose message references a `mempalace-py` commit hash or contains "resync"/"parity" is a
-good heuristic.
+If no commit is given, look it up from the git log of this repo — the most recent commit whose message references a
+`mempalace-py` commit hash or contains "resync"/"parity" is a good heuristic.
 
 ## Instructions
 
 ### Phase 1 — Discover what changed in Python
 
-1. Run `git log --oneline <base-commit>..HEAD` inside `./mempalace-py` to list all new commits.
-2. Run `git diff <base-commit>..HEAD` inside `./mempalace-py` to see the full diff.
-3. Group changes by theme: security, features, bug fixes, documentation, tests.
+`mempalace-py` lives at `./mempalace-py` relative to this repo's root. Use `git -C ./mempalace-py` to run git commands
+inside it without changing directory.
+
+1. Pull the latest `main` so you are diffing against current upstream:
+
+   ```bash
+   git -C ./mempalace-py fetch origin
+   git -C ./mempalace-py checkout main
+   git -C ./mempalace-py pull --ff-only
+   ```
+
+2. Record the HEAD commit — this becomes the **target hash** in `.claude/local/sync-<date>.md`:
+
+   ```bash
+   git -C ./mempalace-py rev-parse HEAD
+   ```
+
+3. Run `git -C ./mempalace-py log --oneline <base-commit>..HEAD` to list all new commits.
+4. Run `git -C ./mempalace-py diff <base-commit>..HEAD --stat -- mempalace/` first (the full diff can exceed 30 KB).
+   Then diff each interesting file individually.
+5. Group changes by theme: security, features, bug fixes, documentation, tests.
 
 ### Phase 2 — Determine what's applicable to Rust
 
@@ -102,4 +119,26 @@ Ports: <bullet list of what was ported>
 - Python `except Exception` → Rust already uses typed errors, no change needed
 - Python `logger.exception()` → Rust `eprintln!` to stderr (MCP servers must not pollute stdout)
 - Python `chromadb.get(limit=10000)` unbounded query guards → Rust SQL `LIMIT` clauses
-- Python `hashlib.md5(usedforsecurity=False)` → Rust `uuid::Uuid::new_v4()` (no change needed)
+- Python `hashlib.md5(usedforsecurity=False)` in the **miner** (source_file+chunk_index hash) → Rust `uuid::Uuid::new_v4()`
+  (no change needed)
+- Python `hashlib.md5(content.encode())` for **deterministic/idempotent MCP IDs** → add the `md5` crate and use
+  `md5::compute`. This is a distinct case from the miner pattern above.
+
+## Turso API gotchas
+
+- `row.get(idx)` returns `Result<T, Error>`, **not** `Option<T>`. Use `.ok()` for nullable columns: `row.get(0).ok()`.
+- `Option<T>` can be passed directly in `turso::params![]`; `None` becomes SQL `NULL`.
+- Comparing OS mtimes as `f64` triggers `clippy::float_cmp` (pedantic). The comparison is correct because both values
+  originate from the same OS syscall — suppress with `#[allow(clippy::float_cmp)]` and a comment.
+
+## Schema migration pattern
+
+When adding a nullable column to an existing table, do **both**:
+
+1. Add the column to the `CREATE TABLE IF NOT EXISTS` DDL (for new databases).
+2. In `ensure_schema`, call `ALTER TABLE … ADD COLUMN` and discard the error — idempotent for existing databases (column
+   already present) and new ones (DDL already added it).
+
+```rust
+let _ = conn.execute("ALTER TABLE drawers ADD COLUMN new_col REAL", ()).await;
+```

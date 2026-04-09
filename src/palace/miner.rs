@@ -201,6 +201,14 @@ pub async fn mine(conn: &Connection, project_dir: &Path, opts: &MineParams) -> R
         let drawers_added = chunks.len();
 
         if !opts.dry_run {
+            // Capture mtime now so all chunks from the same file share the
+            // same recorded timestamp.
+            let source_mtime: Option<f64> = std::fs::metadata(filepath)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs_f64());
+
             for chunk in &chunks {
                 let id = format!(
                     "drawer_{wing}_{room}_{}",
@@ -217,6 +225,7 @@ pub async fn mine(conn: &Connection, project_dir: &Path, opts: &MineParams) -> R
                         chunk_index: chunk.chunk_index,
                         added_by: &opts.agent,
                         ingest_mode: "projects",
+                        source_mtime,
                     },
                 )
                 .await?;

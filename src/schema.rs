@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS drawers (
     added_by TEXT DEFAULT 'mempalace',
     ingest_mode TEXT,
     extract_mode TEXT,
+    source_mtime REAL,
     filed_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -70,7 +71,19 @@ CREATE TABLE IF NOT EXISTS compressed (
 ";
 
 /// Create all tables and indexes if they don't already exist.
+///
+/// Also runs lightweight migrations for existing databases (columns that were
+/// added after initial release).  Each migration is expected to be idempotent —
+/// `SQLite` returns an error when a column already exists, which we deliberately
+/// ignore.
 pub async fn ensure_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(SCHEMA).await?;
+
+    // Migration: add source_mtime column (introduced to support re-mining
+    // modified files).  Silently ignored for databases that already have it.
+    let _ = conn
+        .execute("ALTER TABLE drawers ADD COLUMN source_mtime REAL", ())
+        .await;
+
     Ok(())
 }

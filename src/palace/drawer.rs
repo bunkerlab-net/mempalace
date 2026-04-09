@@ -114,15 +114,61 @@ fn is_stop_word(word: &str) -> bool {
     )
 }
 
-/// Check if a file has already been mined.
-pub async fn file_already_mined(conn: &Connection, source_file: &str) -> Result<bool> {
+/// Return the stored `source_mtime` for the first drawer from `source_file`,
+/// or `None` when the file has never been mined or has no stored mtime.
+async fn stored_mtime(conn: &Connection, source_file: &str) -> Result<Option<f64>> {
     let rows = db::query_all(
         conn,
-        "SELECT 1 FROM drawers WHERE source_file = ?1 LIMIT 1",
+        "SELECT source_mtime FROM drawers WHERE source_file = ?1 LIMIT 1",
         turso::params![source_file],
     )
     .await?;
-    Ok(!rows.is_empty())
+
+    if rows.is_empty() {
+        return Ok(None);
+    }
+
+    // `source_mtime` is nullable — older drawers won't have it set.
+    // `get()` returns Err when the column value is NULL, so map to None.
+    Ok(rows[0].get(0).ok())
+}
+
+/// Return the modification time of a file as seconds since the Unix epoch.
+///
+/// Returns `None` when the file cannot be stat-ed or the platform does not
+/// support modification times.
+fn file_mtime(path: &str) -> Option<f64> {
+    std::fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs_f64())
+}
+
+/// Check whether a file has already been mined *and is unchanged* since it was
+/// last filed.
+///
+/// Returns `false` (triggering a re-mine) when:
+/// - No drawer for the file exists.
+/// - The drawer was created before `source_mtime` tracking was added (NULL).
+/// - The file's current mtime differs from the stored mtime (file was modified).
+pub async fn file_already_mined(conn: &Connection, source_file: &str) -> Result<bool> {
+    let Some(stored) = stored_mtime(conn, source_file).await? else {
+        return Ok(false);
+    };
+
+    let Some(current) = file_mtime(source_file) else {
+        return Ok(false);
+    };
+
+    // Both values are produced by the same OS syscall (stat mtime) converted to
+    // f64 via `as_secs_f64()` — bitwise equality is the correct check here.
+    // An epsilon comparison would incorrectly treat genuinely-equal timestamps
+    // as different.
+    #[allow(clippy::float_cmp)]
+    Ok(stored == current)
 }
 
 /// Parameters for inserting a drawer into the palace.
@@ -143,6 +189,10 @@ pub struct DrawerParams<'a> {
     pub added_by: &'a str,
     /// Ingestion mode: `"projects"` or `"convos"`.
     pub ingest_mode: &'a str,
+    /// Modification time of the source file at mine time (seconds since Unix
+    /// epoch).  `None` for drawers that have no on-disk source (e.g. MCP or
+    /// conversation imports).
+    pub source_mtime: Option<f64>,
 }
 
 #[cfg(test)]
@@ -210,6 +260,7 @@ mod async_tests {
             chunk_index: 0,
             added_by: "test",
             ingest_mode: "projects",
+            source_mtime: None,
         };
         let inserted = add_drawer(&conn, &p).await.expect("add_drawer");
         assert!(inserted);
@@ -236,11 +287,40 @@ mod async_tests {
             chunk_index: 0,
             added_by: "test",
             ingest_mode: "projects",
+            source_mtime: None,
         };
         let first = add_drawer(&conn, &p).await.expect("first insert");
         assert!(first);
         let second = add_drawer(&conn, &p).await.expect("second insert");
         assert!(!second);
+    }
+
+    #[tokio::test]
+    async fn add_drawer_stores_mtime() {
+        let (_db, conn) = crate::test_helpers::test_db().await;
+        let p = DrawerParams {
+            id: "mt1",
+            wing: "w",
+            room: "r",
+            content: "content with mtime",
+            source_file: "mtime_test.rs",
+            chunk_index: 0,
+            added_by: "test",
+            ingest_mode: "projects",
+            source_mtime: Some(1_700_000_000.5),
+        };
+        add_drawer(&conn, &p).await.expect("add_drawer");
+
+        let rows = crate::db::query_all(
+            &conn,
+            "SELECT source_mtime FROM drawers WHERE id = ?1",
+            turso::params!["mt1"],
+        )
+        .await
+        .expect("query");
+        assert_eq!(rows.len(), 1);
+        let stored: Option<f64> = rows[0].get(0).ok();
+        assert_eq!(stored, Some(1_700_000_000.5));
     }
 
     #[tokio::test]
@@ -270,35 +350,100 @@ mod async_tests {
         assert_eq!(rows.len(), 2);
     }
 
+    // --- file_already_mined tests ---
+
     #[tokio::test]
-    async fn file_already_mined_returns_correctly() {
+    async fn file_already_mined_no_row_returns_false() {
         let (_db, conn) = crate::test_helpers::test_db().await;
         assert!(
             !file_already_mined(&conn, "nonexistent.rs")
                 .await
                 .expect("check")
         );
+    }
 
+    /// Drawers mined before mtime tracking was added have NULL source_mtime.
+    /// They must be re-mined so the mtime gets recorded.
+    #[tokio::test]
+    async fn file_already_mined_null_mtime_returns_false() {
+        let (_db, conn) = crate::test_helpers::test_db().await;
         conn.execute(
-            "INSERT INTO drawers (id, wing, room, content, source_file) VALUES ('fm1', 'w', 'r', 'c', 'exists.rs')",
+            "INSERT INTO drawers (id, wing, room, content, source_file) \
+             VALUES ('fm_null', 'w', 'r', 'c', 'exists.rs')",
             (),
         )
         .await
         .expect("insert");
 
-        assert!(file_already_mined(&conn, "exists.rs").await.expect("check"));
+        // NULL mtime → treat as not yet mined (forces re-mine to record mtime).
+        assert!(!file_already_mined(&conn, "exists.rs").await.expect("check"));
+    }
+
+    /// A drawer whose stored mtime matches the file's current mtime is skipped.
+    #[tokio::test]
+    async fn file_already_mined_matching_mtime_returns_true() {
+        let (_db, conn) = crate::test_helpers::test_db().await;
+        let tmp = tempfile::NamedTempFile::new().expect("tmp file");
+        let path = tmp.path().to_string_lossy().to_string();
+        let mtime = file_mtime(&path).expect("mtime");
+
+        conn.execute(
+            "INSERT INTO drawers (id, wing, room, content, source_file, source_mtime) \
+             VALUES ('fm_match', 'w', 'r', 'c', ?1, ?2)",
+            turso::params![path.as_str(), mtime],
+        )
+        .await
+        .expect("insert");
+
+        assert!(file_already_mined(&conn, &path).await.expect("check"));
+    }
+
+    /// A drawer whose stored mtime differs from the file's current mtime must be
+    /// re-mined (the file was modified after it was last filed).
+    #[tokio::test]
+    async fn file_already_mined_stale_mtime_returns_false() {
+        let (_db, conn) = crate::test_helpers::test_db().await;
+        let tmp = tempfile::NamedTempFile::new().expect("tmp file");
+        let path = tmp.path().to_string_lossy().to_string();
+        // Store an obviously wrong mtime.
+        let stale_mtime: f64 = 0.0;
+
+        conn.execute(
+            "INSERT INTO drawers (id, wing, room, content, source_file, source_mtime) \
+             VALUES ('fm_stale', 'w', 'r', 'c', ?1, ?2)",
+            turso::params![path.as_str(), stale_mtime],
+        )
+        .await
+        .expect("insert");
+
+        assert!(!file_already_mined(&conn, &path).await.expect("check"));
     }
 }
 
 /// Add a drawer and index its words.
+///
+/// Returns `true` when the drawer was inserted, `false` when a drawer with the
+/// same `id` already exists (idempotent — no error is raised).
 pub async fn add_drawer(conn: &Connection, p: &DrawerParams<'_>) -> Result<bool> {
     // SQLite only has i64 integers, so we cast chunk_index (usize) to i32 at the SQL boundary.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let chunk_index_sql = p.chunk_index as i32;
     let result = conn
         .execute(
-            "INSERT OR IGNORE INTO drawers (id, wing, room, content, source_file, chunk_index, added_by, ingest_mode) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            turso::params![p.id, p.wing, p.room, p.content, p.source_file, chunk_index_sql, p.added_by, p.ingest_mode],
+            "INSERT OR IGNORE INTO drawers \
+             (id, wing, room, content, source_file, chunk_index, added_by, ingest_mode, source_mtime) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            turso::params![
+                p.id,
+                p.wing,
+                p.room,
+                p.content,
+                p.source_file,
+                chunk_index_sql,
+                p.added_by,
+                p.ingest_mode,
+                p.source_mtime
+            ],
         )
         .await?;
 
