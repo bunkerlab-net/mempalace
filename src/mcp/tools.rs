@@ -146,24 +146,25 @@ fn sanitize_opt_name(value: &str, field_name: &str) -> Result<Option<String>, Va
     sanitize_name(value, field_name).map(Some)
 }
 
-/// Validate drawer/diary content.  Returns `Some(error_json)` if invalid.
-fn sanitize_content(value: &str) -> Option<Value> {
-    if value.trim().is_empty() {
-        return Some(
+/// Validate drawer/diary content.  Returns `Ok(trimmed)` if valid, or `Err(error_json)` if not.
+fn sanitize_content(value: &str) -> Result<String, Value> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(
             json!({"success": false, "error": "content must be a non-empty string", "public": true}),
         );
     }
-    if value.len() > 100_000 {
-        return Some(
+    if trimmed.len() > 100_000 {
+        return Err(
             json!({"success": false, "error": "content exceeds maximum length of 100,000 characters", "public": true}),
         );
     }
-    if value.contains('\x00') {
-        return Some(
+    if trimmed.contains('\x00') {
+        return Err(
             json!({"success": false, "error": "content contains null bytes", "public": true}),
         );
     }
-    None
+    Ok(trimmed.to_string())
 }
 
 /// Append a write-operation entry to `~/.mempalace/wal/write_log.jsonl`.
@@ -429,9 +430,10 @@ async fn tool_add_drawer(conn: &Connection, args: &Value) -> Value {
         Ok(v) => v,
         Err(e) => return e,
     };
-    if let Some(err) = sanitize_content(content) {
-        return err;
-    }
+    let content = match sanitize_content(content) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
 
     // Deterministic ID: sha256(wing+room+content) so the same content in
     // the same wing/room always produces the same ID, making the call idempotent.
@@ -460,7 +462,7 @@ async fn tool_add_drawer(conn: &Connection, args: &Value) -> Value {
         id: &id,
         wing: &wing,
         room: &room,
-        content,
+        content: &content,
         source_file: if source_file.is_empty() {
             ""
         } else {
@@ -739,9 +741,10 @@ async fn tool_diary_write(conn: &Connection, args: &Value) -> Value {
         Ok(v) => v,
         Err(e) => return e,
     };
-    if let Some(err) = sanitize_content(entry) {
-        return err;
-    }
+    let entry = match sanitize_content(entry) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
 
     let wing = format!("wing_{}", agent_name.to_lowercase().replace(' ', "_"));
     let now = Utc::now();
@@ -763,12 +766,12 @@ async fn tool_diary_write(conn: &Connection, args: &Value) -> Value {
     match conn
         .execute(
             "INSERT OR IGNORE INTO drawers (id, wing, room, content, source_file, chunk_index, added_by, ingest_mode, extract_mode) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            turso::params![id.as_str(), wing.as_str(), "diary", entry, "", 0i32, agent_name.as_str(), "diary", topic.as_str()],
+            turso::params![id.as_str(), wing.as_str(), "diary", entry.as_str(), "", 0i32, agent_name.as_str(), "diary", topic.as_str()],
         )
         .await
     {
         Ok(_) => {
-            let _ = drawer::index_words(conn, &id, entry).await;
+            let _ = drawer::index_words(conn, &id, &entry).await;
             json!({
                 "success": true,
                 "entry_id": id,
