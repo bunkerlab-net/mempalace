@@ -154,7 +154,7 @@ fn sanitize_content(value: &str) -> Result<String, Value> {
             json!({"success": false, "error": "content must be a non-empty string", "public": true}),
         );
     }
-    if trimmed.len() > 100_000 {
+    if trimmed.chars().count() > 100_000 {
         return Err(
             json!({"success": false, "error": "content exceeds maximum length of 100,000 characters", "public": true}),
         );
