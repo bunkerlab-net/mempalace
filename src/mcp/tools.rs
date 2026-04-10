@@ -488,15 +488,18 @@ async fn tool_add_drawer(conn: &Connection, args: &Value) -> Value {
 }
 
 async fn tool_delete_drawer(conn: &Connection, args: &Value) -> Value {
-    let drawer_id = str_arg(args, "drawer_id");
-    if drawer_id.is_empty() {
-        return json!({"success": false, "error": "drawer_id is required", "public": true});
+    let drawer_id = match sanitize_name(str_arg(args, "drawer_id"), "drawer_id") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if !drawer_id.starts_with("drawer_") {
+        return json!({"success": false, "error": "drawer_id has invalid format", "public": true});
     }
 
     wal_log("delete_drawer", json!({"drawer_id": drawer_id})).await;
 
     match conn
-        .execute("DELETE FROM drawers WHERE id = ?", [drawer_id.to_string()])
+        .execute("DELETE FROM drawers WHERE id = ?", [drawer_id.as_str()])
         .await
     {
         Ok(_) => {
@@ -504,7 +507,7 @@ async fn tool_delete_drawer(conn: &Connection, args: &Value) -> Value {
             let _ = conn
                 .execute(
                     "DELETE FROM drawer_words WHERE drawer_id = ?",
-                    [drawer_id.to_string()],
+                    [drawer_id.as_str()],
                 )
                 .await;
             json!({"success": true, "drawer_id": drawer_id})
@@ -569,6 +572,9 @@ async fn tool_kg_add(conn: &Connection, args: &Value) -> Value {
         Ok(v) => v,
         Err(e) => return e,
     };
+    // `sanitize_name` intentionally restricts objects to [a-zA-Z0-9_ .'-].
+    // If KG identifiers ever need ':', '@', or '/' (e.g. for namespaced IRIs),
+    // introduce a dedicated `sanitize_kg_object` rather than relaxing this one.
     let object = match sanitize_name(object, "object") {
         Ok(v) => v,
         Err(e) => return e,
@@ -719,7 +725,14 @@ async fn tool_diary_write(conn: &Connection, args: &Value) -> Value {
     let entry = str_arg(args, "entry");
     let topic = {
         let t = str_arg(args, "topic");
-        if t.is_empty() { "general" } else { t }
+        if t.is_empty() {
+            "general".to_string()
+        } else {
+            match sanitize_name(t, "topic") {
+                Ok(v) => v,
+                Err(e) => return e,
+            }
+        }
     };
 
     let agent_name = match sanitize_name(agent_name, "agent_name") {
@@ -750,7 +763,7 @@ async fn tool_diary_write(conn: &Connection, args: &Value) -> Value {
     match conn
         .execute(
             "INSERT OR IGNORE INTO drawers (id, wing, room, content, source_file, chunk_index, added_by, ingest_mode, extract_mode) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            turso::params![id.as_str(), wing.as_str(), "diary", entry, "", 0i32, agent_name.as_str(), "diary", topic],
+            turso::params![id.as_str(), wing.as_str(), "diary", entry, "", 0i32, agent_name.as_str(), "diary", topic.as_str()],
         )
         .await
     {
