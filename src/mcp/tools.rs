@@ -421,7 +421,7 @@ async fn tool_add_drawer(conn: &Connection, args: &Value) -> Value {
     // Deterministic ID: sha256(wing+room+content[:100]) so the same content in
     // the same wing/room always produces the same ID, making the call idempotent.
     let content_prefix: String = content.chars().take(100).collect();
-    let hash = sha2::Sha256::digest(format!("{wing}{room}{content_prefix}").as_bytes());
+    let hash = sha2::Sha256::digest(format!("{wing}\u{1f}{room}\u{1f}{content_prefix}").as_bytes());
     let hex: String = hash.iter().fold(String::new(), |mut s, b| {
         use std::fmt::Write as _;
         let _ = write!(s, "{b:02x}");
@@ -862,7 +862,7 @@ mod tests {
             .expect("drawer_id must be a string");
 
         let content_prefix: String = content.chars().take(100).collect();
-        let hash = sha2::Sha256::digest(format!("projcode{content_prefix}").as_bytes());
+        let hash = sha2::Sha256::digest(format!("proj\u{1f}code\u{1f}{content_prefix}").as_bytes());
         let hex: String = hash.iter().fold(String::new(), |mut s, b| {
             use std::fmt::Write as _;
             let _ = write!(s, "{b:02x}");
