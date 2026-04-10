@@ -22,18 +22,16 @@ If no commit is given, look it up from the git log of this repo — the most rec
 
 ### Phase 1 — Discover what changed in Python
 
-`mempalace-py` lives at `./mempalace-py` relative to this repo's root. Use `git -C ./mempalace-py` to run git commands
-inside it without changing directory.
+`mempalace-py` is a git submodule at `./mempalace-py`. Use `git submodule update` to advance it, then
+use `git -C ./mempalace-py` to run git commands inside it without changing directory.
 
-1. Pull the latest `main` so you are diffing against current upstream:
+1. Advance the submodule to the latest upstream `main`:
 
    ```bash
-   git -C ./mempalace-py fetch origin
-   git -C ./mempalace-py checkout main
-   git -C ./mempalace-py pull --ff-only
+   git submodule update --remote mempalace-py
    ```
 
-2. Record the HEAD commit — this becomes the **target hash** in `.claude/local/sync-<date>.md`:
+2. Record the HEAD commit — this becomes the **target hash** in the commit message:
 
    ```bash
    git -C ./mempalace-py rev-parse HEAD
@@ -90,6 +88,12 @@ Run `cargo test` and `cargo clippy` after all units are complete.
 
 ### Phase 6 — Commit
 
+Stage the updated submodule pointer alongside the Rust changes, then commit:
+
+```bash
+git add mempalace-py
+```
+
 Commit with a message like:
 
 ```text
@@ -121,8 +125,9 @@ Ports: <bullet list of what was ported>
 - Python `chromadb.get(limit=10000)` unbounded query guards → Rust SQL `LIMIT` clauses
 - Python `hashlib.md5(usedforsecurity=False)` in the **miner** (source_file+chunk_index hash) → Rust `uuid::Uuid::new_v4()`
   (no change needed)
-- Python `hashlib.md5(content.encode())` for **deterministic/idempotent MCP IDs** → add the `md5` crate and use
-  `md5::compute`. This is a distinct case from the miner pattern above.
+- Python `hashlib.sha256(...)` for **deterministic/idempotent MCP IDs** (add_drawer, diary entries) → use the `sha2`
+  crate: `sha2::Sha256::digest(input.as_bytes())`, format the output bytes as lowercase hex via `fold`/`write!`.
+  The `md5` crate has been removed; do not re-introduce it.
 
 ## Turso API gotchas
 
