@@ -101,6 +101,9 @@ fn walk_dir_gitignore(project_dir: &Path) -> Vec<PathBuf> {
             .unwrap_or("")
             .to_lowercase();
         if READABLE_EXTENSIONS.contains(&ext.as_str()) {
+            if entry.metadata().is_ok_and(|m| m.len() > MAX_FILE_SIZE) {
+                continue;
+            }
             files.push(path.to_path_buf());
         }
     }

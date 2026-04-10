@@ -159,15 +159,27 @@ fn sanitize_content(value: &str) -> Option<Value> {
 /// the WAL directory is unwritable.
 fn wal_log(operation: &str, params: &Value) {
     let wal_dir = crate::config::config_dir().join("wal");
+
+    // Create directory with restrictive permissions atomically on Unix.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        if std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&wal_dir)
+            .is_err()
+        {
+            eprintln!("WAL: could not create {}", wal_dir.display());
+            return;
+        }
+    }
+    #[cfg(not(unix))]
     if std::fs::create_dir_all(&wal_dir).is_err() {
         eprintln!("WAL: could not create {}", wal_dir.display());
         return;
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        let _ = std::fs::set_permissions(&wal_dir, std::fs::Permissions::from_mode(0o700));
-    }
+
     let wal_file = wal_dir.join("write_log.jsonl");
     let entry = json!({
         "timestamp": Utc::now().to_rfc3339(),
@@ -176,17 +188,27 @@ fn wal_log(operation: &str, params: &Value) {
     });
     let mut line = serde_json::to_string(&entry).unwrap_or_default();
     line.push('\n');
-    match std::fs::OpenOptions::new()
+
+    // Open with restrictive mode atomically on Unix.
+    #[cfg(unix)]
+    let open_result = {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(&wal_file)
+    };
+    #[cfg(not(unix))]
+    let open_result = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&wal_file)
-    {
+        .open(&wal_file);
+
+    match open_result {
         Ok(mut file) => {
-            let _ = file.write_all(line.as_bytes());
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt as _;
-                let _ = std::fs::set_permissions(&wal_file, std::fs::Permissions::from_mode(0o600));
+            if let Err(e) = file.write_all(line.as_bytes()) {
+                eprintln!("WAL write failed: {e}");
             }
         }
         Err(e) => eprintln!("WAL write failed: {e}"),
@@ -407,6 +429,7 @@ async fn tool_add_drawer(conn: &Connection, args: &Value) -> Value {
     });
     let id = format!("drawer_{wing}_{room}_{}", &hex[..24]);
 
+    let content_preview: String = content.chars().take(200).collect();
     wal_log(
         "add_drawer",
         &json!({
@@ -415,7 +438,7 @@ async fn tool_add_drawer(conn: &Connection, args: &Value) -> Value {
             "room": room,
             "added_by": added_by,
             "content_length": content.len(),
-            "content_preview": &content[..content.len().min(200)],
+            "content_preview": content_preview,
         }),
     );
 
@@ -579,6 +602,16 @@ async fn tool_kg_invalidate(conn: &Connection, args: &Value) -> Value {
         }
     };
 
+    if let Some(err) = sanitize_name(subject, "subject") {
+        return err;
+    }
+    if let Some(err) = sanitize_name(predicate, "predicate") {
+        return err;
+    }
+    if let Some(err) = sanitize_name(object, "object") {
+        return err;
+    }
+
     wal_log(
         "kg_invalidate",
         &json!({"subject": subject, "predicate": predicate, "object": object, "ended": ended}),
@@ -684,13 +717,14 @@ async fn tool_diary_write(conn: &Connection, args: &Value) -> Value {
     let now = Utc::now();
     let id = Uuid::new_v4().to_string();
 
+    let entry_preview: String = entry.chars().take(200).collect();
     wal_log(
         "diary_write",
         &json!({
             "agent_name": agent_name,
             "topic": topic,
             "entry_id": id,
-            "entry_preview": &entry[..entry.len().min(200)],
+            "entry_preview": entry_preview,
         }),
     );
 

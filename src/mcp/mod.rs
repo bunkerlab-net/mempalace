@@ -72,12 +72,13 @@ async fn handle_request(conn: &Connection, request: &Value) -> Option<Value> {
 
     match method {
         "initialize" => {
-            let client_version = params
-                .get("protocolVersion")
-                .and_then(|v| v.as_str())
-                .unwrap_or(SUPPORTED_PROTOCOL_VERSIONS[SUPPORTED_PROTOCOL_VERSIONS.len() - 1]);
-            let negotiated = if SUPPORTED_PROTOCOL_VERSIONS.contains(&client_version) {
-                client_version
+            let client_version = params.get("protocolVersion").and_then(|v| v.as_str());
+            let negotiated = if let Some(cv) = client_version {
+                if SUPPORTED_PROTOCOL_VERSIONS.contains(&cv) {
+                    cv
+                } else {
+                    SUPPORTED_PROTOCOL_VERSIONS[0]
+                }
             } else {
                 SUPPORTED_PROTOCOL_VERSIONS[0]
             };
