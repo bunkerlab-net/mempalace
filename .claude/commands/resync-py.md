@@ -28,7 +28,7 @@ use `git -C ./mempalace-py` to run git commands inside it without changing direc
 1. Advance the submodule to the latest upstream `main`:
 
    ```bash
-   git submodule update --remote mempalace-py
+   git submodule update --init --remote mempalace-py
    ```
 
 2. Record the HEAD commit — this becomes the **target hash** in the commit message:
