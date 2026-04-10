@@ -379,8 +379,8 @@ async fn tool_check_duplicate(conn: &Connection, args: &Value) -> Value {
                 .iter()
                 .filter(|r| r.relevance > 3.0) // high word overlap
                 .map(|r| {
-                    let preview = if r.text.len() > 200 {
-                        format!("{}...", &r.text[..200])
+                    let preview = if r.text.chars().count() > 200 {
+                        format!("{}...", r.text.chars().take(200).collect::<String>())
                     } else {
                         r.text.clone()
                     };
@@ -765,9 +765,10 @@ async fn tool_diary_read(conn: &Connection, args: &Value) -> Value {
     let agent_name = str_arg(args, "agent_name");
     let last_n = int_arg(args, "last_n", 10);
 
-    if agent_name.is_empty() {
-        return json!({"error": "agent_name is required", "public": true});
-    }
+    let agent_name = match sanitize_name(agent_name, "agent_name") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
 
     let wing = format!("wing_{}", agent_name.to_lowercase().replace(' ', "_"));
 
