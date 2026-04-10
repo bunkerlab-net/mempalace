@@ -1,6 +1,6 @@
 # Resync mempalace-rs with mempalace-py
 
-Analyse all commits in `./mempalace-py` since the last recorded sync commit and port the applicable changes to this
+Analyse all commits in `./mempalace-py` since the last pinned submodule commit and port the applicable changes to this
 Rust codebase.
 
 ## How to use
@@ -9,38 +9,48 @@ Rust codebase.
 /resync-py
 ```
 
-You can optionally pass a base commit to diff from:
-
-```bash
-/resync-py [base-commit]
-```
-
-If no commit is given, look it up from the git log of this repo — the most recent commit whose message references a
-`mempalace-py` commit hash or contains "resync"/"parity" is a good heuristic.
-
 ## Instructions
 
 ### Phase 1 — Discover what changed in Python
 
-`mempalace-py` is a git submodule at `./mempalace-py`. Use `git submodule update` to advance it, then
-use `git -C ./mempalace-py` to run git commands inside it without changing directory.
+`mempalace-py` is a git submodule at `./mempalace-py`. Advance it to the latest upstream `main`, then diff to find the
+old and new commit hashes.
 
-1. Advance the submodule to the latest upstream `main`:
+1. Record the current (old) submodule commit:
+
+   ```bash
+   git submodule status mempalace-py
+   ```
+
+2. Advance the submodule:
 
    ```bash
    git submodule update --init --remote mempalace-py
    ```
 
-2. Record the HEAD commit — this becomes the **target hash** in the commit message:
+3. Use `git diff` to confirm the old → new pointer:
 
    ```bash
-   git -C ./mempalace-py rev-parse HEAD
+   git diff mempalace-py
    ```
 
-3. Run `git -C ./mempalace-py log --oneline <base-commit>..HEAD` to list all new commits.
-4. Run `git -C ./mempalace-py diff <base-commit>..HEAD --stat -- mempalace/` first (the full diff can exceed 30 KB).
+   The `-Subproject commit <old>` / `+Subproject commit <new>` lines give you both hashes.
+
+4. List all new commits:
+
+   ```bash
+   git -C ./mempalace-py log --oneline <old>..<new>
+   ```
+
+5. Diff the interesting directory (check stat first; full diff can exceed 30 KB):
+
+   ```bash
+   git -C ./mempalace-py diff <old>..<new> --stat -- mempalace/
+   ```
+
    Then diff each interesting file individually.
-5. Group changes by theme: security, features, bug fixes, documentation, tests.
+
+6. Group changes by theme: security, features, bug fixes, documentation, tests.
 
 ### Phase 2 — Determine what's applicable to Rust
 
@@ -73,7 +83,7 @@ Present the plan grouped into work units before writing any code.
 ### Phase 4 — Implement
 
 Work through the plan unit by unit. After each unit, verify with `cargo build`.
-Run `cargo test` and `cargo clippy` after all units are complete.
+Run `cargo nextest run` and `cargo clippy --all-targets --all-features` after all units are complete.
 
 ### Phase 5 — Update documentation
 
@@ -83,12 +93,10 @@ Run `cargo test` and `cargo clippy` after all units are complete.
    - Conversation format list
    - Architecture tree (new files)
    - Differences table
-3. Record the new sync commit in a comment or commit message so the next
-   `/resync-py` knows where to start.
 
 ### Phase 6 — Commit
 
-Stage the updated submodule pointer alongside the Rust changes, then commit:
+Stage the updated submodule pointer alongside the Rust changes:
 
 ```bash
 git add mempalace-py
