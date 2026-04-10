@@ -7,7 +7,7 @@ license = "MIT"
 repository = "https://github.com/bunkerlab-net/mempalace"
 keywords = ["mcp", "memory", "ai", "sqlite", "llm"]
 categories = ["command-line-utilities", "database"]
-rust-version = "1.85"
+rust-version = "1.88"
 
 [lints.rust]
 unsafe_code = "deny"
