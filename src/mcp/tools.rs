@@ -1,7 +1,9 @@
 use std::collections::HashMap;
+use std::io::Write as _;
 
 use chrono::Utc;
 use serde_json::{Value, json};
+use sha2::Digest as _;
 use turso::Connection;
 
 use uuid::Uuid;
@@ -93,6 +95,145 @@ fn int_arg(args: &Value, key: &str, default: i64) -> i64 {
         .unwrap_or(default)
 }
 
+/// Validate a wing/room/entity name.  Returns `Some(error_json)` if invalid.
+///
+/// Validates and trims `value`.
+///
+/// Returns `Ok(trimmed)` on success, or `Err(error_json)` if the value is
+/// empty, too long, contains path-traversal sequences, null bytes, an invalid
+/// first character, or characters outside `[a-zA-Z0-9_ .'-]`.
+fn sanitize_name(value: &str, field_name: &str) -> Result<String, Value> {
+    let v = value.trim();
+    if v.is_empty() {
+        return Err(
+            json!({"success": false, "error": format!("{field_name} must be a non-empty string"), "public": true}),
+        );
+    }
+    if v.len() > 128 {
+        return Err(
+            json!({"success": false, "error": format!("{field_name} exceeds maximum length of 128 characters"), "public": true}),
+        );
+    }
+    if v.contains("..") || v.contains('/') || v.contains('\\') || v.contains('\x00') {
+        return Err(
+            json!({"success": false, "error": format!("{field_name} contains invalid characters"), "public": true}),
+        );
+    }
+    if !v.chars().next().is_some_and(|c| c.is_ascii_alphanumeric()) {
+        return Err(
+            json!({"success": false, "error": format!("{field_name} must start with an alphanumeric character"), "public": true}),
+        );
+    }
+    if !v
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | ' ' | '.' | '\'' | '-'))
+    {
+        return Err(
+            json!({"success": false, "error": format!("{field_name} contains invalid characters"), "public": true}),
+        );
+    }
+    Ok(v.to_string())
+}
+
+/// Validate an optional name filter.
+///
+/// Returns `Ok(None)` if the value is empty/whitespace-only, `Ok(Some(trimmed))`
+/// if valid, or `Err(error_json)` if the non-empty value fails `sanitize_name`.
+fn sanitize_opt_name(value: &str, field_name: &str) -> Result<Option<String>, Value> {
+    if value.trim().is_empty() {
+        return Ok(None);
+    }
+    sanitize_name(value, field_name).map(Some)
+}
+
+/// Validate drawer/diary content.  Returns `Ok(trimmed)` if valid, or `Err(error_json)` if not.
+fn sanitize_content(value: &str) -> Result<String, Value> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(
+            json!({"success": false, "error": "content must be a non-empty string", "public": true}),
+        );
+    }
+    if trimmed.chars().count() > 100_000 {
+        return Err(
+            json!({"success": false, "error": "content exceeds maximum length of 100,000 characters", "public": true}),
+        );
+    }
+    if trimmed.contains('\x00') {
+        return Err(
+            json!({"success": false, "error": "content contains null bytes", "public": true}),
+        );
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Append a write-operation entry to `~/.mempalace/wal/write_log.jsonl`.
+///
+/// Failures are non-fatal: logged to stderr so the server stays alive even if
+/// the WAL directory is unwritable.  I/O is offloaded to `spawn_blocking` so
+/// the async worker thread is not stalled by filesystem calls.
+async fn wal_log(operation: &str, params: Value) {
+    let operation = operation.to_string();
+    let _ = tokio::task::spawn_blocking(move || {
+        let wal_dir = crate::config::config_dir().join("wal");
+
+        // Create directory with restrictive permissions atomically on Unix.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt as _;
+            if std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&wal_dir)
+                .is_err()
+            {
+                eprintln!("WAL: could not create {}", wal_dir.display());
+                return;
+            }
+        }
+        #[cfg(not(unix))]
+        if std::fs::create_dir_all(&wal_dir).is_err() {
+            eprintln!("WAL: could not create {}", wal_dir.display());
+            return;
+        }
+
+        let wal_file = wal_dir.join("write_log.jsonl");
+        let entry = json!({
+            "timestamp": Utc::now().to_rfc3339(),
+            "operation": operation,
+            "params": params,
+        });
+        let mut line = serde_json::to_string(&entry).unwrap_or_default();
+        line.push('\n');
+
+        // Open with restrictive mode atomically on Unix.
+        #[cfg(unix)]
+        let open_result = {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .mode(0o600)
+                .open(&wal_file)
+        };
+        #[cfg(not(unix))]
+        let open_result = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&wal_file);
+
+        match open_result {
+            Ok(mut file) => {
+                if let Err(e) = file.write_all(line.as_bytes()) {
+                    eprintln!("WAL write failed: {e}");
+                }
+            }
+            Err(e) => eprintln!("WAL write failed: {e}"),
+        }
+    })
+    .await;
+}
+
 async fn tool_status(conn: &Connection) -> Value {
     let rows = query_all(
         conn,
@@ -151,20 +292,23 @@ async fn tool_list_wings(conn: &Connection) -> Value {
 }
 
 async fn tool_list_rooms(conn: &Connection, args: &Value) -> Value {
-    let wing = str_arg(args, "wing");
+    let wing = match sanitize_opt_name(str_arg(args, "wing"), "wing") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
 
-    let rows = if wing.is_empty() {
+    let rows = if let Some(ref w) = wing {
         query_all(
             conn,
-            "SELECT room, COUNT(*) as cnt FROM drawers GROUP BY room",
-            (),
+            "SELECT room, COUNT(*) as cnt FROM drawers WHERE wing = ? GROUP BY room",
+            [w.as_str()],
         )
         .await
     } else {
         query_all(
             conn,
-            "SELECT room, COUNT(*) as cnt FROM drawers WHERE wing = ? GROUP BY room",
-            [wing.to_string()],
+            "SELECT room, COUNT(*) as cnt FROM drawers GROUP BY room",
+            (),
         )
         .await
     };
@@ -177,7 +321,7 @@ async fn tool_list_rooms(conn: &Connection, args: &Value) -> Value {
                 let count: i64 = row.get(1).unwrap_or(0);
                 rooms.insert(room, count);
             }
-            json!({"wing": if wing.is_empty() { "all" } else { wing }, "rooms": rooms})
+            json!({"wing": wing.as_deref().unwrap_or("all"), "rooms": rooms})
         }
         Err(e) => json!({"error": e.to_string()}),
     }
@@ -209,21 +353,13 @@ async fn tool_get_taxonomy(conn: &Connection) -> Value {
 async fn tool_search(conn: &Connection, args: &Value) -> Value {
     let query = str_arg(args, "query");
     let limit = usize::try_from(int_arg(args, "limit", 5)).unwrap_or(5);
-    let wing = {
-        let w = str_arg(args, "wing");
-        if w.is_empty() {
-            None
-        } else {
-            Some(w.to_string())
-        }
+    let wing = match sanitize_opt_name(str_arg(args, "wing"), "wing") {
+        Ok(v) => v,
+        Err(e) => return e,
     };
-    let room = {
-        let r = str_arg(args, "room");
-        if r.is_empty() {
-            None
-        } else {
-            Some(r.to_string())
-        }
+    let room = match sanitize_opt_name(str_arg(args, "room"), "room") {
+        Ok(v) => v,
+        Err(e) => return e,
     };
 
     match search::search_memories(conn, query, wing.as_deref(), room.as_deref(), limit).await {
@@ -255,8 +391,8 @@ async fn tool_check_duplicate(conn: &Connection, args: &Value) -> Value {
                 .iter()
                 .filter(|r| r.relevance > 3.0) // high word overlap
                 .map(|r| {
-                    let preview = if r.text.len() > 200 {
-                        format!("{}...", &r.text[..200])
+                    let preview = if r.text.chars().count() > 200 {
+                        format!("{}...", r.text.chars().take(200).collect::<String>())
                     } else {
                         r.text.clone()
                     };
@@ -286,21 +422,47 @@ async fn tool_add_drawer(conn: &Connection, args: &Value) -> Value {
         if a.is_empty() { "mcp" } else { a }
     };
 
-    if wing.is_empty() || room.is_empty() || content.is_empty() {
-        return json!({"success": false, "error": "wing, room, and content are required", "public": true});
-    }
+    let wing = match sanitize_name(wing, "wing") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let room = match sanitize_name(room, "room") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let content = match sanitize_content(content) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
 
-    // Deterministic ID: same content in the same wing/room always produces the
-    // same ID, making the call idempotent (mirrors Python mcp_server behaviour).
-    let digest = md5::compute(content.as_bytes());
-    let hex = format!("{digest:x}");
-    let id = format!("drawer_{wing}_{room}_{}", &hex[..16]);
+    // Deterministic ID: sha256(wing+room+content) so the same content in
+    // the same wing/room always produces the same ID, making the call idempotent.
+    let hash = sha2::Sha256::digest(format!("{wing}\u{1f}{room}\u{1f}{content}").as_bytes());
+    let hex: String = hash.iter().fold(String::new(), |mut s, b| {
+        use std::fmt::Write as _;
+        let _ = write!(s, "{b:02x}");
+        s
+    });
+    let id = format!("drawer_{wing}_{room}_{}", &hex[..24]);
+    let content_preview: String = content.chars().take(200).collect();
+    wal_log(
+        "add_drawer",
+        json!({
+            "drawer_id": id,
+            "wing": wing,
+            "room": room,
+            "added_by": added_by,
+            "content_length": content.len(),
+            "content_preview": content_preview,
+        }),
+    )
+    .await;
 
     let params = drawer::DrawerParams {
         id: &id,
-        wing,
-        room,
-        content,
+        wing: &wing,
+        room: &room,
+        content: &content,
         source_file: if source_file.is_empty() {
             ""
         } else {
@@ -328,13 +490,18 @@ async fn tool_add_drawer(conn: &Connection, args: &Value) -> Value {
 }
 
 async fn tool_delete_drawer(conn: &Connection, args: &Value) -> Value {
-    let drawer_id = str_arg(args, "drawer_id");
-    if drawer_id.is_empty() {
-        return json!({"success": false, "error": "drawer_id is required", "public": true});
+    let drawer_id = match sanitize_name(str_arg(args, "drawer_id"), "drawer_id") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if !drawer_id.starts_with("drawer_") {
+        return json!({"success": false, "error": "drawer_id has invalid format", "public": true});
     }
 
+    wal_log("delete_drawer", json!({"drawer_id": drawer_id})).await;
+
     match conn
-        .execute("DELETE FROM drawers WHERE id = ?", [drawer_id.to_string()])
+        .execute("DELETE FROM drawers WHERE id = ?", [drawer_id.as_str()])
         .await
     {
         Ok(_) => {
@@ -342,7 +509,7 @@ async fn tool_delete_drawer(conn: &Connection, args: &Value) -> Value {
             let _ = conn
                 .execute(
                     "DELETE FROM drawer_words WHERE drawer_id = ?",
-                    [drawer_id.to_string()],
+                    [drawer_id.as_str()],
                 )
                 .await;
             json!({"success": true, "drawer_id": drawer_id})
@@ -352,7 +519,10 @@ async fn tool_delete_drawer(conn: &Connection, args: &Value) -> Value {
 }
 
 async fn tool_kg_query(conn: &Connection, args: &Value) -> Value {
-    let entity = str_arg(args, "entity");
+    let entity = match sanitize_name(str_arg(args, "entity"), "entity") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
     let as_of = {
         let a = str_arg(args, "as_of");
         if a.is_empty() {
@@ -366,7 +536,7 @@ async fn tool_kg_query(conn: &Connection, args: &Value) -> Value {
         if d.is_empty() { "both" } else { d }
     };
 
-    match kg::query::query_entity(conn, entity, as_of.as_deref(), direction).await {
+    match kg::query::query_entity(conn, &entity, as_of.as_deref(), direction).await {
         Ok(facts) => {
             let count = facts.len();
             json!({"entity": entity, "as_of": as_of, "facts": facts, "count": count})
@@ -396,12 +566,40 @@ async fn tool_kg_add(conn: &Connection, args: &Value) -> Value {
         }
     };
 
+    let subject = match sanitize_name(subject, "subject") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let predicate = match sanitize_name(predicate, "predicate") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    // `sanitize_name` intentionally restricts objects to [a-zA-Z0-9_ .'-].
+    // If KG identifiers ever need ':', '@', or '/' (e.g. for namespaced IRIs),
+    // introduce a dedicated `sanitize_kg_object` rather than relaxing this one.
+    let object = match sanitize_name(object, "object") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+
+    wal_log(
+        "kg_add",
+        json!({
+            "subject": subject,
+            "predicate": predicate,
+            "object": object,
+            "valid_from": valid_from,
+            "source_closet": source_closet,
+        }),
+    )
+    .await;
+
     match kg::add_triple(
         conn,
         &kg::TripleParams {
-            subject,
-            predicate,
-            object,
+            subject: &subject,
+            predicate: &predicate,
+            object: &object,
             valid_from: valid_from.as_deref(),
             valid_to: None,
             confidence: 1.0,
@@ -433,7 +631,26 @@ async fn tool_kg_invalidate(conn: &Connection, args: &Value) -> Value {
         }
     };
 
-    match kg::invalidate(conn, subject, predicate, object, ended.as_deref()).await {
+    let subject = match sanitize_name(subject, "subject") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let predicate = match sanitize_name(predicate, "predicate") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let object = match sanitize_name(object, "object") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+
+    wal_log(
+        "kg_invalidate",
+        json!({"subject": subject, "predicate": predicate, "object": object, "ended": ended}),
+    )
+    .await;
+
+    match kg::invalidate(conn, &subject, &predicate, &object, ended.as_deref()).await {
         Ok(()) => json!({
             "success": true,
             "fact": format!("{subject} → {predicate} → {object}"),
@@ -444,13 +661,9 @@ async fn tool_kg_invalidate(conn: &Connection, args: &Value) -> Value {
 }
 
 async fn tool_kg_timeline(conn: &Connection, args: &Value) -> Value {
-    let entity = {
-        let e = str_arg(args, "entity");
-        if e.is_empty() {
-            None
-        } else {
-            Some(e.to_string())
-        }
+    let entity = match sanitize_opt_name(str_arg(args, "entity"), "entity") {
+        Ok(v) => v,
+        Err(e) => return e,
     };
 
     match kg::query::timeline(conn, entity.as_deref()).await {
@@ -474,31 +687,26 @@ async fn tool_kg_stats(conn: &Connection) -> Value {
 }
 
 async fn tool_traverse(conn: &Connection, args: &Value) -> Value {
-    let start_room = str_arg(args, "start_room");
+    let start_room = match sanitize_name(str_arg(args, "start_room"), "start_room") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
     let max_hops = usize::try_from(int_arg(args, "max_hops", 2)).unwrap_or(2);
 
-    match graph::traverse(conn, start_room, max_hops).await {
+    match graph::traverse(conn, &start_room, max_hops).await {
         Ok(results) => json!(results),
         Err(e) => json!({"error": e.to_string()}),
     }
 }
 
 async fn tool_find_tunnels(conn: &Connection, args: &Value) -> Value {
-    let wing_a = {
-        let w = str_arg(args, "wing_a");
-        if w.is_empty() {
-            None
-        } else {
-            Some(w.to_string())
-        }
+    let wing_a = match sanitize_opt_name(str_arg(args, "wing_a"), "wing_a") {
+        Ok(v) => v,
+        Err(e) => return e,
     };
-    let wing_b = {
-        let w = str_arg(args, "wing_b");
-        if w.is_empty() {
-            None
-        } else {
-            Some(w.to_string())
-        }
+    let wing_b = match sanitize_opt_name(str_arg(args, "wing_b"), "wing_b") {
+        Ok(v) => v,
+        Err(e) => return e,
     };
 
     match graph::find_tunnels(conn, wing_a.as_deref(), wing_b.as_deref()).await {
@@ -519,27 +727,51 @@ async fn tool_diary_write(conn: &Connection, args: &Value) -> Value {
     let entry = str_arg(args, "entry");
     let topic = {
         let t = str_arg(args, "topic");
-        if t.is_empty() { "general" } else { t }
+        if t.is_empty() {
+            "general".to_string()
+        } else {
+            match sanitize_name(t, "topic") {
+                Ok(v) => v,
+                Err(e) => return e,
+            }
+        }
     };
 
-    if agent_name.is_empty() || entry.is_empty() {
-        return json!({"success": false, "error": "agent_name and entry are required", "public": true});
-    }
+    let agent_name = match sanitize_name(agent_name, "agent_name") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let entry = match sanitize_content(entry) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
 
     let wing = format!("wing_{}", agent_name.to_lowercase().replace(' ', "_"));
     let now = Utc::now();
     let id = Uuid::new_v4().to_string();
 
+    let entry_preview: String = entry.chars().take(200).collect();
+    wal_log(
+        "diary_write",
+        json!({
+            "agent_name": agent_name,
+            "topic": topic,
+            "entry_id": id,
+            "entry_preview": entry_preview,
+        }),
+    )
+    .await;
+
     // Use direct SQL to also set extract_mode (topic) which DrawerParams doesn't support
     match conn
         .execute(
             "INSERT OR IGNORE INTO drawers (id, wing, room, content, source_file, chunk_index, added_by, ingest_mode, extract_mode) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            turso::params![id.as_str(), wing.as_str(), "diary", entry, "", 0i32, agent_name, "diary", topic],
+            turso::params![id.as_str(), wing.as_str(), "diary", entry.as_str(), "", 0i32, agent_name.as_str(), "diary", topic.as_str()],
         )
         .await
     {
         Ok(_) => {
-            let _ = drawer::index_words(conn, &id, entry).await;
+            let _ = drawer::index_words(conn, &id, &entry).await;
             json!({
                 "success": true,
                 "entry_id": id,
@@ -556,9 +788,10 @@ async fn tool_diary_read(conn: &Connection, args: &Value) -> Value {
     let agent_name = str_arg(args, "agent_name");
     let last_n = int_arg(args, "last_n", 10);
 
-    if agent_name.is_empty() {
-        return json!({"error": "agent_name is required", "public": true});
-    }
+    let agent_name = match sanitize_name(agent_name, "agent_name") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
 
     let wing = format!("wing_{}", agent_name.to_lowercase().replace(' ', "_"));
 
@@ -651,7 +884,7 @@ mod tests {
     #[tokio::test]
     async fn add_drawer_deterministic_id_same_content() {
         let (_db, conn) = test_conn().await;
-        // Verify the ID is derived from md5(content) and matches our expectation.
+        // Verify the ID is derived from sha256(wing+room+content)[:24].
         let content = "fn main() { println!(\"hello\"); }";
         let args = json!({
             "wing": "proj",
@@ -663,9 +896,13 @@ mod tests {
             .as_str()
             .expect("drawer_id must be a string");
 
-        let digest = md5::compute(content.as_bytes());
-        let hex = format!("{digest:x}");
-        let expected = format!("drawer_proj_code_{}", &hex[..16]);
+        let hash = sha2::Sha256::digest(format!("proj\u{1f}code\u{1f}{content}").as_bytes());
+        let hex: String = hash.iter().fold(String::new(), |mut s, b| {
+            use std::fmt::Write as _;
+            let _ = write!(s, "{b:02x}");
+            s
+        });
+        let expected = format!("drawer_proj_code_{}", &hex[..24]);
         assert_eq!(id, expected);
     }
 

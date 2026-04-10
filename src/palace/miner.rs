@@ -23,6 +23,9 @@ pub struct MineParams {
     pub respect_gitignore: bool,
 }
 
+/// Files larger than this are skipped — prevents OOM on huge files.
+const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
+
 const READABLE_EXTENSIONS: &[&str] = &[
     "txt", "md", "py", "js", "ts", "jsx", "tsx", "json", "yaml", "yml", "html", "css", "java",
     "go", "rs", "rb", "sh", "csv", "sql", "toml", "c", "cpp", "h", "hpp", "swift", "kt", "scala",
@@ -98,6 +101,9 @@ fn walk_dir_gitignore(project_dir: &Path) -> Vec<PathBuf> {
             .unwrap_or("")
             .to_lowercase();
         if READABLE_EXTENSIONS.contains(&ext.as_str()) {
+            if entry.metadata().is_ok_and(|m| m.len() > MAX_FILE_SIZE) {
+                continue;
+            }
             files.push(path.to_path_buf());
         }
     }
@@ -113,6 +119,11 @@ fn walk_dir(dir: &Path, files: &mut Vec<PathBuf>) {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
 
+        // Skip symlinks — prevents following links to /dev/urandom etc.
+        if path.is_symlink() {
+            continue;
+        }
+
         if path.is_dir() {
             if !is_skip_dir(&name) {
                 walk_dir(&path, files);
@@ -122,6 +133,10 @@ fn walk_dir(dir: &Path, files: &mut Vec<PathBuf>) {
             if READABLE_EXTENSIONS.contains(&ext_lower.as_str())
                 && !SKIP_FILES.contains(&name.as_str())
             {
+                // Skip files exceeding size limit
+                if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_FILE_SIZE) {
+                    continue;
+                }
                 files.push(path);
             }
         }

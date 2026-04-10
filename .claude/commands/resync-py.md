@@ -1,6 +1,6 @@
 # Resync mempalace-rs with mempalace-py
 
-Analyse all commits in `./mempalace-py` since the last recorded sync commit and port the applicable changes to this
+Analyse all commits in `./mempalace-py` since the last pinned submodule commit and port the applicable changes to this
 Rust codebase.
 
 ## How to use
@@ -9,40 +9,48 @@ Rust codebase.
 /resync-py
 ```
 
-You can optionally pass a base commit to diff from:
-
-```bash
-/resync-py [base-commit]
-```
-
-If no commit is given, look it up from the git log of this repo — the most recent commit whose message references a
-`mempalace-py` commit hash or contains "resync"/"parity" is a good heuristic.
-
 ## Instructions
 
 ### Phase 1 — Discover what changed in Python
 
-`mempalace-py` lives at `./mempalace-py` relative to this repo's root. Use `git -C ./mempalace-py` to run git commands
-inside it without changing directory.
+`mempalace-py` is a git submodule at `./mempalace-py`. Advance it to the latest upstream `main`, then diff to find the
+old and new commit hashes.
 
-1. Pull the latest `main` so you are diffing against current upstream:
-
-   ```bash
-   git -C ./mempalace-py fetch origin
-   git -C ./mempalace-py checkout main
-   git -C ./mempalace-py pull --ff-only
-   ```
-
-2. Record the HEAD commit — this becomes the **target hash** in `.claude/local/sync-<date>.md`:
+1. Record the current (old) submodule commit:
 
    ```bash
-   git -C ./mempalace-py rev-parse HEAD
+   git submodule status mempalace-py
    ```
 
-3. Run `git -C ./mempalace-py log --oneline <base-commit>..HEAD` to list all new commits.
-4. Run `git -C ./mempalace-py diff <base-commit>..HEAD --stat -- mempalace/` first (the full diff can exceed 30 KB).
+2. Advance the submodule:
+
+   ```bash
+   git submodule update --init --remote mempalace-py
+   ```
+
+3. Use `git diff` to confirm the old → new pointer:
+
+   ```bash
+   git diff mempalace-py
+   ```
+
+   The `-Subproject commit <old>` / `+Subproject commit <new>` lines give you both hashes.
+
+4. List all new commits:
+
+   ```bash
+   git -C ./mempalace-py log --oneline <old>..<new>
+   ```
+
+5. Diff the interesting directory (check stat first; full diff can exceed 30 KB):
+
+   ```bash
+   git -C ./mempalace-py diff <old>..<new> --stat -- mempalace/
+   ```
+
    Then diff each interesting file individually.
-5. Group changes by theme: security, features, bug fixes, documentation, tests.
+
+6. Group changes by theme: security, features, bug fixes, documentation, tests.
 
 ### Phase 2 — Determine what's applicable to Rust
 
@@ -75,7 +83,7 @@ Present the plan grouped into work units before writing any code.
 ### Phase 4 — Implement
 
 Work through the plan unit by unit. After each unit, verify with `cargo build`.
-Run `cargo test` and `cargo clippy` after all units are complete.
+Run `cargo nextest run` and `cargo clippy --all-targets --all-features` after all units are complete.
 
 ### Phase 5 — Update documentation
 
@@ -85,10 +93,14 @@ Run `cargo test` and `cargo clippy` after all units are complete.
    - Conversation format list
    - Architecture tree (new files)
    - Differences table
-3. Record the new sync commit in a comment or commit message so the next
-   `/resync-py` knows where to start.
 
 ### Phase 6 — Commit
+
+Stage the updated submodule pointer alongside the Rust changes:
+
+```bash
+git add mempalace-py
+```
 
 Commit with a message like:
 
@@ -121,8 +133,9 @@ Ports: <bullet list of what was ported>
 - Python `chromadb.get(limit=10000)` unbounded query guards → Rust SQL `LIMIT` clauses
 - Python `hashlib.md5(usedforsecurity=False)` in the **miner** (source_file+chunk_index hash) → Rust `uuid::Uuid::new_v4()`
   (no change needed)
-- Python `hashlib.md5(content.encode())` for **deterministic/idempotent MCP IDs** → add the `md5` crate and use
-  `md5::compute`. This is a distinct case from the miner pattern above.
+- Python `hashlib.sha256(...)` for **deterministic/idempotent MCP IDs** (add_drawer, diary entries) → use the `sha2`
+  crate: `sha2::Sha256::digest(input.as_bytes())`, format the output bytes as lowercase hex via `fold`/`write!`.
+  The `md5` crate has been removed; do not re-introduce it.
 
 ## Turso API gotchas
 

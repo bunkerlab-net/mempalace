@@ -12,6 +12,8 @@ use crate::palace::room_detect::is_skip_dir;
 
 const CONVO_EXTENSIONS: &[&str] = &["txt", "md", "json", "jsonl"];
 const MIN_CHUNK_SIZE: usize = 30;
+/// Files larger than this are skipped — prevents OOM on huge files.
+const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
 
 const TOPIC_KEYWORDS: &[(&str, &[&str])] = &[
     (
@@ -209,6 +211,11 @@ fn walk_convos(dir: &Path, files: &mut Vec<PathBuf>) {
     for entry in entries.flatten() {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
+        // Skip symlinks — prevents following links to /dev/urandom etc.
+        if path.is_symlink() {
+            continue;
+        }
+
         if path.is_dir() {
             // Skip global cache dirs plus Claude Code-specific output dirs that
             // contain tool output and agent memory — not conversation transcripts.
@@ -220,6 +227,10 @@ fn walk_convos(dir: &Path, files: &mut Vec<PathBuf>) {
             // Skip .meta.json files — these are Claude Code session metadata,
             // not conversation content.
             if CONVO_EXTENSIONS.contains(&ext_lower.as_str()) && !name.ends_with(".meta.json") {
+                // Skip files exceeding size limit
+                if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_FILE_SIZE) {
+                    continue;
+                }
                 files.push(path);
             }
         }
