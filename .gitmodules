@@ -1,0 +1,3 @@
+[submodule "mempalace-py"]
+	path = mempalace-py
+	url = https://github.com/milla-jovovich/mempalace.git
