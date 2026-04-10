@@ -1,7 +1,9 @@
 use std::collections::HashMap;
+use std::io::Write as _;
 
 use chrono::Utc;
 use serde_json::{Value, json};
+use sha2::Digest as _;
 use turso::Connection;
 
 use uuid::Uuid;
@@ -91,6 +93,104 @@ fn int_arg(args: &Value, key: &str, default: i64) -> i64 {
                 })
         })
         .unwrap_or(default)
+}
+
+/// Validate a wing/room/entity name.  Returns `Some(error_json)` if invalid.
+///
+/// Rejects: empty, >128 chars, path traversal (`..`, `/`, `\`), null bytes,
+/// and characters outside `[a-zA-Z0-9_ .'-]`.  First character must be ASCII
+/// alphanumeric.
+fn sanitize_name(value: &str, field_name: &str) -> Option<Value> {
+    let v = value.trim();
+    if v.is_empty() {
+        return Some(
+            json!({"success": false, "error": format!("{field_name} must be a non-empty string"), "public": true}),
+        );
+    }
+    if v.len() > 128 {
+        return Some(
+            json!({"success": false, "error": format!("{field_name} exceeds maximum length of 128 characters"), "public": true}),
+        );
+    }
+    if v.contains("..") || v.contains('/') || v.contains('\\') || v.contains('\x00') {
+        return Some(
+            json!({"success": false, "error": format!("{field_name} contains invalid characters"), "public": true}),
+        );
+    }
+    if !v.chars().next().is_some_and(|c| c.is_ascii_alphanumeric()) {
+        return Some(
+            json!({"success": false, "error": format!("{field_name} must start with an alphanumeric character"), "public": true}),
+        );
+    }
+    if !v
+        .chars()
+        .all(|c| c.is_alphanumeric() || matches!(c, '_' | ' ' | '.' | '\'' | '-'))
+    {
+        return Some(
+            json!({"success": false, "error": format!("{field_name} contains invalid characters"), "public": true}),
+        );
+    }
+    None
+}
+
+/// Validate drawer/diary content.  Returns `Some(error_json)` if invalid.
+fn sanitize_content(value: &str) -> Option<Value> {
+    if value.trim().is_empty() {
+        return Some(
+            json!({"success": false, "error": "content must be a non-empty string", "public": true}),
+        );
+    }
+    if value.len() > 100_000 {
+        return Some(
+            json!({"success": false, "error": "content exceeds maximum length of 100,000 characters", "public": true}),
+        );
+    }
+    if value.contains('\x00') {
+        return Some(
+            json!({"success": false, "error": "content contains null bytes", "public": true}),
+        );
+    }
+    None
+}
+
+/// Append a write-operation entry to `~/.mempalace/wal/write_log.jsonl`.
+///
+/// Failures are non-fatal: logged to stderr so the server stays alive even if
+/// the WAL directory is unwritable.
+fn wal_log(operation: &str, params: &Value) {
+    let wal_dir = crate::config::config_dir().join("wal");
+    if std::fs::create_dir_all(&wal_dir).is_err() {
+        eprintln!("WAL: could not create {}", wal_dir.display());
+        return;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = std::fs::set_permissions(&wal_dir, std::fs::Permissions::from_mode(0o700));
+    }
+    let wal_file = wal_dir.join("write_log.jsonl");
+    let entry = json!({
+        "timestamp": Utc::now().to_rfc3339(),
+        "operation": operation,
+        "params": params,
+    });
+    let mut line = serde_json::to_string(&entry).unwrap_or_default();
+    line.push('\n');
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&wal_file)
+    {
+        Ok(mut file) => {
+            let _ = file.write_all(line.as_bytes());
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                let _ = std::fs::set_permissions(&wal_file, std::fs::Permissions::from_mode(0o600));
+            }
+        }
+        Err(e) => eprintln!("WAL write failed: {e}"),
+    }
 }
 
 async fn tool_status(conn: &Connection) -> Value {
@@ -286,15 +386,38 @@ async fn tool_add_drawer(conn: &Connection, args: &Value) -> Value {
         if a.is_empty() { "mcp" } else { a }
     };
 
-    if wing.is_empty() || room.is_empty() || content.is_empty() {
-        return json!({"success": false, "error": "wing, room, and content are required", "public": true});
+    if let Some(err) = sanitize_name(wing, "wing") {
+        return err;
+    }
+    if let Some(err) = sanitize_name(room, "room") {
+        return err;
+    }
+    if let Some(err) = sanitize_content(content) {
+        return err;
     }
 
-    // Deterministic ID: same content in the same wing/room always produces the
-    // same ID, making the call idempotent (mirrors Python mcp_server behaviour).
-    let digest = md5::compute(content.as_bytes());
-    let hex = format!("{digest:x}");
-    let id = format!("drawer_{wing}_{room}_{}", &hex[..16]);
+    // Deterministic ID: sha256(wing+room+content[:100]) so the same content in
+    // the same wing/room always produces the same ID, making the call idempotent.
+    let content_prefix: String = content.chars().take(100).collect();
+    let hash = sha2::Sha256::digest(format!("{wing}{room}{content_prefix}").as_bytes());
+    let hex: String = hash.iter().fold(String::new(), |mut s, b| {
+        use std::fmt::Write as _;
+        let _ = write!(s, "{b:02x}");
+        s
+    });
+    let id = format!("drawer_{wing}_{room}_{}", &hex[..24]);
+
+    wal_log(
+        "add_drawer",
+        &json!({
+            "drawer_id": id,
+            "wing": wing,
+            "room": room,
+            "added_by": added_by,
+            "content_length": content.len(),
+            "content_preview": &content[..content.len().min(200)],
+        }),
+    );
 
     let params = drawer::DrawerParams {
         id: &id,
@@ -332,6 +455,8 @@ async fn tool_delete_drawer(conn: &Connection, args: &Value) -> Value {
     if drawer_id.is_empty() {
         return json!({"success": false, "error": "drawer_id is required", "public": true});
     }
+
+    wal_log("delete_drawer", &json!({"drawer_id": drawer_id}));
 
     match conn
         .execute("DELETE FROM drawers WHERE id = ?", [drawer_id.to_string()])
@@ -396,6 +521,27 @@ async fn tool_kg_add(conn: &Connection, args: &Value) -> Value {
         }
     };
 
+    if let Some(err) = sanitize_name(subject, "subject") {
+        return err;
+    }
+    if let Some(err) = sanitize_name(predicate, "predicate") {
+        return err;
+    }
+    if let Some(err) = sanitize_name(object, "object") {
+        return err;
+    }
+
+    wal_log(
+        "kg_add",
+        &json!({
+            "subject": subject,
+            "predicate": predicate,
+            "object": object,
+            "valid_from": valid_from,
+            "source_closet": source_closet,
+        }),
+    );
+
     match kg::add_triple(
         conn,
         &kg::TripleParams {
@@ -432,6 +578,11 @@ async fn tool_kg_invalidate(conn: &Connection, args: &Value) -> Value {
             Some(e.to_string())
         }
     };
+
+    wal_log(
+        "kg_invalidate",
+        &json!({"subject": subject, "predicate": predicate, "object": object, "ended": ended}),
+    );
 
     match kg::invalidate(conn, subject, predicate, object, ended.as_deref()).await {
         Ok(()) => json!({
@@ -522,13 +673,26 @@ async fn tool_diary_write(conn: &Connection, args: &Value) -> Value {
         if t.is_empty() { "general" } else { t }
     };
 
-    if agent_name.is_empty() || entry.is_empty() {
-        return json!({"success": false, "error": "agent_name and entry are required", "public": true});
+    if let Some(err) = sanitize_name(agent_name, "agent_name") {
+        return err;
+    }
+    if let Some(err) = sanitize_content(entry) {
+        return err;
     }
 
     let wing = format!("wing_{}", agent_name.to_lowercase().replace(' ', "_"));
     let now = Utc::now();
     let id = Uuid::new_v4().to_string();
+
+    wal_log(
+        "diary_write",
+        &json!({
+            "agent_name": agent_name,
+            "topic": topic,
+            "entry_id": id,
+            "entry_preview": &entry[..entry.len().min(200)],
+        }),
+    );
 
     // Use direct SQL to also set extract_mode (topic) which DrawerParams doesn't support
     match conn
@@ -651,7 +815,7 @@ mod tests {
     #[tokio::test]
     async fn add_drawer_deterministic_id_same_content() {
         let (_db, conn) = test_conn().await;
-        // Verify the ID is derived from md5(content) and matches our expectation.
+        // Verify the ID is derived from sha256(wing+room+content[:100])[:24].
         let content = "fn main() { println!(\"hello\"); }";
         let args = json!({
             "wing": "proj",
@@ -663,9 +827,14 @@ mod tests {
             .as_str()
             .expect("drawer_id must be a string");
 
-        let digest = md5::compute(content.as_bytes());
-        let hex = format!("{digest:x}");
-        let expected = format!("drawer_proj_code_{}", &hex[..16]);
+        let content_prefix: String = content.chars().take(100).collect();
+        let hash = sha2::Sha256::digest(format!("projcode{content_prefix}").as_bytes());
+        let hex: String = hash.iter().fold(String::new(), |mut s, b| {
+            use std::fmt::Write as _;
+            let _ = write!(s, "{b:02x}");
+            s
+        });
+        let expected = format!("drawer_proj_code_{}", &hex[..24]);
         assert_eq!(id, expected);
     }
 

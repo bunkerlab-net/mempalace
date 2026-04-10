@@ -101,6 +101,11 @@ fn split_file(
     sanitize_re: &Regex,
     multi_underscore: &Regex,
 ) -> Result<usize> {
+    const MAX_SIZE: u64 = 500 * 1024 * 1024; // 500 MB safety limit
+    if fs::metadata(path).is_ok_and(|m| m.len() > MAX_SIZE) {
+        println!("  SKIP: {} exceeds 500 MB limit", path.display());
+        return Ok(0);
+    }
     let content = fs::read_to_string(path).unwrap_or_default();
     let lines: Vec<&str> = content.lines().collect();
     let mut boundaries = find_session_boundaries(&lines);

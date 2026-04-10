@@ -14,6 +14,9 @@ use turso::Connection;
 
 use crate::error::Result;
 
+const SUPPORTED_PROTOCOL_VERSIONS: &[&str] =
+    &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+
 /// Run the MCP server: read JSON-RPC 2.0 requests from stdin, write responses to stdout.
 pub async fn run(conn: &Connection) -> Result<()> {
     let stdin = tokio::io::stdin();
@@ -68,15 +71,26 @@ async fn handle_request(conn: &Connection, request: &Value) -> Option<Value> {
     let req_id = request.get("id").cloned().unwrap_or(Value::Null);
 
     match method {
-        "initialize" => Some(json!({
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "result": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": "mempalace", "version": env!("CARGO_PKG_VERSION")},
-            }
-        })),
+        "initialize" => {
+            let client_version = params
+                .get("protocolVersion")
+                .and_then(|v| v.as_str())
+                .unwrap_or(SUPPORTED_PROTOCOL_VERSIONS[SUPPORTED_PROTOCOL_VERSIONS.len() - 1]);
+            let negotiated = if SUPPORTED_PROTOCOL_VERSIONS.contains(&client_version) {
+                client_version
+            } else {
+                SUPPORTED_PROTOCOL_VERSIONS[0]
+            };
+            Some(json!({
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "protocolVersion": negotiated,
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "mempalace", "version": env!("CARGO_PKG_VERSION")},
+                }
+            }))
+        }
 
         "notifications/initialized" => None,
 
@@ -91,7 +105,11 @@ async fn handle_request(conn: &Connection, request: &Value) -> Option<Value> {
 
         "tools/call" => {
             let tool_name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
-            let tool_args = params.get("arguments").cloned().unwrap_or(json!({}));
+            let tool_args = params
+                .get("arguments")
+                .filter(|v| !v.is_null())
+                .cloned()
+                .unwrap_or(json!({}));
 
             let result = tools::dispatch(conn, tool_name, &tool_args).await;
 

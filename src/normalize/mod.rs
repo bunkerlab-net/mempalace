@@ -13,6 +13,19 @@ use crate::error::Result;
 /// Normalize a file to transcript format.
 /// Detects format automatically and converts to `> user\nresponse\n\n` format.
 pub fn normalize(filepath: &Path) -> Result<String> {
+    const MAX_SIZE: u64 = 500 * 1024 * 1024; // 500 MB safety limit
+    let file_size = std::fs::metadata(filepath)
+        .map_err(|e| {
+            crate::error::Error::Other(format!("could not read {}: {e}", filepath.display()))
+        })?
+        .len();
+    if file_size > MAX_SIZE {
+        return Err(crate::error::Error::Other(format!(
+            "file too large ({} MB): {}",
+            file_size / (1024 * 1024),
+            filepath.display()
+        )));
+    }
     let content = std::fs::read_to_string(filepath).or_else(|_| {
         std::fs::read(filepath).map(|bytes| String::from_utf8_lossy(&bytes).to_string())
     })?;
