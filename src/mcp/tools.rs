@@ -97,28 +97,30 @@ fn int_arg(args: &Value, key: &str, default: i64) -> i64 {
 
 /// Validate a wing/room/entity name.  Returns `Some(error_json)` if invalid.
 ///
-/// Rejects: empty, >128 chars, path traversal (`..`, `/`, `\`), null bytes,
-/// and characters outside `[a-zA-Z0-9_ .'-]`.  First character must be ASCII
-/// alphanumeric.
-fn sanitize_name(value: &str, field_name: &str) -> Option<Value> {
+/// Validates and trims `value`.
+///
+/// Returns `Ok(trimmed)` on success, or `Err(error_json)` if the value is
+/// empty, too long, contains path-traversal sequences, null bytes, an invalid
+/// first character, or characters outside `[a-zA-Z0-9_ .'-]`.
+fn sanitize_name(value: &str, field_name: &str) -> Result<String, Value> {
     let v = value.trim();
     if v.is_empty() {
-        return Some(
+        return Err(
             json!({"success": false, "error": format!("{field_name} must be a non-empty string"), "public": true}),
         );
     }
     if v.len() > 128 {
-        return Some(
+        return Err(
             json!({"success": false, "error": format!("{field_name} exceeds maximum length of 128 characters"), "public": true}),
         );
     }
     if v.contains("..") || v.contains('/') || v.contains('\\') || v.contains('\x00') {
-        return Some(
+        return Err(
             json!({"success": false, "error": format!("{field_name} contains invalid characters"), "public": true}),
         );
     }
     if !v.chars().next().is_some_and(|c| c.is_ascii_alphanumeric()) {
-        return Some(
+        return Err(
             json!({"success": false, "error": format!("{field_name} must start with an alphanumeric character"), "public": true}),
         );
     }
@@ -126,11 +128,11 @@ fn sanitize_name(value: &str, field_name: &str) -> Option<Value> {
         .chars()
         .all(|c| c.is_alphanumeric() || matches!(c, '_' | ' ' | '.' | '\'' | '-'))
     {
-        return Some(
+        return Err(
             json!({"success": false, "error": format!("{field_name} contains invalid characters"), "public": true}),
         );
     }
-    None
+    Ok(v.to_string())
 }
 
 /// Validate drawer/diary content.  Returns `Some(error_json)` if invalid.
@@ -408,12 +410,14 @@ async fn tool_add_drawer(conn: &Connection, args: &Value) -> Value {
         if a.is_empty() { "mcp" } else { a }
     };
 
-    if let Some(err) = sanitize_name(wing, "wing") {
-        return err;
-    }
-    if let Some(err) = sanitize_name(room, "room") {
-        return err;
-    }
+    let wing = match sanitize_name(wing, "wing") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let room = match sanitize_name(room, "room") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
     if let Some(err) = sanitize_content(content) {
         return err;
     }
@@ -444,8 +448,8 @@ async fn tool_add_drawer(conn: &Connection, args: &Value) -> Value {
 
     let params = drawer::DrawerParams {
         id: &id,
-        wing,
-        room,
+        wing: &wing,
+        room: &room,
         content,
         source_file: if source_file.is_empty() {
             ""
@@ -544,15 +548,18 @@ async fn tool_kg_add(conn: &Connection, args: &Value) -> Value {
         }
     };
 
-    if let Some(err) = sanitize_name(subject, "subject") {
-        return err;
-    }
-    if let Some(err) = sanitize_name(predicate, "predicate") {
-        return err;
-    }
-    if let Some(err) = sanitize_name(object, "object") {
-        return err;
-    }
+    let subject = match sanitize_name(subject, "subject") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let predicate = match sanitize_name(predicate, "predicate") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let object = match sanitize_name(object, "object") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
 
     wal_log(
         "kg_add",
@@ -568,9 +575,9 @@ async fn tool_kg_add(conn: &Connection, args: &Value) -> Value {
     match kg::add_triple(
         conn,
         &kg::TripleParams {
-            subject,
-            predicate,
-            object,
+            subject: &subject,
+            predicate: &predicate,
+            object: &object,
             valid_from: valid_from.as_deref(),
             valid_to: None,
             confidence: 1.0,
@@ -602,22 +609,25 @@ async fn tool_kg_invalidate(conn: &Connection, args: &Value) -> Value {
         }
     };
 
-    if let Some(err) = sanitize_name(subject, "subject") {
-        return err;
-    }
-    if let Some(err) = sanitize_name(predicate, "predicate") {
-        return err;
-    }
-    if let Some(err) = sanitize_name(object, "object") {
-        return err;
-    }
+    let subject = match sanitize_name(subject, "subject") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let predicate = match sanitize_name(predicate, "predicate") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let object = match sanitize_name(object, "object") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
 
     wal_log(
         "kg_invalidate",
         &json!({"subject": subject, "predicate": predicate, "object": object, "ended": ended}),
     );
 
-    match kg::invalidate(conn, subject, predicate, object, ended.as_deref()).await {
+    match kg::invalidate(conn, &subject, &predicate, &object, ended.as_deref()).await {
         Ok(()) => json!({
             "success": true,
             "fact": format!("{subject} → {predicate} → {object}"),
@@ -706,9 +716,10 @@ async fn tool_diary_write(conn: &Connection, args: &Value) -> Value {
         if t.is_empty() { "general" } else { t }
     };
 
-    if let Some(err) = sanitize_name(agent_name, "agent_name") {
-        return err;
-    }
+    let agent_name = match sanitize_name(agent_name, "agent_name") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
     if let Some(err) = sanitize_content(entry) {
         return err;
     }
@@ -732,7 +743,7 @@ async fn tool_diary_write(conn: &Connection, args: &Value) -> Value {
     match conn
         .execute(
             "INSERT OR IGNORE INTO drawers (id, wing, room, content, source_file, chunk_index, added_by, ingest_mode, extract_mode) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            turso::params![id.as_str(), wing.as_str(), "diary", entry, "", 0i32, agent_name, "diary", topic],
+            turso::params![id.as_str(), wing.as_str(), "diary", entry, "", 0i32, agent_name.as_str(), "diary", topic],
         )
         .await
     {
