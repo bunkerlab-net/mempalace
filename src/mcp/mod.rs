@@ -112,50 +112,7 @@ async fn handle_request(conn: &Connection, request: &Value) -> Option<Value> {
             }))
         }
 
-        "tools/call" => {
-            let tool_name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
-            let tool_args = params
-                .get("arguments")
-                .filter(|v| !v.is_null())
-                .cloned()
-                .unwrap_or(json!({}));
-
-            let result = tools::dispatch(conn, tool_name, &tool_args).await;
-
-            // Sanitize: only expose errors that tools explicitly mark as public.
-            // All other errors are masked so internal paths and database details
-            // are never leaked over the protocol.
-            let sanitized = if let Some(error_val) = result.get("error") {
-                let is_public = result
-                    .get("public")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
-                let error_msg: String = error_val
-                    .as_str()
-                    .unwrap_or("unknown")
-                    .chars()
-                    .take(100)
-                    .collect();
-                eprintln!("tool error: tool={tool_name} error={error_msg}");
-                if is_public {
-                    json!({"error": error_msg})
-                } else {
-                    json!({"error": "Internal tool error"})
-                }
-            } else {
-                result
-            };
-
-            let text = serde_json::to_string_pretty(&sanitized).unwrap_or_default();
-
-            Some(json!({
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "result": {
-                    "content": [{"type": "text", "text": text}]
-                }
-            }))
-        }
+        "tools/call" => Some(handle_request_tools_call(conn, &params, req_id).await),
 
         _ => Some(json!({
             "jsonrpc": "2.0",
@@ -163,4 +120,50 @@ async fn handle_request(conn: &Connection, request: &Value) -> Option<Value> {
             "error": {"code": -32601, "message": format!("Unknown method: {method}")}
         })),
     }
+}
+
+/// Dispatch a `tools/call` request and return a sanitized JSON-RPC response.
+async fn handle_request_tools_call(conn: &Connection, params: &Value, req_id: Value) -> Value {
+    let tool_name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
+    let tool_args = params
+        .get("arguments")
+        .filter(|v| !v.is_null())
+        .cloned()
+        .unwrap_or(json!({}));
+
+    let result = tools::dispatch(conn, tool_name, &tool_args).await;
+
+    // Sanitize: only expose errors that tools explicitly mark as public.
+    // All other errors are masked so internal paths and database details
+    // are never leaked over the protocol.
+    let sanitized = if let Some(error_val) = result.get("error") {
+        let is_public = result
+            .get("public")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let error_msg: String = error_val
+            .as_str()
+            .unwrap_or("unknown")
+            .chars()
+            .take(100)
+            .collect();
+        eprintln!("tool error: tool={tool_name} error={error_msg}");
+        if is_public {
+            json!({"error": error_msg})
+        } else {
+            json!({"error": "Internal tool error"})
+        }
+    } else {
+        result
+    };
+
+    let text = serde_json::to_string_pretty(&sanitized).unwrap_or_default();
+
+    json!({
+        "jsonrpc": "2.0",
+        "id": req_id,
+        "result": {
+            "content": [{"type": "text", "text": text}]
+        }
+    })
 }

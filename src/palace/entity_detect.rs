@@ -428,15 +428,16 @@ struct EntityScores {
     project_signals: Vec<String>,
 }
 
-fn score_entity(name: &str, text: &str, lines: &[String]) -> EntityScores {
-    assert!(!name.is_empty(), "score_entity: name must not be empty");
-    let escaped = regex::escape(name);
-    let mut person_score = 0i32;
-    let mut project_score = 0i32;
-    let mut person_signals = Vec::new();
-    let mut project_signals = Vec::new();
+/// Score person-related signals: verb patterns, dialogue markers, pronouns, direct address.
+fn score_entity_person(
+    name: &str,
+    escaped: &str,
+    text: &str,
+    lines: &[String],
+) -> (i32, Vec<String>) {
+    let mut score = 0i32;
+    let mut signals = Vec::new();
 
-    // Person verb patterns
     let person_verbs = [
         "said", "asked", "told", "replied", "laughed", "smiled", "cried", "felt", "thinks?",
         "wants?", "loves?", "hates?", "knows?", "decided", "pushed", "wrote",
@@ -445,13 +446,12 @@ fn score_entity(name: &str, text: &str, lines: &[String]) -> EntityScores {
         if let Ok(re) = Regex::new(&format!(r"(?i)\b{escaped}\s+{verb}\b")) {
             let count = re.find_iter(text).count();
             if count > 0 {
-                person_score += i32::try_from(count).unwrap_or(i32::MAX) * 2;
-                person_signals.push(format!("'{name} {verb}' ({count}x)"));
+                score += i32::try_from(count).unwrap_or(i32::MAX) * 2;
+                signals.push(format!("'{name} {verb}' ({count}x)"));
             }
         }
     }
 
-    // Dialogue patterns
     let dialogue_pats = [
         format!(r"(?im)^>\s*{escaped}[:\s]"),
         format!(r"(?im)^{escaped}:\s"),
@@ -461,13 +461,12 @@ fn score_entity(name: &str, text: &str, lines: &[String]) -> EntityScores {
         if let Ok(re) = Regex::new(pat) {
             let count = re.find_iter(text).count();
             if count > 0 {
-                person_score += i32::try_from(count).unwrap_or(i32::MAX) * 3;
-                person_signals.push(format!("dialogue marker ({count}x)"));
+                score += i32::try_from(count).unwrap_or(i32::MAX) * 3;
+                signals.push(format!("dialogue marker ({count}x)"));
             }
         }
     }
 
-    // Pronoun proximity
     let name_lower = name.to_lowercase();
     let pronoun_re =
         Regex::new(r"(?i)\b(she|her|hers|he|him|his|they|them|their)\b").expect("valid regex");
@@ -483,23 +482,30 @@ fn score_entity(name: &str, text: &str, lines: &[String]) -> EntityScores {
         }
     }
     if pronoun_hits > 0 {
-        person_score += pronoun_hits * 2;
-        person_signals.push(format!("pronoun nearby ({pronoun_hits}x)"));
+        score += pronoun_hits * 2;
+        signals.push(format!("pronoun nearby ({pronoun_hits}x)"));
     }
 
-    // Direct address
     if let Ok(re) = Regex::new(&format!(
         r"(?i)\bhey\s+{escaped}\b|\bthanks?\s+{escaped}\b|\bhi\s+{escaped}\b"
     )) {
         let count = re.find_iter(text).count();
         if count > 0 {
-            person_score += i32::try_from(count).unwrap_or(i32::MAX) * 4;
-            person_signals.push(format!("addressed directly ({count}x)"));
+            score += i32::try_from(count).unwrap_or(i32::MAX) * 4;
+            signals.push(format!("addressed directly ({count}x)"));
         }
     }
 
-    // Project verb patterns
-    let project_verbs = [
+    signals.truncate(3);
+    (score, signals)
+}
+
+/// Score project-related signals: build/deploy verbs, versioned references.
+fn score_entity_project(escaped: &str, text: &str) -> (i32, Vec<String>) {
+    let mut score = 0i32;
+    let mut signals = Vec::new();
+
+    let project_pats = [
         format!(r"(?i)\bbuilding\s+{escaped}\b"),
         format!(r"(?i)\bbuilt\s+{escaped}\b"),
         format!(r"(?i)\bship(?:ping|ped)?\s+{escaped}\b"),
@@ -511,27 +517,34 @@ fn score_entity(name: &str, text: &str, lines: &[String]) -> EntityScores {
         format!(r"(?i)\b{escaped}\.(py|js|ts|yaml|yml|json|sh)\b"),
         format!(r"(?i)\bimport\s+{escaped}\b"),
     ];
-    for pat in &project_verbs {
+    for pat in &project_pats {
         if let Ok(re) = Regex::new(pat) {
             let count = re.find_iter(text).count();
             if count > 0 {
-                project_score += i32::try_from(count).unwrap_or(i32::MAX) * 2;
-                project_signals.push(format!("project verb ({count}x)"));
+                score += i32::try_from(count).unwrap_or(i32::MAX) * 2;
+                signals.push(format!("project verb ({count}x)"));
             }
         }
     }
 
-    // Versioned/code reference
     if let Ok(re) = Regex::new(&format!(r"(?i)\b{escaped}[-v]\w+")) {
         let count = re.find_iter(text).count();
         if count > 0 {
-            project_score += i32::try_from(count).unwrap_or(i32::MAX) * 3;
-            project_signals.push(format!("versioned ({count}x)"));
+            score += i32::try_from(count).unwrap_or(i32::MAX) * 3;
+            signals.push(format!("versioned ({count}x)"));
         }
     }
 
-    person_signals.truncate(3);
-    project_signals.truncate(3);
+    signals.truncate(3);
+    (score, signals)
+}
+
+fn score_entity(name: &str, text: &str, lines: &[String]) -> EntityScores {
+    assert!(!name.is_empty(), "score_entity: name must not be empty");
+    let escaped = regex::escape(name);
+
+    let (person_score, person_signals) = score_entity_person(name, &escaped, text, lines);
+    let (project_score, project_signals) = score_entity_project(&escaped, text);
 
     EntityScores {
         person_score,
@@ -561,7 +574,8 @@ fn classify_entity(name: &str, frequency: usize, scores: &EntityScores) -> Detec
 
     let person_ratio = f64::from(ps) / f64::from(total);
 
-    // Count distinct signal categories
+    // Count distinct signal categories to distinguish corroborated person signals
+    // from pronoun-only matches, which are too weak for a confident classification.
     let mut signal_cats: HashSet<&str> = HashSet::new();
     for s in &scores.person_signals {
         if s.contains("dialogue") {
@@ -576,6 +590,18 @@ fn classify_entity(name: &str, frequency: usize, scores: &EntityScores) -> Detec
     }
     let has_two = signal_cats.len() >= 2;
 
+    classify_entity_build(name, frequency, scores, person_ratio, has_two, ps)
+}
+
+/// Build the `DetectedEntity` once `person_ratio` and `has_two` are known.
+fn classify_entity_build(
+    name: &str,
+    frequency: usize,
+    scores: &EntityScores,
+    person_ratio: f64,
+    has_two: bool,
+    ps: i32,
+) -> DetectedEntity {
     if person_ratio >= 0.7 && has_two && ps >= 5 {
         DetectedEntity {
             name: name.to_string(),

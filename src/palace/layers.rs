@@ -52,35 +52,7 @@ pub async fn layer1(conn: &Connection, wing: Option<&str>) -> Result<String> {
 
     // Take first MAX_DRAWERS (they're already stored in insertion order — good enough for v1)
     let top = &rows[..rows.len().min(MAX_DRAWERS)];
-
-    // Group by room
-    let mut by_room: HashMap<String, Vec<(String, String)>> = HashMap::new();
-    for row in top {
-        let content = row
-            .get_value(0)
-            .ok()
-            .and_then(|v| v.as_text().cloned())
-            .unwrap_or_default();
-        let room = row
-            .get_value(2)
-            .ok()
-            .and_then(|v| v.as_text().cloned())
-            .unwrap_or_default();
-        let source = row
-            .get_value(3)
-            .ok()
-            .and_then(|v| v.as_text().cloned())
-            .unwrap_or_default();
-        let source_name = Path::new(&source)
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
-        by_room
-            .entry(room)
-            .or_default()
-            .push((content, source_name));
-    }
+    let by_room = layer1_build_room_map(top);
 
     let mut lines = vec!["## L1 — ESSENTIAL STORY".to_string()];
     let mut total_len = 0usize;
@@ -119,6 +91,38 @@ pub async fn layer1(conn: &Connection, wing: Option<&str>) -> Result<String> {
     }
 
     Ok(lines.join("\n"))
+}
+
+/// Build a room → [(content, `source_name`)] map from drawer rows.
+fn layer1_build_room_map(rows: &[turso::Row]) -> HashMap<String, Vec<(String, String)>> {
+    let mut by_room: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    for row in rows {
+        let content = row
+            .get_value(0)
+            .ok()
+            .and_then(|v| v.as_text().cloned())
+            .unwrap_or_default();
+        let room = row
+            .get_value(2)
+            .ok()
+            .and_then(|v| v.as_text().cloned())
+            .unwrap_or_default();
+        let source = row
+            .get_value(3)
+            .ok()
+            .and_then(|v| v.as_text().cloned())
+            .unwrap_or_default();
+        let source_name = Path::new(&source)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        by_room
+            .entry(room)
+            .or_default()
+            .push((content, source_name));
+    }
+    by_room
 }
 
 /// Generate full wake-up text (L0 + L1).

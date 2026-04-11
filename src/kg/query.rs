@@ -43,10 +43,68 @@ pub struct KgStats {
     pub relationship_types: Vec<String>,
 }
 
+/// Extract a Fact from a query row (columns: subject, predicate, object,
+/// `valid_from`, `valid_to`, confidence, `joined_name`).
+fn query_entity_row_to_fact(
+    row: &turso::Row,
+    direction_label: &str,
+    subject: &str,
+    object: &str,
+) -> Fact {
+    let predicate = row
+        .get_value(1)
+        .ok()
+        .and_then(|v| v.as_text().cloned())
+        .unwrap_or_default();
+    let valid_from = row.get_value(3).ok().and_then(|v| v.as_text().cloned());
+    let valid_to = row.get_value(4).ok().and_then(|v| v.as_text().cloned());
+    let confidence = row
+        .get_value(5)
+        .ok()
+        .and_then(|v| v.as_real().copied())
+        .unwrap_or(1.0);
+
+    Fact {
+        direction: direction_label.to_string(),
+        subject: subject.to_string(),
+        predicate,
+        object: object.to_string(),
+        current: valid_to.is_none(),
+        valid_from,
+        valid_to,
+        confidence,
+    }
+}
+
+/// Build the SQL and params for one direction of a `query_entity` call.
+fn query_entity_sql(
+    eid: &str,
+    as_of: Option<&str>,
+    join_col: &str,
+    filter_col: &str,
+) -> (String, Vec<turso::Value>) {
+    let base = format!(
+        "SELECT t.subject, t.predicate, t.object, t.valid_from, t.valid_to, t.confidence, e.name \
+         FROM triples t JOIN entities e ON t.{join_col} = e.id \
+         WHERE t.{filter_col} = ?1"
+    );
+    if let Some(date) = as_of {
+        let sql = format!(
+            "{base} AND (t.valid_from IS NULL OR t.valid_from <= ?2) \
+             AND (t.valid_to IS NULL OR t.valid_to >= ?3)"
+        );
+        let params = vec![
+            turso::Value::from(eid),
+            turso::Value::from(date),
+            turso::Value::from(date),
+        ];
+        (sql, params)
+    } else {
+        (base, vec![turso::Value::from(eid)])
+    }
+}
+
 /// Query all relationships for an entity.
-// Outgoing and incoming branches are intentionally parallel — splitting would duplicate
-// the row-extraction logic or obscure the symmetric data flow.
-#[allow(clippy::too_many_lines)]
 pub async fn query_entity(
     conn: &Connection,
     name: &str,
@@ -63,24 +121,7 @@ pub async fn query_entity(
     let mut results = Vec::new();
 
     if direction == "outgoing" || direction == "both" {
-        let (sql, params) = if let Some(date) = as_of {
-            (
-                "SELECT t.subject, t.predicate, t.object, t.valid_from, t.valid_to, t.confidence, e.name \
-                 FROM triples t JOIN entities e ON t.object = e.id \
-                 WHERE t.subject = ?1 \
-                 AND (t.valid_from IS NULL OR t.valid_from <= ?2) \
-                 AND (t.valid_to IS NULL OR t.valid_to >= ?3)".to_string(),
-                vec![turso::Value::from(eid.as_str()), turso::Value::from(date), turso::Value::from(date)],
-            )
-        } else {
-            (
-                "SELECT t.subject, t.predicate, t.object, t.valid_from, t.valid_to, t.confidence, e.name \
-                 FROM triples t JOIN entities e ON t.object = e.id \
-                 WHERE t.subject = ?1".to_string(),
-                vec![turso::Value::from(eid.as_str())],
-            )
-        };
-
+        let (sql, params) = query_entity_sql(&eid, as_of, "object", "subject");
         let rows = db::query_all(conn, &sql, turso::params_from_iter(params)).await?;
         for row in &rows {
             let obj_name = row
@@ -88,51 +129,12 @@ pub async fn query_entity(
                 .ok()
                 .and_then(|v| v.as_text().cloned())
                 .unwrap_or_default();
-            let predicate = row
-                .get_value(1)
-                .ok()
-                .and_then(|v| v.as_text().cloned())
-                .unwrap_or_default();
-            let valid_from = row.get_value(3).ok().and_then(|v| v.as_text().cloned());
-            let valid_to = row.get_value(4).ok().and_then(|v| v.as_text().cloned());
-            let confidence = row
-                .get_value(5)
-                .ok()
-                .and_then(|v| v.as_real().copied())
-                .unwrap_or(1.0);
-
-            results.push(Fact {
-                direction: "outgoing".to_string(),
-                subject: name.to_string(),
-                predicate,
-                object: obj_name,
-                current: valid_to.is_none(),
-                valid_from,
-                valid_to,
-                confidence,
-            });
+            results.push(query_entity_row_to_fact(row, "outgoing", name, &obj_name));
         }
     }
 
     if direction == "incoming" || direction == "both" {
-        let (sql, params) = if let Some(date) = as_of {
-            (
-                "SELECT t.subject, t.predicate, t.object, t.valid_from, t.valid_to, t.confidence, e.name \
-                 FROM triples t JOIN entities e ON t.subject = e.id \
-                 WHERE t.object = ?1 \
-                 AND (t.valid_from IS NULL OR t.valid_from <= ?2) \
-                 AND (t.valid_to IS NULL OR t.valid_to >= ?3)".to_string(),
-                vec![turso::Value::from(eid.as_str()), turso::Value::from(date), turso::Value::from(date)],
-            )
-        } else {
-            (
-                "SELECT t.subject, t.predicate, t.object, t.valid_from, t.valid_to, t.confidence, e.name \
-                 FROM triples t JOIN entities e ON t.subject = e.id \
-                 WHERE t.object = ?1".to_string(),
-                vec![turso::Value::from(eid.as_str())],
-            )
-        };
-
+        let (sql, params) = query_entity_sql(&eid, as_of, "subject", "object");
         let rows = db::query_all(conn, &sql, turso::params_from_iter(params)).await?;
         for row in &rows {
             let sub_name = row
@@ -140,29 +142,7 @@ pub async fn query_entity(
                 .ok()
                 .and_then(|v| v.as_text().cloned())
                 .unwrap_or_default();
-            let predicate = row
-                .get_value(1)
-                .ok()
-                .and_then(|v| v.as_text().cloned())
-                .unwrap_or_default();
-            let valid_from = row.get_value(3).ok().and_then(|v| v.as_text().cloned());
-            let valid_to = row.get_value(4).ok().and_then(|v| v.as_text().cloned());
-            let confidence = row
-                .get_value(5)
-                .ok()
-                .and_then(|v| v.as_real().copied())
-                .unwrap_or(1.0);
-
-            results.push(Fact {
-                direction: "incoming".to_string(),
-                subject: sub_name,
-                predicate,
-                object: name.to_string(),
-                current: valid_to.is_none(),
-                valid_from,
-                valid_to,
-                confidence,
-            });
+            results.push(query_entity_row_to_fact(row, "incoming", &sub_name, name));
         }
     }
 

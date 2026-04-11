@@ -3,26 +3,7 @@ use turso::Connection;
 use crate::db;
 use crate::error::Result;
 
-pub async fn run(conn: &Connection) -> Result<()> {
-    // Total drawer count
-    let rows = db::query_all(conn, "SELECT COUNT(*) FROM drawers", ()).await?;
-    let total: i64 = rows
-        .first()
-        .and_then(|r| r.get_value(0).ok())
-        .and_then(|v| v.as_integer().copied())
-        .unwrap_or(0);
-
-    if total == 0 {
-        println!(
-            "Palace is empty. Run `mempalace init <dir>` then `mempalace mine <dir>` to get started."
-        );
-        return Ok(());
-    }
-
-    println!("=== MemPalace Status ===\n");
-    println!("Total drawers: {total}\n");
-
-    // Breakdown by wing
+async fn run_print_wings(conn: &Connection) -> Result<()> {
     let rows = db::query_all(
         conn,
         "SELECT wing, COUNT(*) as cnt FROM drawers GROUP BY wing ORDER BY cnt DESC",
@@ -44,8 +25,10 @@ pub async fn run(conn: &Connection) -> Result<()> {
             .unwrap_or(0);
         println!("  {wing}: {count} drawers");
     }
+    Ok(())
+}
 
-    // Breakdown by wing/room
+async fn run_print_rooms(conn: &Connection) -> Result<()> {
     let rows = db::query_all(
         conn,
         "SELECT wing, room, COUNT(*) as cnt FROM drawers GROUP BY wing, room ORDER BY wing, cnt DESC",
@@ -78,8 +61,10 @@ pub async fn run(conn: &Connection) -> Result<()> {
         }
         println!("    {room}: {count}");
     }
+    Ok(())
+}
 
-    // KG stats
+async fn run_print_kg(conn: &Connection) -> Result<()> {
     let entity_rows = db::query_all(conn, "SELECT COUNT(*) FROM entities", ()).await?;
     let entity_count: i64 = entity_rows
         .first()
@@ -99,6 +84,30 @@ pub async fn run(conn: &Connection) -> Result<()> {
         println!("  Entities: {entity_count}");
         println!("  Triples: {triple_count}");
     }
+    Ok(())
+}
+
+pub async fn run(conn: &Connection) -> Result<()> {
+    let rows = db::query_all(conn, "SELECT COUNT(*) FROM drawers", ()).await?;
+    let total: i64 = rows
+        .first()
+        .and_then(|r| r.get_value(0).ok())
+        .and_then(|v| v.as_integer().copied())
+        .unwrap_or(0);
+
+    if total == 0 {
+        println!(
+            "Palace is empty. Run `mempalace init <dir>` then `mempalace mine <dir>` to get started."
+        );
+        return Ok(());
+    }
+
+    println!("=== MemPalace Status ===\n");
+    println!("Total drawers: {total}\n");
+
+    run_print_wings(conn).await?;
+    run_print_rooms(conn).await?;
+    run_print_kg(conn).await?;
 
     Ok(())
 }

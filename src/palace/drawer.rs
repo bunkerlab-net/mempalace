@@ -48,7 +48,9 @@ fn tokenize(text: &str) -> Vec<String> {
     words
 }
 
-fn is_stop_word(word: &str) -> bool {
+// Large static stop-word list — line count reflects data volume, not logic.
+#[allow(clippy::too_many_lines)]
+pub(super) fn is_stop_word(word: &str) -> bool {
     matches!(
         word,
         "the"

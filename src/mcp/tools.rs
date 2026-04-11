@@ -503,6 +503,20 @@ async fn tool_add_drawer(conn: &Connection, args: &Value) -> Value {
         id.starts_with("drawer_"),
         "drawer ID must start with drawer_"
     );
+
+    tool_add_drawer_insert(conn, id, wing, room, content, source_file, added_by).await
+}
+
+/// Log the WAL event and write the drawer row. Returns the MCP response JSON.
+async fn tool_add_drawer_insert(
+    conn: &Connection,
+    id: String,
+    wing: String,
+    room: String,
+    content: String,
+    source_file: &str,
+    added_by: &str,
+) -> Value {
     wal_log(
         "add_drawer",
         json!({

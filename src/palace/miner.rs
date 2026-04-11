@@ -159,10 +159,117 @@ fn walk_dir(dir: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
+fn mine_print_header(
+    wing: &str,
+    rooms: &[crate::config::RoomConfig],
+    file_count: usize,
+    dry_run: bool,
+) {
+    println!("\n=======================================================");
+    if dry_run {
+        println!("  MemPalace Mine [DRY RUN]");
+    } else {
+        println!("  MemPalace Mine");
+    }
+    println!("=======================================================");
+    println!("  Wing:    {wing}");
+    println!(
+        "  Rooms:   {}",
+        rooms
+            .iter()
+            .map(|r| r.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    println!("  Files:   {file_count}");
+    println!("-------------------------------------------------------\n");
+}
+
+fn mine_print_summary(
+    dry_run: bool,
+    file_count: usize,
+    files_skipped: usize,
+    total_drawers: usize,
+    room_counts: &HashMap<String, usize>,
+) {
+    println!("\n=======================================================");
+    if dry_run {
+        println!("  Dry run complete — nothing was written.");
+    } else {
+        println!("  Done.");
+    }
+    let files_processed = file_count - files_skipped;
+    println!("  Files processed: {files_processed}");
+    println!("  Files skipped (already filed): {files_skipped}");
+    println!(
+        "  Drawers {}: {total_drawers}",
+        if dry_run { "would be filed" } else { "filed" }
+    );
+    println!("\n  By room:");
+
+    let mut sorted_rooms: Vec<_> = room_counts.iter().collect();
+    sorted_rooms.sort_by(|a, b| b.1.cmp(a.1));
+    for (room, count) in sorted_rooms {
+        println!("    {room:20} {count} files");
+    }
+    if !dry_run {
+        println!("\n  Next: mempalace search \"what you're looking for\"");
+    }
+    println!("=======================================================\n");
+}
+
+/// Write all chunks for one file into the palace.
+async fn mine_write_chunks(
+    conn: &Connection,
+    chunks: &[crate::palace::chunker::Chunk],
+    wing: &str,
+    room: &str,
+    source_file: &str,
+    source_mtime: Option<f64>,
+    opts: &MineParams,
+) -> Result<()> {
+    for chunk in chunks {
+        let id = format!(
+            "drawer_{wing}_{room}_{}",
+            &uuid::Uuid::new_v4().to_string().replace('-', "")[..16]
+        );
+        drawer::add_drawer(
+            conn,
+            &drawer::DrawerParams {
+                id: &id,
+                wing,
+                room,
+                content: &chunk.content,
+                source_file,
+                chunk_index: chunk.chunk_index,
+                added_by: &opts.agent,
+                ingest_mode: "projects",
+                source_mtime,
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Read a file's content, falling back to lossy UTF-8 on binary files.
+/// Returns `None` if the file is unreadable or too short to be useful.
+fn mine_read_file(filepath: &Path) -> Option<String> {
+    let raw = match std::fs::read_to_string(filepath) {
+        Ok(c) => c,
+        Err(_) => match std::fs::read(filepath) {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+            Err(_) => return None,
+        },
+    };
+    let content = raw.trim().to_string();
+    if content.len() < 50 {
+        return None;
+    }
+    Some(content)
+}
+
 /// Mine a project directory into the palace.
-// Single-pass file mining pipeline; dry_run and limit handling adds lines but splitting
-// would fragment shared state (counts, room_counts) across functions artificially.
-#[allow(clippy::too_many_lines)]
 pub async fn mine(conn: &Connection, project_dir: &Path, opts: &MineParams) -> Result<()> {
     assert!(
         project_dir.exists(),
@@ -189,24 +296,7 @@ pub async fn mine(conn: &Connection, project_dir: &Path, opts: &MineParams) -> R
         all_files.into_iter().take(opts.limit).collect()
     };
 
-    println!("\n=======================================================");
-    if opts.dry_run {
-        println!("  MemPalace Mine [DRY RUN]");
-    } else {
-        println!("  MemPalace Mine");
-    }
-    println!("=======================================================");
-    println!("  Wing:    {wing}");
-    println!(
-        "  Rooms:   {}",
-        rooms
-            .iter()
-            .map(|r| r.name.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-    println!("  Files:   {}", files.len());
-    println!("-------------------------------------------------------\n");
+    mine_print_header(wing, rooms, files.len(), opts.dry_run);
 
     let mut total_drawers: usize = 0;
     let mut files_skipped: usize = 0;
@@ -220,53 +310,22 @@ pub async fn mine(conn: &Connection, project_dir: &Path, opts: &MineParams) -> R
             continue;
         }
 
-        let content = match std::fs::read_to_string(filepath) {
-            Ok(c) => c,
-            Err(_) => match std::fs::read(filepath) {
-                Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
-                Err(_) => continue,
-            },
-        };
-
-        let content = content.trim().to_string();
-        if content.len() < 50 {
+        let Some(content) = mine_read_file(filepath) else {
             continue;
-        }
+        };
 
         let room = detect_room(filepath, &content, rooms, &project_dir);
         let chunks = chunk_text(&content);
         let drawers_added = chunks.len();
 
         if !opts.dry_run {
-            // Capture mtime now so all chunks from the same file share the
-            // same recorded timestamp.
+            // Capture mtime now so all chunks from the same file share the same timestamp.
             let source_mtime: Option<f64> = std::fs::metadata(filepath)
                 .ok()
                 .and_then(|m| m.modified().ok())
                 .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
                 .map(|d| d.as_secs_f64());
-
-            for chunk in &chunks {
-                let id = format!(
-                    "drawer_{wing}_{room}_{}",
-                    &uuid::Uuid::new_v4().to_string().replace('-', "")[..16]
-                );
-                drawer::add_drawer(
-                    conn,
-                    &drawer::DrawerParams {
-                        id: &id,
-                        wing,
-                        room: &room,
-                        content: &chunk.content,
-                        source_file: &source_file,
-                        chunk_index: chunk.chunk_index,
-                        added_by: &opts.agent,
-                        ingest_mode: "projects",
-                        source_mtime,
-                    },
-                )
-                .await?;
-            }
+            mine_write_chunks(conn, &chunks, wing, &room, &source_file, source_mtime, opts).await?;
         }
 
         total_drawers += drawers_added;
@@ -279,34 +338,12 @@ pub async fn mine(conn: &Connection, project_dir: &Path, opts: &MineParams) -> R
         );
     }
 
-    println!("\n=======================================================");
-    if opts.dry_run {
-        println!("  Dry run complete — nothing was written.");
-    } else {
-        println!("  Done.");
-    }
-    let files_processed = files.len() - files_skipped;
-    println!("  Files processed: {files_processed}");
-    println!("  Files skipped (already filed): {files_skipped}");
-    println!(
-        "  Drawers {}: {total_drawers}",
-        if opts.dry_run {
-            "would be filed"
-        } else {
-            "filed"
-        }
+    mine_print_summary(
+        opts.dry_run,
+        files.len(),
+        files_skipped,
+        total_drawers,
+        &room_counts,
     );
-    println!("\n  By room:");
-
-    let mut sorted_rooms: Vec<_> = room_counts.iter().collect();
-    sorted_rooms.sort_by(|a, b| b.1.cmp(a.1));
-    for (room, count) in sorted_rooms {
-        println!("    {room:20} {count} files");
-    }
-    if !opts.dry_run {
-        println!("\n  Next: mempalace search \"what you're looking for\"");
-    }
-    println!("=======================================================\n");
-
     Ok(())
 }

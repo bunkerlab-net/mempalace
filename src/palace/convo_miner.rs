@@ -246,9 +246,97 @@ fn walk_convos(dir: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
-// Single-pass conversation mining pipeline; dry_run and limit handling adds lines but splitting
-// would fragment shared state (counts, room_counts) across functions artificially.
-#[allow(clippy::too_many_lines)]
+fn mine_convos_print_header(
+    wing: &str,
+    dir: &Path,
+    file_count: usize,
+    extract_mode: &str,
+    dry_run: bool,
+) {
+    println!("\n=======================================================");
+    if dry_run {
+        println!("  MemPalace Mine — Conversations [DRY RUN]");
+    } else {
+        println!("  MemPalace Mine — Conversations");
+    }
+    println!("=======================================================");
+    println!("  Wing:    {wing}");
+    println!("  Source:  {}", dir.display());
+    println!("  Files:   {file_count}");
+    println!("  Mode:    {extract_mode}");
+    println!("-------------------------------------------------------\n");
+}
+
+fn mine_convos_print_summary(
+    dry_run: bool,
+    file_count: usize,
+    files_skipped: usize,
+    total_drawers: usize,
+    room_counts: &HashMap<String, usize>,
+) {
+    println!("\n=======================================================");
+    if dry_run {
+        println!("  Dry run complete — nothing was written.");
+    } else {
+        println!("  Done.");
+    }
+    println!(
+        "  Files processed: {}",
+        file_count.saturating_sub(files_skipped)
+    );
+    println!("  Files skipped (already filed): {files_skipped}");
+    println!(
+        "  Drawers {}: {total_drawers}",
+        if dry_run { "would be filed" } else { "filed" }
+    );
+
+    let mut sorted_rooms: Vec<_> = room_counts.iter().collect();
+    sorted_rooms.sort_by(|a, b| b.1.cmp(a.1));
+    if !sorted_rooms.is_empty() {
+        println!("\n  By room:");
+        for (room, count) in sorted_rooms {
+            println!("    {room:20} {count} files");
+        }
+    }
+    if !dry_run {
+        println!("\n  Next: mempalace search \"what you're looking for\"");
+    }
+    println!("=======================================================\n");
+}
+
+/// Write all chunks for one conversation file into the palace.
+async fn mine_convos_write_chunks(
+    conn: &Connection,
+    chunks: &[Chunk],
+    wing: &str,
+    room: &str,
+    source_file: &str,
+    opts: &MineParams,
+) -> Result<()> {
+    for chunk in chunks {
+        let id = format!(
+            "drawer_{wing}_{room}_{}",
+            &uuid::Uuid::new_v4().to_string().replace('-', "")[..16]
+        );
+        drawer::add_drawer(
+            conn,
+            &drawer::DrawerParams {
+                id: &id,
+                wing,
+                room,
+                content: &chunk.content,
+                source_file,
+                chunk_index: chunk.chunk_index,
+                added_by: &opts.agent,
+                ingest_mode: "convos",
+                source_mtime: None,
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 pub async fn mine_convos(
     conn: &Connection,
     dir: &Path,
@@ -274,18 +362,7 @@ pub async fn mine_convos(
         all_files.into_iter().take(opts.limit).collect()
     };
 
-    println!("\n=======================================================");
-    if opts.dry_run {
-        println!("  MemPalace Mine — Conversations [DRY RUN]");
-    } else {
-        println!("  MemPalace Mine — Conversations");
-    }
-    println!("=======================================================");
-    println!("  Wing:    {wing}");
-    println!("  Source:  {}", dir.display());
-    println!("  Files:   {}", files.len());
-    println!("  Mode:    {extract_mode}");
-    println!("-------------------------------------------------------\n");
+    mine_convos_print_header(wing, &dir, files.len(), extract_mode, opts.dry_run);
 
     let mut total_drawers: usize = 0;
     let mut files_skipped: usize = 0;
@@ -302,7 +379,6 @@ pub async fn mine_convos(
         let Ok(content) = normalize::normalize(filepath) else {
             continue;
         };
-
         if content.trim().len() < MIN_CHUNK_SIZE {
             continue;
         }
@@ -316,27 +392,7 @@ pub async fn mine_convos(
         let drawers_added = chunks.len();
 
         if !opts.dry_run {
-            for chunk in &chunks {
-                let id = format!(
-                    "drawer_{wing}_{room}_{}",
-                    &uuid::Uuid::new_v4().to_string().replace('-', "")[..16]
-                );
-                drawer::add_drawer(
-                    conn,
-                    &drawer::DrawerParams {
-                        id: &id,
-                        wing,
-                        room: &room,
-                        content: &chunk.content,
-                        source_file: &source_file,
-                        chunk_index: chunk.chunk_index,
-                        added_by: &opts.agent,
-                        ingest_mode: "convos",
-                        source_mtime: None,
-                    },
-                )
-                .await?;
-            }
+            mine_convos_write_chunks(conn, &chunks, wing, &room, &source_file, opts).await?;
         }
 
         total_drawers += drawers_added;
@@ -349,39 +405,13 @@ pub async fn mine_convos(
         );
     }
 
-    println!("\n=======================================================");
-    if opts.dry_run {
-        println!("  Dry run complete — nothing was written.");
-    } else {
-        println!("  Done.");
-    }
-    println!(
-        "  Files processed: {}",
-        files.len().saturating_sub(files_skipped)
+    mine_convos_print_summary(
+        opts.dry_run,
+        files.len(),
+        files_skipped,
+        total_drawers,
+        &room_counts,
     );
-    println!("  Files skipped (already filed): {files_skipped}");
-    println!(
-        "  Drawers {}: {total_drawers}",
-        if opts.dry_run {
-            "would be filed"
-        } else {
-            "filed"
-        }
-    );
-
-    let mut sorted_rooms: Vec<_> = room_counts.iter().collect();
-    sorted_rooms.sort_by(|a, b| b.1.cmp(a.1));
-    if !sorted_rooms.is_empty() {
-        println!("\n  By room:");
-        for (room, count) in sorted_rooms {
-            println!("    {room:20} {count} files");
-        }
-    }
-    if !opts.dry_run {
-        println!("\n  Next: mempalace search \"what you're looking for\"");
-    }
-    println!("=======================================================\n");
-
     Ok(())
 }
 

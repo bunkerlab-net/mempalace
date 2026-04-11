@@ -77,9 +77,19 @@ pub async fn search_memories(
     params.push(turso::Value::from(n_results_i32));
 
     let rows = db::query_all(conn, &sql, turso::params_from_iter(params)).await?;
+    let results = search_memories_parse_rows(&rows);
 
+    // Postcondition: result count bounded by the SQL LIMIT.
+    debug_assert!(results.len() <= n_results);
+
+    Ok(results)
+}
+
+/// Map query result rows (columns: id, content, wing, room, `source_file`, relevance)
+/// into `SearchResult` values.
+fn search_memories_parse_rows(rows: &[turso::Row]) -> Vec<SearchResult> {
     let mut results = Vec::new();
-    for row in &rows {
+    for row in rows {
         let text = row
             .get_value(1)
             .ok()
@@ -121,11 +131,7 @@ pub async fn search_memories(
             relevance,
         });
     }
-
-    // Postcondition: result count bounded by the SQL LIMIT.
-    debug_assert!(results.len() <= n_results);
-
-    Ok(results)
+    results
 }
 
 /// Tokenize a query string into searchable words.
@@ -134,7 +140,7 @@ fn tokenize_query(query: &str) -> Vec<String> {
         .split(|c: char| !c.is_alphanumeric() && c != '_')
         .filter(|w| w.len() >= 3)
         .map(str::to_lowercase)
-        .filter(|w| !is_stop_word(w))
+        .filter(|w| !crate::palace::drawer::is_stop_word(w))
         .collect()
 }
 
@@ -277,86 +283,4 @@ mod async_tests {
             .expect("search");
         assert!(results.is_empty());
     }
-}
-
-fn is_stop_word(word: &str) -> bool {
-    matches!(
-        word,
-        "the"
-            | "and"
-            | "for"
-            | "are"
-            | "but"
-            | "not"
-            | "you"
-            | "all"
-            | "can"
-            | "had"
-            | "her"
-            | "was"
-            | "one"
-            | "our"
-            | "out"
-            | "has"
-            | "have"
-            | "from"
-            | "they"
-            | "been"
-            | "said"
-            | "each"
-            | "which"
-            | "their"
-            | "will"
-            | "other"
-            | "about"
-            | "many"
-            | "then"
-            | "them"
-            | "these"
-            | "some"
-            | "would"
-            | "make"
-            | "like"
-            | "into"
-            | "time"
-            | "very"
-            | "when"
-            | "come"
-            | "could"
-            | "more"
-            | "than"
-            | "that"
-            | "this"
-            | "with"
-            | "what"
-            | "just"
-            | "also"
-            | "there"
-            | "where"
-            | "after"
-            | "back"
-            | "only"
-            | "most"
-            | "over"
-            | "such"
-            | "here"
-            | "should"
-            | "because"
-            | "does"
-            | "did"
-            | "get"
-            | "how"
-            | "its"
-            | "may"
-            | "let"
-            | "new"
-            | "now"
-            | "old"
-            | "see"
-            | "way"
-            | "who"
-            | "use"
-            | "being"
-            | "well"
-    )
 }
