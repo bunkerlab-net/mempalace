@@ -2,6 +2,8 @@
 amends "package://github.com/jdx/hk/releases/download/v1.41.0/hk@1.41.0#/Config.pkl"
 import "package://github.com/jdx/hk/releases/download/v1.41.0/hk@1.41.0#/Builtins.pkl"
 
+exclude = List("mempalace-py/**")
+
 local linters = new Mapping<String, Step> {
   // https://hk.jdx.dev/builtins.html
   // Lint Github Actions

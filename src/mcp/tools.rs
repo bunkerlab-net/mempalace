@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::db::query_all;
 use crate::kg;
-use crate::palace::{drawer, graph, search};
+use crate::palace::{drawer, graph, query_sanitizer, search};
 
 use super::protocol::{AAAK_SPEC, PALACE_PROTOCOL};
 
@@ -351,8 +351,9 @@ async fn tool_get_taxonomy(conn: &Connection) -> Value {
 }
 
 async fn tool_search(conn: &Connection, args: &Value) -> Value {
-    let query = str_arg(args, "query");
+    let raw_query = str_arg(args, "query");
     let limit = usize::try_from(int_arg(args, "limit", 5)).unwrap_or(5);
+    let context_received = !str_arg(args, "context").is_empty();
     let wing = match sanitize_opt_name(str_arg(args, "wing"), "wing") {
         Ok(v) => v,
         Err(e) => return e,
@@ -362,7 +363,18 @@ async fn tool_search(conn: &Connection, args: &Value) -> Value {
         Err(e) => return e,
     };
 
-    match search::search_memories(conn, query, wing.as_deref(), room.as_deref(), limit).await {
+    // Mitigate system prompt contamination before the search (mempalace-py issue #333).
+    let sanitized = query_sanitizer::sanitize_query(raw_query);
+
+    match search::search_memories(
+        conn,
+        &sanitized.clean_query,
+        wing.as_deref(),
+        room.as_deref(),
+        limit,
+    )
+    .await
+    {
         Ok(results) => {
             let items: Vec<Value> = results
                 .iter()
@@ -376,7 +388,21 @@ async fn tool_search(conn: &Connection, args: &Value) -> Value {
                     })
                 })
                 .collect();
-            json!({"results": items, "count": items.len()})
+            let count = items.len();
+            let mut out = json!({"results": items, "count": count});
+            if sanitized.was_sanitized {
+                out["query_sanitized"] = json!(true);
+                out["sanitizer"] = json!({
+                    "method": sanitized.method,
+                    "original_length": sanitized.original_length,
+                    "clean_length": sanitized.clean_length,
+                    "clean_query": sanitized.clean_query,
+                });
+            }
+            if context_received {
+                out["context_received"] = json!(true);
+            }
+            out
         }
         Err(e) => json!({"error": e.to_string()}),
     }

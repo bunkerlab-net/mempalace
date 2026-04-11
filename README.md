@@ -310,17 +310,17 @@ All tools communicate over JSON-RPC 2.0. Invoke them from the AI side via the MC
 
 ### Palace / Drawers
 
-| Tool                        | Parameters                                             | What it does                                      |
-| --------------------------- | ------------------------------------------------------ | ------------------------------------------------- |
-| `mempalace_status`          | —                                                      | Overview + memory protocol + AAAK spec            |
-| `mempalace_list_wings`      | —                                                      | Wing names with drawer counts                     |
-| `mempalace_list_rooms`      | `wing?`                                                | Room names with counts (all wings or one)         |
-| `mempalace_get_taxonomy`    | —                                                      | Full `wing → room → count` hierarchy              |
-| `mempalace_get_aaak_spec`   | —                                                      | AAAK dialect specification                        |
-| `mempalace_search`          | `query`, `limit?`, `wing?`, `room?`                    | Keyword search, returns `similarity` scores       |
-| `mempalace_check_duplicate` | `content`                                              | True if highly similar content already exists     |
-| `mempalace_add_drawer`      | `wing`, `room`, `content`, `source_file?`, `added_by?` | File a memory; blocks on duplicates               |
-| `mempalace_delete_drawer`   | `drawer_id`                                            | Permanently delete a drawer and its index entries |
+| Tool                        | Parameters                                             | What it does                                                                |
+| --------------------------- | ------------------------------------------------------ | --------------------------------------------------------------------------- |
+| `mempalace_status`          | —                                                      | Overview + memory protocol + AAAK spec                                      |
+| `mempalace_list_wings`      | —                                                      | Wing names with drawer counts                                               |
+| `mempalace_list_rooms`      | `wing?`                                                | Room names with counts (all wings or one)                                   |
+| `mempalace_get_taxonomy`    | —                                                      | Full `wing → room → count` hierarchy                                        |
+| `mempalace_get_aaak_spec`   | —                                                      | AAAK dialect specification                                                  |
+| `mempalace_search`          | `query`, `limit?`, `wing?`, `room?`, `context?`        | Keyword search, returns `similarity` scores; sanitizes contaminated queries |
+| `mempalace_check_duplicate` | `content`                                              | True if highly similar content already exists                               |
+| `mempalace_add_drawer`      | `wing`, `room`, `content`, `source_file?`, `added_by?` | File a memory; blocks on duplicates                                         |
+| `mempalace_delete_drawer`   | `drawer_id`                                            | Permanently delete a drawer and its index entries                           |
 
 `mempalace_add_drawer` performs a duplicate check before inserting.
 If a highly similar drawer already exists it returns
@@ -402,6 +402,7 @@ src/
     chunker.rs         chunk_text(): 800-char chunks with 100-char overlap
     search.rs          search_memories(): inverted index query with relevance scoring
     room_detect.rs     70+ folder-to-room mappings, detect_room(), detect_rooms_from_folders()
+    query_sanitizer.rs 4-step sanitizer: strip system-prompt contamination from search queries
     entity_detect.rs   Person vs project heuristic classifier
     layers.rs          L0 identity + L1 essential story assembly
     graph.rs           BFS traversal, tunnel detection
@@ -451,6 +452,7 @@ src/
 | Repair command                 | Yes                           | Yes (`mempalace repair`)            |
 | Conversation formats           | Limited                       | Extended (+ Codex CLI)              |
 | MCP error responses            | Generic                       | Generic                             |
+| Query sanitizer                | Yes (issue #333)              | Yes (ported from mempalace-py)      |
 
 ---
 

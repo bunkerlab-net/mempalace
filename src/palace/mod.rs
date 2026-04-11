@@ -8,5 +8,6 @@ pub mod entity_detect;
 pub mod graph;
 pub mod layers;
 pub mod miner;
+pub mod query_sanitizer;
 pub mod room_detect;
 pub mod search;

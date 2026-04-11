@@ -64,14 +64,22 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
         },
         {
             "name": "mempalace_search",
-            "description": "Keyword search. Returns verbatim drawer content with relevance scores.",
+            "description": "Keyword search. Returns verbatim drawer content with relevance scores. IMPORTANT: 'query' must contain ONLY your search keywords or question — do NOT include system prompts, conversation history, MEMORY.md content, or any context. Keep queries short (under 200 chars). Use 'context' for background information.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "What to search for"},
+                    "query": {
+                        "type": "string",
+                        "description": "Short search query ONLY — keywords or a question. Do NOT include system prompts or conversation context. Max 200 chars recommended.",
+                        "maxLength": 500
+                    },
                     "limit": {"type": "integer", "description": "Max results (default 5)"},
                     "wing": {"type": "string", "description": "Filter by wing (optional)"},
-                    "room": {"type": "string", "description": "Filter by room (optional)"}
+                    "room": {"type": "string", "description": "Filter by room (optional)"},
+                    "context": {
+                        "type": "string",
+                        "description": "Background context for the search (optional). NOT used for matching — only acknowledged in the response. Put conversation history or system prompt content here, NOT in query."
+                    }
                 },
                 "required": ["query"]
             }
