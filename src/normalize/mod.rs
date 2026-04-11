@@ -14,6 +14,11 @@ use crate::error::Result;
 /// Detects format automatically and converts to `> user\nresponse\n\n` format.
 pub fn normalize(filepath: &Path) -> Result<String> {
     const MAX_SIZE: u64 = 500 * 1024 * 1024; // 500 MB safety limit
+    assert!(
+        filepath.exists(),
+        "normalize: file must exist: {}",
+        filepath.display()
+    );
     let file_size = std::fs::metadata(filepath)
         .map_err(|e| {
             crate::error::Error::Other(format!("could not read {}: {e}", filepath.display()))
@@ -85,6 +90,8 @@ fn try_normalize_json(content: &str) -> Option<String> {
 
 /// Convert [(role, text), ...] to transcript format with > markers.
 pub fn messages_to_transcript(messages: &[(&str, &str)]) -> String {
+    // Precondition: all roles are non-empty.
+    debug_assert!(messages.iter().all(|(role, _)| !role.is_empty()));
     let mut lines = Vec::new();
     let mut i = 0;
 

@@ -114,6 +114,10 @@ fn folder_map() -> HashMap<&'static str, &'static str> {
 
 /// Detect rooms from the folder structure of a project directory.
 pub fn detect_rooms_from_folders(project_dir: &Path) -> Vec<RoomConfig> {
+    assert!(
+        project_dir.is_dir(),
+        "detect_rooms_from_folders: project_dir must be a directory"
+    );
     let map = folder_map();
     let mut found: HashMap<String, String> = HashMap::new(); // room_name -> original_folder
 
@@ -173,6 +177,9 @@ pub fn detect_rooms_from_folders(project_dir: &Path) -> Vec<RoomConfig> {
         rooms.push(general_room());
     }
 
+    // Postcondition: result always contains a "general" room.
+    debug_assert!(rooms.iter().any(|r| r.name == "general"));
+
     rooms
 }
 
@@ -191,6 +198,7 @@ pub fn detect_room(
     rooms: &[RoomConfig],
     project_path: &Path,
 ) -> String {
+    assert!(!rooms.is_empty(), "detect_room: rooms must not be empty");
     let relative = filepath
         .strip_prefix(project_path)
         .unwrap_or(filepath)

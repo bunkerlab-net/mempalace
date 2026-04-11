@@ -2,6 +2,11 @@ const CHUNK_SIZE: usize = 800;
 const CHUNK_OVERLAP: usize = 100;
 const MIN_CHUNK_SIZE: usize = 50;
 
+// Compile-time invariant: overlap must be less than chunk size.
+const _: () = assert!(CHUNK_OVERLAP < CHUNK_SIZE);
+// Compile-time invariant: min chunk size must be less than chunk size.
+const _: () = assert!(MIN_CHUNK_SIZE < CHUNK_SIZE);
+
 /// A single text chunk produced by [`chunk_text`].
 pub struct Chunk {
     /// The chunk's text content.
@@ -12,17 +17,29 @@ pub struct Chunk {
 
 /// Snap a byte offset to the nearest char boundary (forward).
 fn snap_forward(s: &str, mut pos: usize) -> usize {
+    assert!(
+        pos <= s.len(),
+        "snap_forward: pos {pos} exceeds string length {}",
+        s.len()
+    );
     while pos < s.len() && !s.is_char_boundary(pos) {
         pos += 1;
     }
+    debug_assert!(s.is_char_boundary(pos));
     pos
 }
 
 /// Snap a byte offset to the nearest char boundary (backward).
 fn snap_backward(s: &str, mut pos: usize) -> usize {
+    assert!(
+        pos <= s.len(),
+        "snap_backward: pos {pos} exceeds string length {}",
+        s.len()
+    );
     while pos > 0 && !s.is_char_boundary(pos) {
         pos -= 1;
     }
+    debug_assert!(s.is_char_boundary(pos));
     pos
 }
 
@@ -69,6 +86,11 @@ pub fn chunk_text(content: &str) -> Vec<Chunk> {
         }
         start = snap_forward(content, end.saturating_sub(CHUNK_OVERLAP));
     }
+
+    // Postcondition: chunk indices are sequential.
+    debug_assert!(chunks.iter().enumerate().all(|(i, c)| c.chunk_index == i));
+    // Postcondition: all chunks have content above minimum size.
+    debug_assert!(chunks.iter().all(|c| c.content.len() >= MIN_CHUNK_SIZE));
 
     chunks
 }

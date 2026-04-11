@@ -157,6 +157,7 @@ impl Dialect {
 
     /// Find known entities in text, or detect capitalized names.
     fn detect_entities(&self, text: &str) -> Vec<String> {
+        assert!(!text.is_empty(), "detect_entities: text must not be empty");
         let text_lower = text.to_lowercase();
         let mut found = Vec::new();
 
@@ -200,6 +201,7 @@ impl Dialect {
 
     /// Compress plain text into AAAK Dialect format.
     pub fn compress(&self, text: &str, metadata: Option<&CompressMetadata>) -> String {
+        assert!(!text.is_empty(), "compress: text must not be empty");
         let entities = self.detect_entities(text);
         let entity_str = if entities.is_empty() {
             "???".to_string()
@@ -255,7 +257,12 @@ impl Dialect {
         }
         lines.push(parts.join("|"));
 
-        lines.join("\n")
+        let result = lines.join("\n");
+
+        // Postcondition: compressed output is never empty.
+        debug_assert!(!result.is_empty());
+
+        result
     }
 }
 

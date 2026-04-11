@@ -28,6 +28,8 @@ pub async fn search_memories(
     room: Option<&str>,
     n_results: usize,
 ) -> Result<Vec<SearchResult>> {
+    assert!(n_results > 0, "n_results must be positive");
+
     let words = tokenize_query(query);
     if words.is_empty() {
         return Ok(vec![]);
@@ -119,6 +121,9 @@ pub async fn search_memories(
             relevance,
         });
     }
+
+    // Postcondition: result count bounded by the SQL LIMIT.
+    debug_assert!(results.len() <= n_results);
 
     Ok(results)
 }

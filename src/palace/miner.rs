@@ -53,16 +53,32 @@ pub fn scan_project(project_dir: &Path) -> Vec<PathBuf> {
 
 /// Scan with explicit gitignore control.
 pub fn scan_project_with_opts(project_dir: &Path, respect_gitignore: bool) -> Vec<PathBuf> {
-    if respect_gitignore {
+    assert!(
+        project_dir.is_dir(),
+        "project_dir must be a directory: {}",
+        project_dir.display()
+    );
+
+    let files = if respect_gitignore {
         walk_dir_gitignore(project_dir)
     } else {
         let mut files = Vec::new();
         walk_dir(project_dir, &mut files);
         files
-    }
+    };
+
+    // Postcondition: all returned paths are files, not directories.
+    debug_assert!(files.iter().all(|p| p.is_file()));
+
+    files
 }
 
 fn walk_dir_gitignore(project_dir: &Path) -> Vec<PathBuf> {
+    assert!(
+        project_dir.is_dir(),
+        "walk_dir_gitignore: path must be a directory"
+    );
+
     let walker = ignore::WalkBuilder::new(project_dir)
         .git_ignore(true)
         .git_global(true)
@@ -148,6 +164,12 @@ fn walk_dir(dir: &Path, files: &mut Vec<PathBuf>) {
 // would fragment shared state (counts, room_counts) across functions artificially.
 #[allow(clippy::too_many_lines)]
 pub async fn mine(conn: &Connection, project_dir: &Path, opts: &MineParams) -> Result<()> {
+    assert!(
+        project_dir.exists(),
+        "project_dir must exist: {}",
+        project_dir.display()
+    );
+
     let project_dir = project_dir.canonicalize().map_err(|e| {
         crate::error::Error::Other(format!(
             "directory not found: {}: {e}",

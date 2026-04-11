@@ -7,10 +7,19 @@ use crate::error::Result;
 
 /// Index the words in a drawer's content into the `drawer_words` table.
 pub async fn index_words(conn: &Connection, drawer_id: &str, content: &str) -> Result<()> {
+    assert!(!drawer_id.is_empty(), "drawer_id must not be empty");
+    assert!(
+        !content.is_empty(),
+        "content must not be empty for indexing"
+    );
+
     let mut word_counts: HashMap<String, i32> = HashMap::new();
     for word in tokenize(content) {
         *word_counts.entry(word).or_insert(0) += 1;
     }
+
+    // Postcondition: all word counts must be positive.
+    debug_assert!(word_counts.values().all(|&c| c > 0));
 
     for (word, count) in &word_counts {
         conn.execute(
@@ -25,11 +34,18 @@ pub async fn index_words(conn: &Connection, drawer_id: &str, content: &str) -> R
 
 /// Tokenize text into lowercase words, filtering stop words and short words.
 fn tokenize(text: &str) -> Vec<String> {
-    text.split(|c: char| !c.is_alphanumeric() && c != '_')
+    let words: Vec<String> = text
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
         .filter(|w| w.len() >= 3)
         .map(str::to_lowercase)
         .filter(|w| !is_stop_word(w))
-        .collect()
+        .collect();
+
+    // Postcondition: all tokens are >= 3 chars and are not stop words.
+    debug_assert!(words.iter().all(|w| w.len() >= 3));
+    debug_assert!(words.iter().all(|w| !is_stop_word(w)));
+
+    words
 }
 
 fn is_stop_word(word: &str) -> bool {
@@ -139,6 +155,9 @@ async fn stored_mtime(conn: &Connection, source_file: &str) -> Result<Option<f64
         let Some(m): Option<f64> = row.get(0).ok() else {
             return Ok(None);
         };
+        // Postcondition: mtime from OS must be non-negative.
+        assert!(m >= 0.0, "stored mtime must be non-negative, got {m}");
+
         // mtime values come from the OS (no floating-point arithmetic), so
         // bitwise equality is safe for detecting inconsistency between rows.
         #[allow(clippy::float_cmp)]
@@ -173,6 +192,8 @@ fn file_mtime(path: &str) -> Option<f64> {
 /// - The drawer was created before `source_mtime` tracking was added (NULL).
 /// - The file's current mtime differs from the stored mtime (file was modified).
 pub async fn file_already_mined(conn: &Connection, source_file: &str) -> Result<bool> {
+    assert!(!source_file.is_empty(), "source_file must not be empty");
+
     let Some(stored) = stored_mtime(conn, source_file).await? else {
         return Ok(false);
     };
@@ -478,6 +499,12 @@ mod async_tests {
 /// orphans.  Savepoints nest correctly if the caller is already inside a
 /// transaction.
 pub async fn add_drawer(conn: &Connection, p: &DrawerParams<'_>) -> Result<bool> {
+    // Preconditions: all required fields must be non-empty.
+    assert!(!p.id.is_empty(), "drawer id must not be empty");
+    assert!(!p.wing.is_empty(), "drawer wing must not be empty");
+    assert!(!p.room.is_empty(), "drawer room must not be empty");
+    assert!(!p.content.is_empty(), "drawer content must not be empty");
+
     // SQLite only has i64 integers, so we cast chunk_index (usize) to i32 at the SQL boundary.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let chunk_index_sql = p.chunk_index as i32;
@@ -511,6 +538,12 @@ pub async fn add_drawer(conn: &Connection, p: &DrawerParams<'_>) -> Result<bool>
             return Err(e.into());
         }
     };
+
+    // Postcondition: INSERT OR IGNORE affects at most one row.
+    assert!(
+        rows_affected <= 1,
+        "INSERT OR IGNORE must affect 0 or 1 rows, got {rows_affected}"
+    );
 
     if rows_affected == 0 {
         // Already exists — nothing was written; release the savepoint and report.

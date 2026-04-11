@@ -9,7 +9,17 @@ use crate::error::Result;
 
 /// Normalize an entity name to an ID: lowercase, spaces→underscores, strip apostrophes.
 pub fn entity_id(name: &str) -> String {
-    name.to_lowercase().replace(' ', "_").replace('\'', "")
+    let result = name.to_lowercase().replace(' ', "_").replace('\'', "");
+
+    // Postcondition: result has no spaces and no uppercase.
+    debug_assert!(!result.contains(' '));
+    debug_assert!(result.chars().all(|c| !c.is_uppercase()));
+    // Postcondition: non-empty input produces non-empty output.
+    if !name.is_empty() {
+        debug_assert!(!result.is_empty());
+    }
+
+    result
 }
 
 #[cfg(test)]
@@ -180,6 +190,14 @@ pub struct TripleParams<'a> {
 /// Add a relationship triple. Auto-creates entities if they don't exist.
 /// Returns the triple ID.
 pub async fn add_triple(conn: &Connection, p: &TripleParams<'_>) -> Result<String> {
+    // Preconditions: subject, predicate, and object must all be non-empty.
+    assert!(!p.subject.is_empty(), "triple subject must not be empty");
+    assert!(
+        !p.predicate.is_empty(),
+        "triple predicate must not be empty"
+    );
+    assert!(!p.object.is_empty(), "triple object must not be empty");
+
     let sub_id = entity_id(p.subject);
     let obj_id = entity_id(p.object);
     let pred = p.predicate.to_lowercase().replace(' ', "_");
@@ -233,6 +251,9 @@ pub async fn add_triple(conn: &Connection, p: &TripleParams<'_>) -> Result<Strin
         None => turso::Value::Null,
     };
 
+    // Postcondition: triple ID follows naming convention.
+    assert!(triple_id.starts_with("t_"), "triple_id must start with t_");
+
     conn.execute(
         "INSERT INTO triples (id, subject, predicate, object, valid_from, valid_to, confidence, source_closet, source_file) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         turso::params![triple_id.as_str(), sub_id.as_str(), pred.as_str(), obj_id.as_str(), vf, vt, p.confidence, sc, sf],
@@ -250,6 +271,13 @@ pub async fn invalidate(
     object: &str,
     ended: Option<&str>,
 ) -> Result<()> {
+    assert!(!subject.is_empty(), "invalidate: subject must not be empty");
+    assert!(
+        !predicate.is_empty(),
+        "invalidate: predicate must not be empty"
+    );
+    assert!(!object.is_empty(), "invalidate: object must not be empty");
+
     let sub_id = entity_id(subject);
     let obj_id = entity_id(object);
     let pred = predicate.to_lowercase().replace(' ', "_");

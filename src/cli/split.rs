@@ -9,6 +9,10 @@ const MAX_SPLIT_FILE_SIZE: u64 = 500 * 1024 * 1024; // 500 MB safety limit
 
 /// Find lines where true new sessions begin (Claude Code v header not followed by context restore).
 fn find_session_boundaries(lines: &[&str]) -> Vec<usize> {
+    assert!(
+        !lines.is_empty(),
+        "find_session_boundaries: lines must not be empty"
+    );
     let mut boundaries = Vec::new();
     for (i, line) in lines.iter().enumerate() {
         if line.contains("Claude Code v") {
@@ -103,6 +107,11 @@ fn split_file(
     sanitize_re: &Regex,
     multi_underscore: &Regex,
 ) -> Result<usize> {
+    assert!(path.is_file(), "split_file: path must be an existing file");
+    assert!(
+        output_dir.is_dir(),
+        "split_file: output_dir must be an existing directory"
+    );
     if fs::metadata(path).is_ok_and(|m| m.len() > MAX_SPLIT_FILE_SIZE) {
         println!("  SKIP: {} exceeds 500 MB limit", path.display());
         return Ok(0);
@@ -189,6 +198,11 @@ pub fn run(
     dry_run: bool,
     min_sessions: usize,
 ) -> Result<()> {
+    assert!(
+        dir.is_dir(),
+        "split::run: dir must be an existing directory"
+    );
+    assert!(min_sessions >= 2, "split::run: min_sessions must be >= 2");
     let mut mega_files: Vec<(PathBuf, usize)> = Vec::new();
 
     for entry in fs::read_dir(dir)? {

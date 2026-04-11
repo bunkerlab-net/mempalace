@@ -87,6 +87,10 @@ pub fn extract_memories(text: &str, min_confidence: f64) -> Vec<Memory> {
         });
     }
 
+    // Postcondition: all memories have non-empty content and kind.
+    debug_assert!(memories.iter().all(|m| !m.content.is_empty()));
+    debug_assert!(memories.iter().all(|m| !m.kind.is_empty()));
+
     memories
 }
 
@@ -104,6 +108,8 @@ fn score_markers(text: &str, markers: &[&str]) -> f64 {
             }
         }
     }
+    // Postcondition: score must be non-negative.
+    debug_assert!(score >= 0.0);
     score
 }
 
@@ -221,11 +227,19 @@ fn get_sentiment(text: &str) -> &'static str {
         .filter(|w| negative.contains(w.as_str()))
         .count();
 
-    match pos.cmp(&neg) {
+    let result = match pos.cmp(&neg) {
         std::cmp::Ordering::Greater => "positive",
         std::cmp::Ordering::Less => "negative",
         std::cmp::Ordering::Equal => "neutral",
-    }
+    };
+
+    // Postcondition: result is one of the three known sentiment values.
+    debug_assert!(
+        result == "positive" || result == "negative" || result == "neutral",
+        "get_sentiment returned unknown value: {result}"
+    );
+
+    result
 }
 
 fn has_resolution(text: &str) -> bool {

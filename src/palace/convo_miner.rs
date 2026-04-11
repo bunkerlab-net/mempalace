@@ -86,6 +86,10 @@ const TOPIC_KEYWORDS: &[(&str, &[&str])] = &[
 ];
 
 fn detect_convo_room(content: &str) -> String {
+    assert!(
+        !content.is_empty(),
+        "detect_convo_room: content must not be empty"
+    );
     let content_lower = content
         .chars()
         .take(3000)
@@ -105,6 +109,10 @@ fn detect_convo_room(content: &str) -> String {
 }
 
 fn chunk_exchanges(content: &str) -> Vec<Chunk> {
+    assert!(
+        !content.is_empty(),
+        "chunk_exchanges: content must not be empty"
+    );
     let lines: Vec<&str> = content.lines().collect();
     let quote_count = lines
         .iter()
@@ -199,6 +207,7 @@ fn chunk_by_paragraph(content: &str) -> Vec<Chunk> {
 }
 
 fn scan_convos(dir: &Path) -> Vec<PathBuf> {
+    assert!(dir.is_dir(), "scan_convos: dir must be a directory");
     let mut files = Vec::new();
     walk_convos(dir, &mut files);
     files

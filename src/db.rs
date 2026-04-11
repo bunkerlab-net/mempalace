@@ -15,15 +15,16 @@ use crate::error::Result;
 /// Callers are expected to have set `LIMBO_DISABLE_FILE_LOCK` before the Tokio
 /// runtime starts (see `main()`).
 pub async fn open_db(path: &str) -> Result<(Database, Connection)> {
+    assert!(!path.is_empty(), "database path must not be empty");
+
     let db = Builder::new_local(path)
         .experimental_triggers(true)
         .build()
         .await?;
     let conn = db.connect()?;
 
-    // Only enable WAL for file-backed databases; in-memory DBs do not support it
-    let is_in_memory = path.is_empty()
-        || path == ":memory:"
+    // Only enable WAL for file-backed databases; in-memory DBs do not support it.
+    let is_in_memory = path == ":memory:"
         || path.starts_with("file::memory:")
         || (path.starts_with("file:") && path.contains("mode=memory"));
     if !is_in_memory {
@@ -35,6 +36,13 @@ pub async fn open_db(path: &str) -> Result<(Database, Connection)> {
     // writing, instead of failing immediately.
     conn.busy_timeout(Duration::from_secs(5))?;
 
+    // Postcondition: verify the connection is usable.
+    let mut check = conn.query("SELECT 1", ()).await?;
+    assert!(
+        check.next().await?.is_some(),
+        "connection must be usable after open"
+    );
+
     Ok((db, conn))
 }
 
@@ -44,6 +52,8 @@ pub async fn query_all(
     sql: &str,
     params: impl turso::IntoParams,
 ) -> Result<Vec<turso::Row>> {
+    assert!(!sql.is_empty(), "SQL query must not be empty");
+
     let mut rows = conn.query(sql, params).await?;
     let mut results = Vec::new();
     while let Some(row) = rows.next().await? {

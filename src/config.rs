@@ -77,6 +77,10 @@ impl MempalaceConfig {
 
     /// Resolve the palace database path, respecting `MEMPALACE_PALACE_PATH` env var.
     pub fn palace_db_path(&self) -> PathBuf {
+        assert!(
+            !self.palace_path.as_os_str().is_empty(),
+            "palace_path must not be empty"
+        );
         if let Ok(env_path) = std::env::var("MEMPALACE_PALACE_PATH") {
             return PathBuf::from(env_path);
         }
@@ -119,6 +123,10 @@ pub struct RoomConfig {
 impl ProjectConfig {
     /// Load from a mempalace.yaml file.
     pub fn load(path: &Path) -> Result<Self> {
+        assert!(
+            path.extension().is_some_and(|e| e == "yaml" || e == "yml"),
+            "ProjectConfig::load: expected .yaml or .yml file"
+        );
         if !path.exists() {
             return Err(Error::ConfigNotFound(path.to_path_buf()));
         }

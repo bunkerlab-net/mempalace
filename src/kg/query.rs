@@ -53,6 +53,12 @@ pub async fn query_entity(
     as_of: Option<&str>,
     direction: &str,
 ) -> Result<Vec<Fact>> {
+    assert!(
+        direction == "outgoing" || direction == "incoming" || direction == "both",
+        "direction must be outgoing, incoming, or both — got \"{direction}\""
+    );
+    assert!(!name.is_empty(), "entity name must not be empty");
+
     let eid = entity_id(name);
     let mut results = Vec::new();
 
@@ -266,11 +272,18 @@ pub async fn stats(conn: &Connection) -> Result<KgStats> {
         .filter_map(|r| r.get_value(0).ok().and_then(|v| v.as_text().cloned()))
         .collect();
 
+    let expired = triples - current;
+    // Postcondition: expired + current must equal total triples.
+    assert!(
+        expired + current == triples,
+        "expired ({expired}) + current ({current}) must equal total ({triples})"
+    );
+
     Ok(KgStats {
         entities,
         triples,
         current_facts: current,
-        expired_facts: triples - current,
+        expired_facts: expired,
         relationship_types,
     })
 }

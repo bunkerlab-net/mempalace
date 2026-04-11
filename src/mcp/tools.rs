@@ -20,6 +20,9 @@ const MAX_EXACT_INT_F64: f64 = 9_007_199_254_740_991.0;
 
 /// Dispatch a tool call by name and return the JSON result.
 pub async fn dispatch(conn: &Connection, name: &str, args: &Value) -> Value {
+    assert!(!name.is_empty(), "tool name must not be empty");
+    assert!(args.is_object(), "tool args must be a JSON object");
+
     match name {
         "mempalace_status" => tool_status(conn).await,
         "mempalace_list_wings" => tool_list_wings(conn).await,
@@ -135,7 +138,17 @@ fn sanitize_name(value: &str, field_name: &str) -> Result<String, Value> {
             json!({"success": false, "error": format!("{field_name} contains invalid characters"), "public": true}),
         );
     }
-    Ok(v.to_string())
+    let result = v.to_string();
+
+    // Postconditions: result is non-empty, trimmed, and has no path-traversal chars.
+    debug_assert!(!result.is_empty());
+    debug_assert!(result == result.trim());
+    debug_assert!(!result.contains(".."));
+    debug_assert!(!result.contains('/'));
+    debug_assert!(!result.contains('\\'));
+    debug_assert!(!result.contains('\0'));
+
+    Ok(result)
 }
 
 /// Validate an optional name filter.
@@ -162,12 +175,19 @@ fn sanitize_content(value: &str) -> Result<String, Value> {
             json!({"success": false, "error": "content exceeds maximum length of 100,000 characters", "public": true}),
         );
     }
-    if trimmed.contains('\x00') {
+    if trimmed.contains('\0') {
         return Err(
             json!({"success": false, "error": "content contains null bytes", "public": true}),
         );
     }
-    Ok(trimmed.to_string())
+
+    let result = trimmed.to_string();
+
+    // Postconditions: result is non-empty and has no null bytes.
+    debug_assert!(!result.is_empty());
+    debug_assert!(!result.contains('\0'));
+
+    Ok(result)
 }
 
 /// Append a write-operation entry to `~/.mempalace/wal/write_log.jsonl`.
@@ -176,6 +196,8 @@ fn sanitize_content(value: &str) -> Result<String, Value> {
 /// the WAL directory is unwritable.  I/O is offloaded to `spawn_blocking` so
 /// the async worker thread is not stalled by filesystem calls.
 async fn wal_log(operation: &str, params: Value) {
+    assert!(!operation.is_empty(), "WAL operation must not be empty");
+
     let operation = operation.to_string();
     let _ = tokio::task::spawn_blocking(move || {
         let wal_dir = crate::config::config_dir().join("wal");
@@ -476,6 +498,11 @@ async fn tool_add_drawer(conn: &Connection, args: &Value) -> Value {
         s
     });
     let id = format!("drawer_{wing}_{room}_{}", &hex[..24]);
+    // Postcondition: deterministic ID follows naming convention.
+    assert!(
+        id.starts_with("drawer_"),
+        "drawer ID must start with drawer_"
+    );
     wal_log(
         "add_drawer",
         json!({

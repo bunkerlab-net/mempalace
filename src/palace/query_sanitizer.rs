@@ -55,6 +55,7 @@ pub fn sanitize_query(raw: &str) -> SanitizedQuery {
     if raw.is_empty() {
         return passthrough(String::new(), 0);
     }
+    assert!(original_length > 0);
 
     // Step 1: short query — almost certainly not contaminated.
     if original_length <= SAFE_QUERY_LEN {
@@ -120,13 +121,20 @@ fn sanitized(clean_query: String, original_length: usize, method: &'static str) 
 
 /// Return the last [`MAX_QUERY_LEN`] chars of `s`.
 fn tail_guard(s: &str) -> String {
+    assert!(!s.is_empty(), "tail_guard: input must not be empty");
+
     let total = s.chars().count();
     if total <= MAX_QUERY_LEN {
         return s.to_owned();
     }
     let skip = total - MAX_QUERY_LEN;
     let byte_start = s.char_indices().nth(skip).map_or(0, |(i, _)| i);
-    s[byte_start..].to_owned()
+    let result = s[byte_start..].to_owned();
+
+    // Postcondition: output is bounded by MAX_QUERY_LEN.
+    debug_assert!(result.chars().count() <= MAX_QUERY_LEN);
+
+    result
 }
 
 #[cfg(test)]

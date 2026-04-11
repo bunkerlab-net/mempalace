@@ -127,6 +127,9 @@ pub async fn traverse(
     start_room: &str,
     max_hops: usize,
 ) -> Result<Vec<TraversalResult>> {
+    assert!(max_hops > 0, "max_hops must be positive");
+    assert!(!start_room.is_empty(), "start_room must not be empty");
+
     let (nodes, _) = build_graph(conn).await?;
 
     let start = match nodes.get(start_room) {
@@ -184,6 +187,10 @@ pub async fn traverse(
 
     results.sort_by(|a, b| a.hop.cmp(&b.hop).then_with(|| b.count.cmp(&a.count)));
     results.truncate(50);
+
+    // Postcondition: result count bounded by hard limit.
+    debug_assert!(results.len() <= 50);
+
     Ok(results)
 }
 
@@ -217,6 +224,10 @@ pub async fn find_tunnels(
 
     tunnels.sort_by(|a, b| b.count.cmp(&a.count));
     tunnels.truncate(50);
+
+    // Postcondition: all returned nodes span at least 2 wings.
+    debug_assert!(tunnels.iter().all(|t| t.wings.len() >= 2));
+
     Ok(tunnels)
 }
 

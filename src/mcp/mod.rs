@@ -66,6 +66,8 @@ pub async fn run(conn: &Connection) -> Result<()> {
 }
 
 async fn handle_request(conn: &Connection, request: &Value) -> Option<Value> {
+    assert!(request.is_object(), "MCP request must be a JSON object");
+
     let method = request.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let params = request.get("params").cloned().unwrap_or(json!({}));
     let req_id = request.get("id").cloned().unwrap_or(Value::Null);

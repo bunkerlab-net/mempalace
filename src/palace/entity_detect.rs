@@ -22,6 +22,7 @@ pub struct DetectionResult {
 
 /// Scan files and detect entity candidates.
 pub fn detect_entities(file_paths: &[&Path], max_files: usize) -> DetectionResult {
+    assert!(max_files > 0, "detect_entities: max_files must be positive");
     let mut all_text = String::new();
     let mut all_lines = Vec::new();
     let max_bytes_per_file = 5000;
@@ -84,6 +85,11 @@ pub fn detect_entities(file_paths: &[&Path], max_files: usize) -> DetectionResul
     people.truncate(15);
     projects.truncate(10);
     uncertain.truncate(8);
+
+    // Postcondition: result lists are bounded by their truncation limits.
+    debug_assert!(people.len() <= 15);
+    debug_assert!(projects.len() <= 10);
+    debug_assert!(uncertain.len() <= 8);
 
     DetectionResult {
         people,
@@ -379,6 +385,10 @@ fn stopwords() -> HashSet<&'static str> {
 }
 
 fn extract_candidates(text: &str) -> HashMap<String, usize> {
+    assert!(
+        !text.is_empty(),
+        "extract_candidates: text must not be empty"
+    );
     let stops = stopwords();
     let single_re = Regex::new(r"\b([A-Z][a-z]{1,19})\b").expect("valid regex");
     let multi_re = Regex::new(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b").expect("valid regex");
@@ -404,6 +414,10 @@ fn extract_candidates(text: &str) -> HashMap<String, usize> {
 
     // Filter: must appear at least 3 times
     counts.retain(|_, v| *v >= 3);
+
+    // Postcondition: all surviving candidates have frequency >= 3.
+    debug_assert!(counts.values().all(|&v| v >= 3));
+
     counts
 }
 
@@ -415,6 +429,7 @@ struct EntityScores {
 }
 
 fn score_entity(name: &str, text: &str, lines: &[String]) -> EntityScores {
+    assert!(!name.is_empty(), "score_entity: name must not be empty");
     let escaped = regex::escape(name);
     let mut person_score = 0i32;
     let mut project_score = 0i32;
