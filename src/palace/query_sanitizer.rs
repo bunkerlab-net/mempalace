@@ -17,7 +17,6 @@ use regex::Regex;
 
 const MAX_QUERY_LEN: usize = 500;
 const SAFE_QUERY_LEN: usize = 200;
-const MIN_SEGMENT_LEN: usize = 10;
 const MIN_QUESTION_SEGMENT_LEN: usize = 3;
 
 static QUESTION_RE: OnceLock<Regex> = OnceLock::new();
@@ -67,23 +66,19 @@ pub fn sanitize_query(raw: &str) -> SanitizedQuery {
         .filter(|s| !s.is_empty())
         .collect();
 
-    // Step 2: find the last newline-segment that ends with `?` or `？`.
-    for seg in segments.iter().rev() {
-        if question_re().is_match(seg) && seg.chars().count() >= MIN_QUESTION_SEGMENT_LEN {
-            let candidate = tail_guard(seg);
+    // Step 2/3: treat the trailing segment as the primary intent carrier.
+    if let Some(last_seg) = segments.last().copied() {
+        let last_len = last_seg.chars().count();
+        if question_re().is_match(last_seg) && last_len >= MIN_QUESTION_SEGMENT_LEN {
+            let candidate = tail_guard(last_seg);
             eprintln!(
                 "mempalace: query sanitized {original_length} → {} chars (method=question_extraction)",
                 candidate.chars().count()
             );
             return sanitized(candidate, original_length, "question_extraction");
         }
-    }
-
-    // Step 3: take the last meaningful segment (system prompts are prepended,
-    // so the actual query is at the end of the string).
-    for seg in segments.iter().rev() {
-        if seg.chars().count() >= MIN_SEGMENT_LEN {
-            let candidate = tail_guard(seg);
+        if last_len >= MIN_QUESTION_SEGMENT_LEN {
+            let candidate = tail_guard(last_seg);
             eprintln!(
                 "mempalace: query sanitized {original_length} → {} chars (method=tail_sentence)",
                 candidate.chars().count()
@@ -206,9 +201,10 @@ mod tests {
 
     #[test]
     fn utf8_boundary_safe() {
-        // 300 bytes of ASCII + a 3-byte UTF-8 char pushes total over SAFE_QUERY_LEN
-        let prompt = format!("{}{}", "a".repeat(300), "é".repeat(50));
+        // Force truncation with multi-byte chars to validate UTF-8-safe slicing.
+        let prompt = "é".repeat(550);
         let r = sanitize_query(&prompt);
+        assert_eq!(r.clean_length, MAX_QUERY_LEN);
         assert!(std::str::from_utf8(r.clean_query.as_bytes()).is_ok());
     }
 }
