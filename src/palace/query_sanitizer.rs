@@ -168,6 +168,15 @@ mod tests {
     }
 
     #[test]
+    fn question_extraction_short_question_segment() {
+        let prompt = format!("{}\nETA?", "x".repeat(300));
+        let r = sanitize_query(&prompt);
+        assert!(r.was_sanitized);
+        assert_eq!(r.method, "question_extraction");
+        assert_eq!(r.clean_query, "ETA?");
+    }
+
+    #[test]
     fn tail_sentence() {
         let prompt = format!("{}\nchromadb locking bug", "x".repeat(300));
         let r = sanitize_query(&prompt);
