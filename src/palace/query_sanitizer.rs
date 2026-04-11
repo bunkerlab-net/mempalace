@@ -18,6 +18,7 @@ use regex::Regex;
 const MAX_QUERY_LEN: usize = 500;
 const SAFE_QUERY_LEN: usize = 200;
 const MIN_SEGMENT_LEN: usize = 10;
+const MIN_QUESTION_SEGMENT_LEN: usize = 3;
 
 static QUESTION_RE: OnceLock<Regex> = OnceLock::new();
 
@@ -68,7 +69,7 @@ pub fn sanitize_query(raw: &str) -> SanitizedQuery {
 
     // Step 2: find the last newline-segment that ends with `?` or `？`.
     for seg in segments.iter().rev() {
-        if question_re().is_match(seg) && seg.chars().count() >= MIN_SEGMENT_LEN {
+        if question_re().is_match(seg) && seg.chars().count() >= MIN_QUESTION_SEGMENT_LEN {
             let candidate = tail_guard(seg);
             eprintln!(
                 "mempalace: query sanitized {original_length} → {} chars (method=question_extraction)",
