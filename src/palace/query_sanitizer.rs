@@ -34,7 +34,8 @@ pub struct SanitizedQuery {
     pub clean_query: String,
     /// Whether any sanitization was applied.
     pub was_sanitized: bool,
-    /// Char count of the original input.
+    /// Char count of the trimmed input (see the `trim()` call at the top of
+    /// [`sanitize_query`] — the raw string is trimmed before this is measured).
     pub original_length: usize,
     /// Char count of the cleaned output.
     pub clean_length: usize,
@@ -182,7 +183,7 @@ mod tests {
 
     #[test]
     fn tail_truncation() {
-        // All newline-segments are tiny (< MIN_SEGMENT_LEN), forcing fallback.
+        // All newline-segments are tiny (only 2 chars each), forcing fallback to tail_truncation.
         let prompt = "ab\n".repeat(100); // 300 chars; each segment "ab" is only 2 chars
         let r = sanitize_query(&prompt);
         assert!(r.was_sanitized);
