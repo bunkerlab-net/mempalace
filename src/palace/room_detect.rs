@@ -263,6 +263,8 @@ pub fn is_skip_dir(name: &str) -> bool {
 }
 
 #[cfg(test)]
+// Test code — .expect() is acceptable with a descriptive message.
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     use std::path::PathBuf;

@@ -65,8 +65,11 @@ fn detect_flags(text: &str) -> Vec<String> {
 }
 
 /// Extract the most important sentence fragment from text.
+// Regex literal is a compile-time constant that can never fail to compile.
+#[allow(clippy::expect_used)]
 fn extract_key_sentence(text: &str) -> String {
-    let re = Regex::new(r"[.!?\n]+").expect("valid regex");
+    let re = Regex::new(r"[.!?\n]+")
+        .expect("sentence-split regex is a compile-time literal and cannot fail to compile");
     let sentences: Vec<&str> = re
         .split(text)
         .map(str::trim)
@@ -156,6 +159,8 @@ impl Dialect {
     }
 
     /// Find known entities in text, or detect capitalized names.
+    // Regex literal is a compile-time constant that can never fail to compile.
+    #[allow(clippy::expect_used)]
     fn detect_entities(&self, text: &str) -> Vec<String> {
         assert!(!text.is_empty(), "detect_entities: text must not be empty");
         let text_lower = text.to_lowercase();
@@ -177,7 +182,8 @@ impl Dialect {
         // Fallback: capitalized words that look like names
         let stops = stop_words();
         let words: Vec<&str> = text.split_whitespace().collect();
-        let clean_re = Regex::new(r"[^a-zA-Z]").expect("valid regex");
+        let clean_re = Regex::new(r"[^a-zA-Z]")
+            .expect("non-alpha strip regex is a compile-time literal and cannot fail to compile");
 
         for (i, w) in words.iter().enumerate() {
             let clean = clean_re.replace_all(w, "");
@@ -267,6 +273,8 @@ impl Dialect {
 }
 
 #[cfg(test)]
+// Test code — .expect() is acceptable with a descriptive message.
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 

@@ -23,9 +23,12 @@ pub fn stop_words() -> HashSet<&'static str> {
 }
 
 /// Extract key topic words from plain text by frequency + proper noun boost.
+// Regex literal is a compile-time constant that can never fail to compile.
+#[allow(clippy::expect_used)]
 pub fn extract_topics(text: &str, max_topics: usize) -> Vec<String> {
     let stops = stop_words();
-    let word_re = Regex::new(r"[a-zA-Z][a-zA-Z_-]{2,}").expect("valid regex");
+    let word_re = Regex::new(r"[a-zA-Z][a-zA-Z_-]{2,}")
+        .expect("word-topic regex is a compile-time literal and cannot fail to compile");
 
     let words: Vec<&str> = word_re.find_iter(text).map(|m| m.as_str()).collect();
 

@@ -384,14 +384,20 @@ fn stopwords() -> HashSet<&'static str> {
     ])
 }
 
+// Regex literals are compile-time constants that can never fail to compile.
+#[allow(clippy::expect_used)]
 fn extract_candidates(text: &str) -> HashMap<String, usize> {
     assert!(
         !text.is_empty(),
         "extract_candidates: text must not be empty"
     );
     let stops = stopwords();
-    let single_re = Regex::new(r"\b([A-Z][a-z]{1,19})\b").expect("valid regex");
-    let multi_re = Regex::new(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b").expect("valid regex");
+    let single_re = Regex::new(r"\b([A-Z][a-z]{1,19})\b").expect(
+        "single-word capitalized name regex is a compile-time literal and cannot fail to compile",
+    );
+    let multi_re = Regex::new(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b").expect(
+        "multi-word capitalized name regex is a compile-time literal and cannot fail to compile",
+    );
 
     let mut counts: HashMap<String, usize> = HashMap::new();
 
@@ -429,6 +435,8 @@ struct EntityScores {
 }
 
 /// Score person-related signals: verb patterns, dialogue markers, pronouns, direct address.
+// Regex literals are compile-time constants that can never fail to compile.
+#[allow(clippy::expect_used)]
 fn score_entity_person(
     name: &str,
     escaped: &str,
@@ -468,8 +476,8 @@ fn score_entity_person(
     }
 
     let name_lower = name.to_lowercase();
-    let pronoun_re =
-        Regex::new(r"(?i)\b(she|her|hers|he|him|his|they|them|their)\b").expect("valid regex");
+    let pronoun_re = Regex::new(r"(?i)\b(she|her|hers|he|him|his|they|them|their)\b")
+        .expect("pronoun regex is a compile-time literal and cannot fail to compile");
     let mut pronoun_hits = 0;
     for (i, line) in lines.iter().enumerate() {
         if line.to_lowercase().contains(&name_lower) {

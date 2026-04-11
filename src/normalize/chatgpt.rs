@@ -86,6 +86,8 @@ pub fn try_parse(data: &serde_json::Value) -> Option<String> {
 }
 
 #[cfg(test)]
+// Test code — .expect() is acceptable with a descriptive message.
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -118,16 +120,17 @@ mod tests {
                 }
             }"#,
         )
-        .expect("valid json");
-        let result = try_parse(&data).expect("should parse");
+        .expect("hardcoded test fixture is valid JSON and must parse without error");
+        let result = try_parse(&data)
+            .expect("try_parse should succeed for well-formed ChatGPT export JSON fixture");
         assert!(result.contains("> what is rust?"));
         assert!(result.contains("Rust is a systems programming language."));
     }
 
     #[test]
     fn returns_none_without_mapping() {
-        let data: serde_json::Value =
-            serde_json::from_str(r#"{"title":"chat"}"#).expect("valid json");
+        let data: serde_json::Value = serde_json::from_str(r#"{"title":"chat"}"#)
+            .expect("hardcoded test fixture is valid JSON and must parse without error");
         assert!(try_parse(&data).is_none());
     }
 }

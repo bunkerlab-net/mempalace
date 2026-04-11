@@ -21,6 +21,8 @@ const MIN_QUESTION_SEGMENT_LEN: usize = 3;
 
 static QUESTION_RE: OnceLock<Regex> = OnceLock::new();
 
+// Regex literal is a compile-time constant that can never fail to compile.
+#[allow(clippy::expect_used)]
 fn question_re() -> &'static Regex {
     QUESTION_RE.get_or_init(|| {
         Regex::new(r#"[?？]\s*["']?\s*$"#)

@@ -1,3 +1,6 @@
+// Test infrastructure — .expect() is acceptable with a descriptive message.
+#![allow(clippy::expect_used)]
+
 use turso::Connection;
 
 /// Create an in-memory turso database with the full schema applied.

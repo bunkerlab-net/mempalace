@@ -71,6 +71,8 @@ fn extract_timestamp(lines: &[&str]) -> Option<String> {
 }
 
 /// Extract a subject from the first meaningful user prompt.
+// Regex literals are compile-time constants that can never fail to compile.
+#[allow(clippy::expect_used)]
 fn extract_subject(lines: &[&str]) -> String {
     let skip_re =
         Regex::new(r"^(\./|cd |ls |python|bash|git |cat |source |export |claude|./activate)")
@@ -192,6 +194,8 @@ fn split_file(
 }
 
 /// Split mega-files in a directory into per-session files.
+// Regex literals are compile-time constants that can never fail to compile.
+#[allow(clippy::expect_used)]
 pub fn run(
     dir: &Path,
     output_dir: Option<&Path>,

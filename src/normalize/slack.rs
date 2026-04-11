@@ -72,6 +72,8 @@ pub fn try_parse(data: &serde_json::Value) -> Option<String> {
 }
 
 #[cfg(test)]
+// Test code — .expect() is acceptable with a descriptive message.
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 

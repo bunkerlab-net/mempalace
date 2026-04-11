@@ -27,6 +27,8 @@ use config::MempalaceConfig;
 // SAFETY: set_var is unsafe because it is not thread-safe, but this runs
 // before the Tokio runtime is built and before any other threads exist.
 #[allow(unsafe_code)]
+// tokio runtime build failure is unrecoverable — no Result to propagate to.
+#[allow(clippy::expect_used)]
 fn main() {
     unsafe {
         std::env::set_var("LIMBO_DISABLE_FILE_LOCK", "1");

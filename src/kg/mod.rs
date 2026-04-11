@@ -23,6 +23,8 @@ pub fn entity_id(name: &str) -> String {
 }
 
 #[cfg(test)]
+// Test code — .expect() is acceptable with a descriptive message.
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -48,6 +50,8 @@ mod tests {
 }
 
 #[cfg(test)]
+// Test code — .expect() is acceptable with a descriptive message.
+#[allow(clippy::expect_used)]
 mod async_tests {
     use super::*;
 
@@ -56,7 +60,7 @@ mod async_tests {
         let (_db, conn) = crate::test_helpers::test_db().await;
         let id = add_entity(&conn, "Alice Smith", "person", None)
             .await
-            .expect("add_entity");
+            .expect("add_entity should succeed for valid name and entity type");
         assert_eq!(id, "alice_smith");
 
         let rows = crate::db::query_all(
@@ -65,7 +69,7 @@ mod async_tests {
             turso::params!["alice_smith"],
         )
         .await
-        .expect("query");
+        .expect("SELECT FROM entities should succeed after add_entity");
         assert_eq!(rows.len(), 1);
     }
 
@@ -86,12 +90,14 @@ mod async_tests {
             },
         )
         .await
-        .expect("add_triple");
+        .expect("add_triple should succeed for valid subject/predicate/object params");
 
         // Both entities should exist
         let entities = crate::db::query_all(&conn, "SELECT id FROM entities ORDER BY id", ())
             .await
-            .expect("query");
+            .expect(
+                "SELECT FROM entities should succeed after add_triple with auto-entity creation",
+            );
         assert_eq!(entities.len(), 2);
     }
 
@@ -108,8 +114,12 @@ mod async_tests {
             source_closet: None,
             source_file: None,
         };
-        let id1 = add_triple(&conn, &params).await.expect("first");
-        let id2 = add_triple(&conn, &params).await.expect("second");
+        let id1 = add_triple(&conn, &params)
+            .await
+            .expect("first add_triple should succeed for new triple");
+        let id2 = add_triple(&conn, &params)
+            .await
+            .expect("second add_triple on same params should return existing id without error");
         assert_eq!(id1, id2);
     }
 
@@ -130,11 +140,11 @@ mod async_tests {
             },
         )
         .await
-        .expect("add");
+        .expect("add_triple should succeed for Carol/works at/OldCo");
 
         invalidate(&conn, "Carol", "works at", "OldCo", Some("2024-06-01"))
             .await
-            .expect("invalidate");
+            .expect("invalidate should succeed for existing Carol/works at/OldCo triple");
 
         let rows = crate::db::query_all(
             &conn,
@@ -142,9 +152,11 @@ mod async_tests {
             (),
         )
         .await
-        .expect("query");
+        .expect("SELECT valid_to should succeed after invalidate");
         assert_eq!(rows.len(), 1);
-        let vt: String = rows[0].get(0).expect("get valid_to");
+        let vt: String = rows[0]
+            .get(0)
+            .expect("valid_to column 0 must be present in triples result row");
         assert_eq!(vt, "2024-06-01");
     }
 }

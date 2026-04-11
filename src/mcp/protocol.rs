@@ -29,7 +29,9 @@ When WRITING AAAK: use entity codes, mark emotions, keep structure tight.";
 /// Generate the tools/list response payload.
 // 22 tool schemas in a single JSON literal — splitting would hurt readability
 // with no structural benefit since each tool is a self-contained object.
+// Static JSON literal guaranteed to be an array; .as_array() cannot return None.
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::expect_used)]
 pub fn tool_definitions() -> Vec<serde_json::Value> {
     serde_json::json!([
         {
@@ -278,5 +280,7 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
                 "required": ["agent_name"]
             }
         }
-    ]).as_array().expect("static JSON array").clone()
+    ]).as_array()
+        .expect("json!([...]) is always Value::Array; as_array() cannot return None here")
+        .clone()
 }

@@ -237,6 +237,8 @@ pub struct DrawerParams<'a> {
 }
 
 #[cfg(test)]
+// Test code — .expect() is acceptable with a descriptive message.
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -286,6 +288,8 @@ mod tests {
 }
 
 #[cfg(test)]
+// Test code — .expect() is acceptable with a descriptive message.
+#[allow(clippy::expect_used)]
 mod async_tests {
     use super::*;
 
@@ -303,7 +307,9 @@ mod async_tests {
             ingest_mode: "projects",
             source_mtime: None,
         };
-        let inserted = add_drawer(&conn, &p).await.expect("add_drawer");
+        let inserted = add_drawer(&conn, &p)
+            .await
+            .expect("add_drawer should succeed for valid new drawer");
         assert!(inserted);
 
         let rows = crate::db::query_all(
@@ -312,7 +318,7 @@ mod async_tests {
             turso::params!["d1"],
         )
         .await
-        .expect("query");
+        .expect("SELECT FROM drawers should succeed after successful insert");
         assert_eq!(rows.len(), 1);
     }
 
@@ -330,9 +336,13 @@ mod async_tests {
             ingest_mode: "projects",
             source_mtime: None,
         };
-        let first = add_drawer(&conn, &p).await.expect("first insert");
+        let first = add_drawer(&conn, &p)
+            .await
+            .expect("first add_drawer should succeed for new drawer");
         assert!(first);
-        let second = add_drawer(&conn, &p).await.expect("second insert");
+        let second = add_drawer(&conn, &p)
+            .await
+            .expect("second add_drawer on same id should not error (INSERT OR IGNORE)");
         assert!(!second);
     }
 
@@ -350,7 +360,9 @@ mod async_tests {
             ingest_mode: "projects",
             source_mtime: Some(1_700_000_000.5),
         };
-        add_drawer(&conn, &p).await.expect("add_drawer");
+        add_drawer(&conn, &p)
+            .await
+            .expect("add_drawer should succeed for valid new drawer with mtime");
 
         let rows = crate::db::query_all(
             &conn,
@@ -358,7 +370,7 @@ mod async_tests {
             turso::params!["mt1"],
         )
         .await
-        .expect("query");
+        .expect("SELECT source_mtime should succeed after add_drawer");
         assert_eq!(rows.len(), 1);
         let stored: Option<f64> = rows[0].get(0).ok();
         assert_eq!(stored, Some(1_700_000_000.5));
@@ -373,11 +385,11 @@ mod async_tests {
             (),
         )
         .await
-        .expect("insert drawer");
+        .expect("raw INSERT INTO drawers should succeed in test db");
 
         index_words(&conn, "iw1", "rust rust programming")
             .await
-            .expect("index_words");
+            .expect("index_words should succeed for valid drawer_id and content");
 
         let rows = crate::db::query_all(
             &conn,
@@ -385,7 +397,7 @@ mod async_tests {
             turso::params!["iw1"],
         )
         .await
-        .expect("query");
+        .expect("SELECT drawer_words should succeed after index_words");
 
         // "rust" (count 2) and "programming" (count 1)
         assert_eq!(rows.len(), 2);
@@ -399,7 +411,7 @@ mod async_tests {
         assert!(
             !file_already_mined(&conn, "nonexistent.rs")
                 .await
-                .expect("check")
+                .expect("file_already_mined should not error when no drawer exists for the file")
         );
     }
 
@@ -414,19 +426,25 @@ mod async_tests {
             (),
         )
         .await
-        .expect("insert");
+        .expect("INSERT INTO drawers with NULL source_mtime should succeed in test db");
 
         // NULL mtime → treat as not yet mined (forces re-mine to record mtime).
-        assert!(!file_already_mined(&conn, "exists.rs").await.expect("check"));
+        assert!(
+            !file_already_mined(&conn, "exists.rs")
+                .await
+                .expect("file_already_mined should not error for drawer with NULL mtime")
+        );
     }
 
     /// A drawer whose stored mtime matches the file's current mtime is skipped.
     #[tokio::test]
     async fn file_already_mined_matching_mtime_returns_true() {
         let (_db, conn) = crate::test_helpers::test_db().await;
-        let tmp = tempfile::NamedTempFile::new().expect("tmp file");
+        let tmp = tempfile::NamedTempFile::new()
+            .expect("tempfile::NamedTempFile::new should succeed in test environment");
         let path = tmp.path().to_string_lossy().to_string();
-        let mtime = file_mtime(&path).expect("mtime");
+        let mtime =
+            file_mtime(&path).expect("file_mtime should succeed for existing temp file on disk");
 
         conn.execute(
             "INSERT INTO drawers (id, wing, room, content, source_file, source_mtime) \
@@ -434,9 +452,13 @@ mod async_tests {
             turso::params![path.as_str(), mtime],
         )
         .await
-        .expect("insert");
+        .expect("INSERT INTO drawers with matching source_mtime should succeed in test db");
 
-        assert!(file_already_mined(&conn, &path).await.expect("check"));
+        assert!(
+            file_already_mined(&conn, &path)
+                .await
+                .expect("file_already_mined should not error for drawer with matching mtime")
+        );
     }
 
     /// A drawer whose stored mtime differs from the file's current mtime must be
@@ -444,7 +466,8 @@ mod async_tests {
     #[tokio::test]
     async fn file_already_mined_stale_mtime_returns_false() {
         let (_db, conn) = crate::test_helpers::test_db().await;
-        let tmp = tempfile::NamedTempFile::new().expect("tmp file");
+        let tmp = tempfile::NamedTempFile::new()
+            .expect("tempfile::NamedTempFile::new should succeed in test environment");
         let path = tmp.path().to_string_lossy().to_string();
         // Store an obviously wrong mtime.
         let stale_mtime: f64 = 0.0;
@@ -455,9 +478,13 @@ mod async_tests {
             turso::params![path.as_str(), stale_mtime],
         )
         .await
-        .expect("insert");
+        .expect("INSERT INTO drawers with stale source_mtime 0.0 should succeed in test db");
 
-        assert!(!file_already_mined(&conn, &path).await.expect("check"));
+        assert!(
+            !file_already_mined(&conn, &path)
+                .await
+                .expect("file_already_mined should not error for drawer with stale mtime")
+        );
     }
 
     /// When two chunks of the same file disagree on their stored mtime, the
@@ -466,7 +493,8 @@ mod async_tests {
     #[tokio::test]
     async fn file_already_mined_disagreeing_mtimes_returns_false() {
         let (_db, conn) = crate::test_helpers::test_db().await;
-        let tmp = tempfile::NamedTempFile::new().expect("tmp file");
+        let tmp = tempfile::NamedTempFile::new()
+            .expect("tempfile::NamedTempFile::new should succeed in test environment");
         let path = tmp.path().to_string_lossy().to_string();
 
         conn.execute(
@@ -475,17 +503,19 @@ mod async_tests {
             turso::params![path.as_str()],
         )
         .await
-        .expect("insert chunk0");
+        .expect("INSERT chunk0 with source_mtime 1000.0 should succeed in test db");
         conn.execute(
             "INSERT INTO drawers (id, wing, room, content, source_file, source_mtime) \
              VALUES ('chunk1', 'w', 'r', 'c1', ?1, 2000.0)",
             turso::params![path.as_str()],
         )
         .await
-        .expect("insert chunk1");
+        .expect("INSERT chunk1 with source_mtime 2000.0 should succeed in test db");
 
         assert!(
-            !file_already_mined(&conn, &path).await.expect("check"),
+            !file_already_mined(&conn, &path).await.expect(
+                "file_already_mined should not error for file with disagreeing chunk mtimes"
+            ),
             "disagreeing mtimes must trigger re-mine"
         );
     }

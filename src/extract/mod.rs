@@ -64,10 +64,15 @@ pub fn extract_memories(text: &str, min_confidence: f64) -> Vec<Memory> {
             0.0
         };
 
-        let (max_type, max_score) = scores
+        // f64 scores come from integer match counts (count as f64); partial_cmp
+        // only returns None for NaN, which cannot arise here.
+        let Some(&(max_type, max_score)) = scores
             .iter()
-            .max_by(|a, b| a.1.partial_cmp(&b.1).expect("scores contain no NaN"))
-            .expect("scores is non-empty");
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        else {
+            // Unreachable: scores is non-empty (checked above at `if scores.is_empty()`).
+            continue;
+        };
         let max_score = max_score + length_bonus;
 
         // Disambiguate

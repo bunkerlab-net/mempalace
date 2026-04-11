@@ -15,6 +15,7 @@ warnings = "deny"
 
 [lints.clippy]
 enum_glob_use = "deny"
+expect_used = "deny"
 pedantic = { level = "deny", priority = -1 }
 unwrap_used = "deny"
 

@@ -204,8 +204,8 @@ Use the project's `Result<T>` type alias with the custom `Error` enum. Use `?` f
 propagation. Use `thiserror` for deriving `Display` on error variants.
 
 Do not use `.unwrap()` or `.expect()` in production code — the project denies
-`clippy::unwrap_used`. Use `.unwrap_or()`, `.unwrap_or_default()`, or propagate
-with `?`.
+both `clippy::unwrap_used` and `clippy::expect_used`. Use `.unwrap_or()`,
+`.unwrap_or_default()`, or propagate with `?`.
 
 Assertions (`assert!`) are distinct from error handling — they catch **programmer
 errors** (bugs), not **operating errors** (expected failures). A failed assertion
@@ -293,8 +293,9 @@ unsafe_code = "deny"
 warnings = "deny"
 
 [lints.clippy]
-pedantic = { level = "deny", priority = -1 }
 enum_glob_use = "deny"
+expect_used = "deny"
+pedantic = { level = "deny", priority = -1 }
 unwrap_used = "deny"
 ```
 
@@ -302,7 +303,7 @@ All code must pass `cargo clippy` with zero warnings before commit.
 
 **Lint suppression requires justification.** Any time a clippy lint is suppressed with
 `#[allow(...)]`, an inline comment must be added on the line immediately above (or on
-the same line) explaining *why* the suppression is necessary:
+the same line) explaining _why_ the suppression is necessary:
 
 ```rust
 // Byte lengths for display-only ratio; precision loss negligible for practical sizes.

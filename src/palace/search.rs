@@ -145,6 +145,8 @@ fn tokenize_query(query: &str) -> Vec<String> {
 }
 
 #[cfg(test)]
+// Test code — .expect() is acceptable with a descriptive message.
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -180,6 +182,8 @@ mod tests {
 }
 
 #[cfg(test)]
+// Test code — .expect() is acceptable with a descriptive message.
+#[allow(clippy::expect_used)]
 mod async_tests {
     use super::*;
 
@@ -200,7 +204,7 @@ mod async_tests {
             },
         )
         .await
-        .expect("seed s1");
+        .expect("add_drawer should succeed when seeding test drawer s1 (rust/project_a)");
 
         crate::palace::drawer::add_drawer(
             conn,
@@ -217,7 +221,7 @@ mod async_tests {
             },
         )
         .await
-        .expect("seed s2");
+        .expect("add_drawer should succeed when seeding test drawer s2 (react/project_b)");
     }
 
     #[tokio::test]
@@ -226,7 +230,7 @@ mod async_tests {
         seed_drawers(&conn).await;
         let results = search_memories(&conn, "rust", None, None, 10)
             .await
-            .expect("search");
+            .expect("search_memories should not error when searching for 'rust'");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].wing, "project_a");
         assert_eq!(results[0].source_file, "main.rs");
@@ -240,7 +244,7 @@ mod async_tests {
         // "programming" appears in both, but searching "rust programming" should rank s1 higher
         let results = search_memories(&conn, "rust programming", None, None, 10)
             .await
-            .expect("search");
+            .expect("search_memories should not error when searching for 'rust programming'");
         assert!(!results.is_empty());
         assert_eq!(results[0].wing, "project_a");
         assert_eq!(results[0].source_file, "main.rs");
@@ -253,7 +257,7 @@ mod async_tests {
         seed_drawers(&conn).await;
         let results = search_memories(&conn, "programming", Some("project_b"), None, 10)
             .await
-            .expect("search");
+            .expect("search_memories should not error when filtering by wing 'project_b'");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].room, "frontend");
         assert_eq!(results[0].source_file, "app.tsx");
@@ -266,7 +270,7 @@ mod async_tests {
         seed_drawers(&conn).await;
         let results = search_memories(&conn, "programming", None, Some("backend"), 10)
             .await
-            .expect("search");
+            .expect("search_memories should not error when filtering by room 'backend'");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].wing, "project_a");
         assert_eq!(results[0].room, "backend");
@@ -280,7 +284,7 @@ mod async_tests {
         seed_drawers(&conn).await;
         let results = search_memories(&conn, "elephant", None, None, 10)
             .await
-            .expect("search");
+            .expect("search_memories should not error when query matches no drawers");
         assert!(results.is_empty());
     }
 }

@@ -1200,6 +1200,8 @@ async fn tool_diary_read(conn: &Connection, args: &Value) -> Value {
 }
 
 #[cfg(test)]
+// Test code — .expect() is acceptable with a descriptive message.
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 
