@@ -11,11 +11,22 @@
 //!   3. Tail sentence — take the last meaningful newline-delimited segment.
 //!   4. Tail truncation — fallback, take the last 500 chars.
 
+use std::sync::OnceLock;
+
 use regex::Regex;
 
 const MAX_QUERY_LEN: usize = 500;
 const SAFE_QUERY_LEN: usize = 200;
 const MIN_SEGMENT_LEN: usize = 10;
+
+static QUESTION_RE: OnceLock<Regex> = OnceLock::new();
+
+fn question_re() -> &'static Regex {
+    QUESTION_RE.get_or_init(|| {
+        Regex::new(r#"[?？]\s*["']?\s*$"#)
+            .expect("valid regex: question_re pattern is a compile-time constant")
+    })
+}
 
 /// Result of [`sanitize_query`].
 pub struct SanitizedQuery {
@@ -23,9 +34,9 @@ pub struct SanitizedQuery {
     pub clean_query: String,
     /// Whether any sanitization was applied.
     pub was_sanitized: bool,
-    /// Byte length of the original input.
+    /// Char count of the original input.
     pub original_length: usize,
-    /// Byte length of the cleaned output.
+    /// Char count of the cleaned output.
     pub clean_length: usize,
     /// Name of the method used.
     pub method: &'static str,
@@ -38,7 +49,7 @@ pub struct SanitizedQuery {
 #[must_use]
 pub fn sanitize_query(raw: &str) -> SanitizedQuery {
     let raw = raw.trim();
-    let original_length = raw.len();
+    let original_length = raw.chars().count();
 
     if raw.is_empty() {
         return passthrough(String::new(), 0);
@@ -56,15 +67,12 @@ pub fn sanitize_query(raw: &str) -> SanitizedQuery {
         .collect();
 
     // Step 2: find the last newline-segment that ends with `?` or `？`.
-    let question_re = Regex::new(r#"[?？]\s*["']?\s*$"#)
-        .expect("valid regex: question_re pattern is a compile-time constant");
-
     for seg in segments.iter().rev() {
-        if question_re.is_match(seg) && seg.len() >= MIN_SEGMENT_LEN {
+        if question_re().is_match(seg) && seg.chars().count() >= MIN_SEGMENT_LEN {
             let candidate = tail_guard(seg);
             eprintln!(
                 "mempalace: query sanitized {original_length} → {} chars (method=question_extraction)",
-                candidate.len()
+                candidate.chars().count()
             );
             return sanitized(candidate, original_length, "question_extraction");
         }
@@ -73,11 +81,11 @@ pub fn sanitize_query(raw: &str) -> SanitizedQuery {
     // Step 3: take the last meaningful segment (system prompts are prepended,
     // so the actual query is at the end of the string).
     for seg in segments.iter().rev() {
-        if seg.len() >= MIN_SEGMENT_LEN {
+        if seg.chars().count() >= MIN_SEGMENT_LEN {
             let candidate = tail_guard(seg);
             eprintln!(
                 "mempalace: query sanitized {original_length} → {} chars (method=tail_sentence)",
-                candidate.len()
+                candidate.chars().count()
             );
             return sanitized(candidate, original_length, "tail_sentence");
         }
@@ -87,7 +95,7 @@ pub fn sanitize_query(raw: &str) -> SanitizedQuery {
     let candidate = tail_guard(raw);
     eprintln!(
         "mempalace: query sanitized {original_length} → {} chars (method=tail_truncation)",
-        candidate.len()
+        candidate.chars().count()
     );
     sanitized(candidate, original_length, "tail_truncation")
 }
@@ -103,7 +111,7 @@ fn passthrough(s: String, len: usize) -> SanitizedQuery {
 }
 
 fn sanitized(clean_query: String, original_length: usize, method: &'static str) -> SanitizedQuery {
-    let clean_length = clean_query.len();
+    let clean_length = clean_query.chars().count();
     SanitizedQuery {
         clean_query,
         was_sanitized: true,
@@ -113,18 +121,15 @@ fn sanitized(clean_query: String, original_length: usize, method: &'static str) 
     }
 }
 
-/// Return the last [`MAX_QUERY_LEN`] bytes of `s`, adjusted to a valid UTF-8
-/// char boundary so slicing never panics.
+/// Return the last [`MAX_QUERY_LEN`] chars of `s`.
 fn tail_guard(s: &str) -> String {
-    if s.len() <= MAX_QUERY_LEN {
+    let total = s.chars().count();
+    if total <= MAX_QUERY_LEN {
         return s.to_owned();
     }
-    let byte_start = s.len() - MAX_QUERY_LEN;
-    // Advance to the next valid char boundary at or after `byte_start`.
-    let boundary = (byte_start..=s.len())
-        .find(|&i| s.is_char_boundary(i))
-        .unwrap_or(s.len());
-    s[boundary..].to_owned()
+    let skip = total - MAX_QUERY_LEN;
+    let byte_start = s.char_indices().nth(skip).map_or(0, |(i, _)| i);
+    s[byte_start..].to_owned()
 }
 
 #[cfg(test)]

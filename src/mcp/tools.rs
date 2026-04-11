@@ -351,9 +351,12 @@ async fn tool_get_taxonomy(conn: &Connection) -> Value {
 }
 
 async fn tool_search(conn: &Connection, args: &Value) -> Value {
-    let raw_query = str_arg(args, "query");
+    let raw_query = str_arg(args, "query").trim();
+    if raw_query.is_empty() {
+        return json!({"error": "query must be a non-empty string", "public": true});
+    }
     let limit = usize::try_from(int_arg(args, "limit", 5)).unwrap_or(5);
-    let context_received = !str_arg(args, "context").is_empty();
+    let context_received = !str_arg(args, "context").trim().is_empty();
     let wing = match sanitize_opt_name(str_arg(args, "wing"), "wing") {
         Ok(v) => v,
         Err(e) => return e,
