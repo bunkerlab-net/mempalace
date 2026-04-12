@@ -69,6 +69,8 @@ async fn open_palace() -> error::Result<(turso::Database, turso::Connection, std
     Ok((db, conn, db_path))
 }
 
+// Each match arm is a single CLI subcommand — splitting this into separate
+// functions would not reduce complexity, only scatter the dispatch logic.
 #[allow(clippy::too_many_lines)]
 async fn run(cli: Cli) -> error::Result<()> {
     match cli.command {
