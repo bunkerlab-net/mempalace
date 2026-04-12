@@ -463,7 +463,7 @@ src/
 
 ```toml
 [lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
 warnings = "deny"
 
 [lints.clippy]
