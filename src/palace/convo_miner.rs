@@ -14,6 +14,9 @@ const CONVO_EXTENSIONS: &[&str] = &["txt", "md", "json", "jsonl"];
 const MIN_CHUNK_SIZE: usize = 30;
 /// Files larger than this are skipped — prevents OOM on huge files.
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
+/// Maximum directory nesting depth for `walk_convos`. Prevents stack overflow on
+/// pathological symlink graphs and enforces the no-recursion rule.
+const WALK_DEPTH_LIMIT: usize = 64;
 
 const TOPIC_KEYWORDS: &[(&str, &[&str])] = &[
     (
@@ -131,6 +134,8 @@ fn chunk_by_exchange(lines: &[&str]) -> Vec<Chunk> {
     let mut i = 0;
 
     while i < lines.len() {
+        // Upper bound: i strictly increases each iteration, bounded by lines.len().
+        assert!(i < lines.len());
         let line = lines[i].trim();
         if line.starts_with('>') {
             let user_turn = line;
@@ -138,6 +143,8 @@ fn chunk_by_exchange(lines: &[&str]) -> Vec<Chunk> {
 
             let mut ai_lines = Vec::new();
             while i < lines.len() {
+                // Upper bound: i strictly increases each inner iteration, bounded by lines.len().
+                assert!(i < lines.len());
                 let next = lines[i].trim();
                 if next.starts_with('>') || next.starts_with("---") {
                     break;
@@ -214,33 +221,43 @@ fn scan_convos(dir: &Path) -> Vec<PathBuf> {
 }
 
 fn walk_convos(dir: &Path, files: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().to_string();
-        // Skip symlinks — prevents following links to /dev/urandom etc.
-        if path.is_symlink() {
+    // Iterative DFS with explicit depth tracking — no recursion.
+    let mut stack: Vec<(PathBuf, usize)> = vec![(dir.to_path_buf(), 0)];
+
+    while let Some((current_dir, depth)) = stack.pop() {
+        assert!(
+            depth <= WALK_DEPTH_LIMIT,
+            "walk_convos: depth {depth} exceeds WALK_DEPTH_LIMIT"
+        );
+        if depth >= WALK_DEPTH_LIMIT {
             continue;
         }
-
-        if path.is_dir() {
-            // Skip global cache dirs plus Claude Code-specific output dirs that
-            // contain tool output and agent memory — not conversation transcripts.
-            if !is_skip_dir(&name) && name != "tool-results" && name != "memory" {
-                walk_convos(&path, files);
+        let Ok(entries) = std::fs::read_dir(&current_dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            // Skip symlinks — prevents following links to /dev/urandom etc.
+            if path.is_symlink() {
+                continue;
             }
-        } else if let Some(ext) = path.extension() {
-            let ext_lower = ext.to_string_lossy().to_lowercase();
-            // Skip .meta.json files — these are Claude Code session metadata,
-            // not conversation content.
-            if CONVO_EXTENSIONS.contains(&ext_lower.as_str()) && !name.ends_with(".meta.json") {
-                // Skip files exceeding size limit
-                if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_FILE_SIZE) {
-                    continue;
+            if path.is_dir() {
+                // Skip global cache dirs plus Claude Code-specific output dirs that
+                // contain tool output and agent memory — not conversation transcripts.
+                if !is_skip_dir(&name) && name != "tool-results" && name != "memory" {
+                    stack.push((path, depth + 1));
                 }
-                files.push(path);
+            } else if let Some(ext) = path.extension() {
+                let ext_lower = ext.to_string_lossy().to_lowercase();
+                // Skip .meta.json files — these are Claude Code session metadata,
+                // not conversation content.
+                if CONVO_EXTENSIONS.contains(&ext_lower.as_str()) && !name.ends_with(".meta.json") {
+                    if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_FILE_SIZE) {
+                        continue;
+                    }
+                    files.push(path);
+                }
             }
         }
     }

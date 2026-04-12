@@ -151,7 +151,13 @@ pub async fn traverse(
     let mut frontier: VecDeque<(String, usize)> = VecDeque::new();
     frontier.push_back((start_room.to_string(), 0));
 
+    // Upper bound: each room enters `visited` before being pushed to `frontier`,
+    // so the frontier empties after at most nodes.len() iterations.
     while let Some((current_room, depth)) = frontier.pop_front() {
+        assert!(
+            visited.len() <= nodes.len(),
+            "visited set cannot exceed node count — frontier invariant is broken"
+        );
         if depth >= max_hops {
             continue;
         }

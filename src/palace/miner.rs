@@ -25,6 +25,9 @@ pub struct MineParams {
 
 /// Files larger than this are skipped — prevents OOM on huge files.
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
+/// Maximum directory nesting depth for `walk_dir`. Prevents stack overflow on
+/// pathological symlink graphs and enforces the no-recursion rule.
+const WALK_DEPTH_LIMIT: usize = 64;
 
 const READABLE_EXTENSIONS: &[&str] = &[
     "txt", "md", "py", "js", "ts", "jsx", "tsx", "json", "yaml", "yml", "html", "css", "java",
@@ -127,33 +130,41 @@ fn walk_dir_gitignore(project_dir: &Path) -> Vec<PathBuf> {
 }
 
 fn walk_dir(dir: &Path, files: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
+    // Iterative DFS with explicit depth tracking — no recursion.
+    let mut stack: Vec<(PathBuf, usize)> = vec![(dir.to_path_buf(), 0)];
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().to_string();
-
-        // Skip symlinks — prevents following links to /dev/urandom etc.
-        if path.is_symlink() {
+    while let Some((current_dir, depth)) = stack.pop() {
+        assert!(
+            depth <= WALK_DEPTH_LIMIT,
+            "walk_dir: depth {depth} exceeds WALK_DEPTH_LIMIT"
+        );
+        if depth >= WALK_DEPTH_LIMIT {
             continue;
         }
-
-        if path.is_dir() {
-            if !is_skip_dir(&name) {
-                walk_dir(&path, files);
+        let Ok(entries) = std::fs::read_dir(&current_dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            // Skip symlinks — prevents following links to /dev/urandom etc.
+            if path.is_symlink() {
+                continue;
             }
-        } else if let Some(ext) = path.extension() {
-            let ext_lower = ext.to_string_lossy().to_lowercase();
-            if READABLE_EXTENSIONS.contains(&ext_lower.as_str())
-                && !SKIP_FILES.contains(&name.as_str())
-            {
-                // Skip files exceeding size limit
-                if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_FILE_SIZE) {
-                    continue;
+            if path.is_dir() {
+                if !is_skip_dir(&name) {
+                    stack.push((path, depth + 1));
                 }
-                files.push(path);
+            } else if let Some(ext) = path.extension() {
+                let ext_lower = ext.to_string_lossy().to_lowercase();
+                if READABLE_EXTENSIONS.contains(&ext_lower.as_str())
+                    && !SKIP_FILES.contains(&name.as_str())
+                {
+                    if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_FILE_SIZE) {
+                        continue;
+                    }
+                    files.push(path);
+                }
             }
         }
     }

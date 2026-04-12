@@ -31,7 +31,13 @@ pub fn try_parse(data: &serde_json::Value) -> Option<String> {
     let mut current_id = root.to_string();
     let mut visited = HashSet::new();
 
+    // Upper bound: each node in `mapping` can be visited at most once, so this
+    // loop runs at most mapping.len() times regardless of the tree structure.
     while !visited.contains(&current_id) {
+        assert!(
+            visited.len() <= mapping.len(),
+            "visited set cannot exceed mapping size — cycle guard is broken"
+        );
         visited.insert(current_id.clone());
         let node = mapping.get(&current_id)?;
 

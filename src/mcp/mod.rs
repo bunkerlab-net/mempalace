@@ -24,11 +24,12 @@ pub async fn run(conn: &Connection) -> Result<()> {
     let mut reader = BufReader::new(stdin);
     let mut line = String::new();
 
+    // Intentional server loop: runs until stdin closes (bytes_read == 0 signals EOF).
     loop {
         line.clear();
         let bytes_read = reader.read_line(&mut line).await?;
         if bytes_read == 0 {
-            break; // EOF
+            break; // EOF — client disconnected.
         }
 
         let trimmed = line.trim();

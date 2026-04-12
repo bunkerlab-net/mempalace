@@ -29,6 +29,7 @@ pub async fn open_db(path: &str) -> Result<(Database, Connection)> {
         || (path.starts_with("file:") && path.contains("mode=memory"));
     if !is_in_memory {
         let mut wal_rows = conn.query("PRAGMA journal_mode=WAL", ()).await?;
+        // Upper bound: PRAGMA journal_mode returns exactly one row; drain it.
         while wal_rows.next().await?.is_some() {}
     }
 

@@ -95,7 +95,9 @@ pub fn messages_to_transcript(messages: &[(&str, &str)]) -> String {
     let mut lines = Vec::new();
     let mut i = 0;
 
+    // Upper bound: i advances by at least 1 each iteration, bounded by messages.len().
     while i < messages.len() {
+        assert!(i < messages.len());
         let (role, text) = messages[i];
         if role == "user" {
             lines.push(format!("> {text}"));
