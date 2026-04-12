@@ -3,7 +3,7 @@
 A local-first memory palace for AI assistants. Single static binary backed by embedded SQLite (turso).
 No Python, no ChromaDB, no API keys.
 
-**Drop-in replacement for [milla-jovovich/mempalace](https://github.com/milla-jovovich/mempalace) with a ~13MB binary instead of a ~100MB Python environment.**
+**Drop-in replacement for [MemPalace/mempalace](https://github.com/MemPalace/mempalace) with a ~13MB binary instead of a ~100MB Python environment.**
 
 ---
 
@@ -18,7 +18,7 @@ This reimplementation:
 - Ships as a single self-contained binary
 - Replaces ChromaDB semantic search with a keyword inverted index (BM25-style scoring via `drawer_words`)
 - Fixes the concurrency problem at the turso layer
-- Keeps all 19 MCP tools and all CLI commands fully compatible
+- Keeps all MCP tools and all CLI commands fully compatible
 
 **Trade-off:** Keyword search instead of embedding-based semantic search.
 Semantic search is deferred until an embedded model is available without network dependencies.
@@ -48,7 +48,7 @@ cp target/release/mempalace ~/.local/bin/mempalace
 claude mcp add mempalace -- /path/to/mempalace mcp
 ```
 
-The MCP server runs as a JSON-RPC 2.0 process over stdio. All 19 tools are available immediately
+The MCP server runs as a JSON-RPC 2.0 process over stdio. All 22 tools are available immediately
 after the server starts.
 
 On first use, call `mempalace_status` — it returns the full memory protocol and AAAK dialect spec
@@ -304,7 +304,7 @@ Traits: direct, memory-first, no summaries.
 
 ---
 
-## MCP Tools (19)
+## MCP Tools (22)
 
 All tools communicate over JSON-RPC 2.0. Invoke them from the AI side via the MCP protocol.
 
@@ -321,6 +321,9 @@ All tools communicate over JSON-RPC 2.0. Invoke them from the AI side via the MC
 | `mempalace_check_duplicate` | `content`                                              | True if highly similar content already exists                               |
 | `mempalace_add_drawer`      | `wing`, `room`, `content`, `source_file?`, `added_by?` | File a memory; blocks on duplicates                                         |
 | `mempalace_delete_drawer`   | `drawer_id`                                            | Permanently delete a drawer and its index entries                           |
+| `mempalace_get_drawer`      | `drawer_id`                                            | Fetch full content and metadata for a single drawer                         |
+| `mempalace_list_drawers`    | `wing?`, `room?`, `limit?` (max 100), `offset?`        | Paginated drawer listing with content previews                              |
+| `mempalace_update_drawer`   | `drawer_id`, `content?`, `wing?`, `room?`              | Update an existing drawer's content and/or location                         |
 
 `mempalace_add_drawer` performs a duplicate check before inserting.
 If a highly similar drawer already exists it returns
@@ -429,8 +432,8 @@ src/
 
   mcp/
     mod.rs             Async stdio JSON-RPC 2.0 event loop
-    protocol.rs        PALACE_PROTOCOL, AAAK_SPEC, 19 tool schemas
-    tools.rs           Tool dispatch + all 19 handler implementations
+    protocol.rs        PALACE_PROTOCOL, AAAK_SPEC, 22 tool schemas
+    tools.rs           Tool dispatch + all 22 handler implementations
 ```
 
 ---
@@ -460,7 +463,7 @@ src/
 
 ```toml
 [lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
 warnings = "deny"
 
 [lints.clippy]

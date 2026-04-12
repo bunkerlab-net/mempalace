@@ -45,6 +45,43 @@ fn main() {
         });
 }
 
+/// Expand a leading `~` to the user's home directory.
+///
+/// Resolves the home directory by trying `HOME`, then `USERPROFILE`, then
+/// `HOMEDRIVE` + `HOMEPATH` (Windows fallback). Uses `OsStr`-based path
+/// component inspection to avoid lossy UTF-8 conversion.
+fn expand_tilde(path: &std::path::Path) -> std::path::PathBuf {
+    use std::ffi::OsStr;
+    use std::path::Component;
+
+    let mut components = path.components();
+    let first = components.next();
+
+    if first != Some(Component::Normal(OsStr::new("~"))) {
+        return path.to_path_buf();
+    }
+
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .or_else(|| {
+            let drive = std::env::var_os("HOMEDRIVE")?;
+            let home_path = std::env::var_os("HOMEPATH")?;
+            Some(
+                std::path::PathBuf::from(drive)
+                    .join(home_path)
+                    .into_os_string(),
+            )
+        });
+
+    match home {
+        Some(h) => {
+            let rest: std::path::PathBuf = components.collect();
+            std::path::PathBuf::from(h).join(rest)
+        }
+        None => path.to_path_buf(),
+    }
+}
+
 /// Open the palace DB, ensuring schema exists. Returns `(db, conn, path)`.
 async fn open_palace() -> error::Result<(turso::Database, turso::Connection, std::path::PathBuf)> {
     let cfg = MempalaceConfig::init()?;
@@ -54,6 +91,9 @@ async fn open_palace() -> error::Result<(turso::Database, turso::Connection, std
     Ok((db, conn, db_path))
 }
 
+// Each match arm is a single CLI subcommand — splitting this into separate
+// functions would not reduce complexity, only scatter the dispatch logic.
+#[allow(clippy::too_many_lines)]
 async fn run(cli: Cli) -> error::Result<()> {
     match cli.command {
         Command::Status => {
@@ -143,6 +183,9 @@ async fn run(cli: Cli) -> error::Result<()> {
             dry_run,
             min_sessions,
         } => {
+            // Expand ~ so that `mempalace split ~/convos` works as expected.
+            let dir = expand_tilde(&dir);
+            let output_dir = output_dir.as_deref().map(expand_tilde);
             cli::split::run(&dir, output_dir.as_deref(), dry_run, min_sessions)?;
         }
 

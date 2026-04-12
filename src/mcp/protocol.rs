@@ -27,7 +27,7 @@ Read AAAK naturally — expand codes mentally, treat *markers* as emotional cont
 When WRITING AAAK: use entity codes, mark emotions, keep structure tight.";
 
 /// Generate the tools/list response payload.
-// 19 tool schemas in a single JSON literal — splitting would hurt readability
+// 22 tool schemas in a single JSON literal — splitting would hurt readability
 // with no structural benefit since each tool is a self-contained object.
 #[allow(clippy::too_many_lines)]
 pub fn tool_definitions() -> Vec<serde_json::Value> {
@@ -117,6 +117,53 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
                 "type": "object",
                 "properties": {
                     "drawer_id": {"type": "string", "description": "ID of the drawer to delete"}
+                },
+                "required": ["drawer_id"]
+            }
+        },
+        {
+            "name": "mempalace_get_drawer",
+            "description": "Fetch a single drawer by ID — returns full content and metadata.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "drawer_id": {"type": "string", "description": "ID of the drawer to fetch"}
+                },
+                "required": ["drawer_id"]
+            }
+        },
+        {
+            "name": "mempalace_list_drawers",
+            "description": "List drawers with pagination. Optional wing/room filter. Returns IDs, wings, rooms, and content previews.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "wing": {"type": "string", "description": "Filter by wing (optional)"},
+                    "room": {"type": "string", "description": "Filter by room (optional)"},
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max results per page (default 20, max 100)",
+                        "minimum": 1,
+                        "maximum": 100
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Offset for pagination (default 0)",
+                        "minimum": 0
+                    }
+                }
+            }
+        },
+        {
+            "name": "mempalace_update_drawer",
+            "description": "Update an existing drawer's content and/or metadata (wing, room). Returns error if drawer not found.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "drawer_id": {"type": "string", "description": "ID of the drawer to update"},
+                    "content": {"type": "string", "description": "New content (optional — omit to keep existing)"},
+                    "wing": {"type": "string", "description": "New wing (optional — omit to keep existing)"},
+                    "room": {"type": "string", "description": "New room (optional — omit to keep existing)"}
                 },
                 "required": ["drawer_id"]
             }
