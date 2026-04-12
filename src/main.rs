@@ -46,18 +46,40 @@ fn main() {
 }
 
 /// Expand a leading `~` to the user's home directory.
+///
+/// Resolves the home directory by trying `HOME`, then `USERPROFILE`, then
+/// `HOMEDRIVE` + `HOMEPATH` (Windows fallback). Uses `OsStr`-based path
+/// component inspection to avoid lossy UTF-8 conversion.
 fn expand_tilde(path: &std::path::Path) -> std::path::PathBuf {
-    let s = path.to_string_lossy();
-    if let Some(rest) = s.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return std::path::PathBuf::from(home).join(rest);
-        }
-    } else if s == "~"
-        && let Some(home) = std::env::var_os("HOME")
-    {
-        return std::path::PathBuf::from(home);
+    use std::ffi::OsStr;
+    use std::path::Component;
+
+    let mut components = path.components();
+    let first = components.next();
+
+    if first != Some(Component::Normal(OsStr::new("~"))) {
+        return path.to_path_buf();
     }
-    path.to_path_buf()
+
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .or_else(|| {
+            let drive = std::env::var_os("HOMEDRIVE")?;
+            let home_path = std::env::var_os("HOMEPATH")?;
+            Some(
+                std::path::PathBuf::from(drive)
+                    .join(home_path)
+                    .into_os_string(),
+            )
+        });
+
+    match home {
+        Some(h) => {
+            let rest: std::path::PathBuf = components.collect();
+            std::path::PathBuf::from(h).join(rest)
+        }
+        None => path.to_path_buf(),
+    }
 }
 
 /// Open the palace DB, ensuring schema exists. Returns `(db, conn, path)`.

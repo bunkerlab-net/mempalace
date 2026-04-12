@@ -611,7 +611,7 @@ async fn tool_list_drawers(conn: &Connection, args: &Value) -> Value {
         (Some(w), Some(r)) => {
             query_all(
                 conn,
-                "SELECT id, content, wing, room FROM drawers WHERE wing = ?1 AND room = ?2 AND ingest_mode != 'diary' ORDER BY filed_at DESC, id DESC LIMIT ?3 OFFSET ?4",
+                "SELECT id, content, wing, room FROM drawers WHERE wing = ?1 AND room = ?2 AND (ingest_mode IS NULL OR ingest_mode != 'diary') ORDER BY filed_at DESC, id DESC LIMIT ?3 OFFSET ?4",
                 (w.as_str(), r.as_str(), limit, offset),
             )
             .await
@@ -619,7 +619,7 @@ async fn tool_list_drawers(conn: &Connection, args: &Value) -> Value {
         (Some(w), None) => {
             query_all(
                 conn,
-                "SELECT id, content, wing, room FROM drawers WHERE wing = ?1 AND ingest_mode != 'diary' ORDER BY filed_at DESC, id DESC LIMIT ?2 OFFSET ?3",
+                "SELECT id, content, wing, room FROM drawers WHERE wing = ?1 AND (ingest_mode IS NULL OR ingest_mode != 'diary') ORDER BY filed_at DESC, id DESC LIMIT ?2 OFFSET ?3",
                 (w.as_str(), limit, offset),
             )
             .await
@@ -627,7 +627,7 @@ async fn tool_list_drawers(conn: &Connection, args: &Value) -> Value {
         (None, Some(r)) => {
             query_all(
                 conn,
-                "SELECT id, content, wing, room FROM drawers WHERE room = ?1 AND ingest_mode != 'diary' ORDER BY filed_at DESC, id DESC LIMIT ?2 OFFSET ?3",
+                "SELECT id, content, wing, room FROM drawers WHERE room = ?1 AND (ingest_mode IS NULL OR ingest_mode != 'diary') ORDER BY filed_at DESC, id DESC LIMIT ?2 OFFSET ?3",
                 (r.as_str(), limit, offset),
             )
             .await
@@ -635,7 +635,7 @@ async fn tool_list_drawers(conn: &Connection, args: &Value) -> Value {
         (None, None) => {
             query_all(
                 conn,
-                "SELECT id, content, wing, room FROM drawers WHERE ingest_mode != 'diary' ORDER BY filed_at DESC, id DESC LIMIT ?1 OFFSET ?2",
+                "SELECT id, content, wing, room FROM drawers WHERE (ingest_mode IS NULL OR ingest_mode != 'diary') ORDER BY filed_at DESC, id DESC LIMIT ?1 OFFSET ?2",
                 (limit, offset),
             )
             .await
