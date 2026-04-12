@@ -549,6 +549,7 @@ async fn tool_delete_drawer(conn: &Connection, args: &Value) -> Value {
     }
 }
 
+/// Fetch a single drawer by ID, returning its full content and metadata.
 async fn tool_get_drawer(conn: &Connection, args: &Value) -> Value {
     let drawer_id = match sanitize_name(str_arg(args, "drawer_id"), "drawer_id") {
         Ok(v) => v,
@@ -589,6 +590,7 @@ async fn tool_get_drawer(conn: &Connection, args: &Value) -> Value {
     }
 }
 
+/// List drawers with optional wing/room filtering and cursor-style pagination.
 async fn tool_list_drawers(conn: &Connection, args: &Value) -> Value {
     const MAX_LIMIT: i64 = 100;
     let limit = int_arg(args, "limit", 20).clamp(1, MAX_LIMIT);
@@ -674,6 +676,11 @@ async fn tool_list_drawers(conn: &Connection, args: &Value) -> Value {
     }
 }
 
+/// Update an existing drawer's content and/or location (wing/room).
+///
+/// Recomputes the deterministic SHA256 ID after any change to keep it
+/// consistent with `tool_add_drawer`.  Rejects updates that would collide
+/// with an existing drawer.
 // The complexity comes from: ID recomputation, duplicate detection, conditional
 // reindex, and error propagation — each a distinct correctness concern that
 // cannot be collapsed without obscuring the logic.
