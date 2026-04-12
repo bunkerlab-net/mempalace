@@ -3,7 +3,7 @@
 A local-first memory palace for AI assistants. Single static binary backed by embedded SQLite (turso).
 No Python, no ChromaDB, no API keys.
 
-**Drop-in replacement for [milla-jovovich/mempalace](https://github.com/milla-jovovich/mempalace) with a ~13MB binary instead of a ~100MB Python environment.**
+**Drop-in replacement for [MemPalace/mempalace](https://github.com/MemPalace/mempalace) with a ~13MB binary instead of a ~100MB Python environment.**
 
 ---
 
@@ -310,20 +310,20 @@ All tools communicate over JSON-RPC 2.0. Invoke them from the AI side via the MC
 
 ### Palace / Drawers
 
-| Tool                        | Parameters                                                     | What it does                                                                |
-| --------------------------- | -------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| `mempalace_status`          | —                                                              | Overview + memory protocol + AAAK spec                                      |
-| `mempalace_list_wings`      | —                                                              | Wing names with drawer counts                                               |
-| `mempalace_list_rooms`      | `wing?`                                                        | Room names with counts (all wings or one)                                   |
-| `mempalace_get_taxonomy`    | —                                                              | Full `wing → room → count` hierarchy                                        |
-| `mempalace_get_aaak_spec`   | —                                                              | AAAK dialect specification                                                  |
-| `mempalace_search`          | `query`, `limit?`, `wing?`, `room?`, `context?`                | Keyword search, returns `similarity` scores; sanitizes contaminated queries |
-| `mempalace_check_duplicate` | `content`                                                      | True if highly similar content already exists                               |
-| `mempalace_add_drawer`      | `wing`, `room`, `content`, `source_file?`, `added_by?`         | File a memory; blocks on duplicates                                         |
-| `mempalace_delete_drawer`   | `drawer_id`                                                    | Permanently delete a drawer and its index entries                           |
-| `mempalace_get_drawer`      | `drawer_id`                                                    | Fetch full content and metadata for a single drawer                         |
-| `mempalace_list_drawers`    | `wing?`, `room?`, `limit?` (max 100), `offset?`                | Paginated drawer listing with content previews                              |
-| `mempalace_update_drawer`   | `drawer_id`, `content?`, `wing?`, `room?`                      | Update an existing drawer's content and/or location                         |
+| Tool                        | Parameters                                             | What it does                                                                |
+| --------------------------- | ------------------------------------------------------ | --------------------------------------------------------------------------- |
+| `mempalace_status`          | —                                                      | Overview + memory protocol + AAAK spec                                      |
+| `mempalace_list_wings`      | —                                                      | Wing names with drawer counts                                               |
+| `mempalace_list_rooms`      | `wing?`                                                | Room names with counts (all wings or one)                                   |
+| `mempalace_get_taxonomy`    | —                                                      | Full `wing → room → count` hierarchy                                        |
+| `mempalace_get_aaak_spec`   | —                                                      | AAAK dialect specification                                                  |
+| `mempalace_search`          | `query`, `limit?`, `wing?`, `room?`, `context?`        | Keyword search, returns `similarity` scores; sanitizes contaminated queries |
+| `mempalace_check_duplicate` | `content`                                              | True if highly similar content already exists                               |
+| `mempalace_add_drawer`      | `wing`, `room`, `content`, `source_file?`, `added_by?` | File a memory; blocks on duplicates                                         |
+| `mempalace_delete_drawer`   | `drawer_id`                                            | Permanently delete a drawer and its index entries                           |
+| `mempalace_get_drawer`      | `drawer_id`                                            | Fetch full content and metadata for a single drawer                         |
+| `mempalace_list_drawers`    | `wing?`, `room?`, `limit?` (max 100), `offset?`        | Paginated drawer listing with content previews                              |
+| `mempalace_update_drawer`   | `drawer_id`, `content?`, `wing?`, `room?`              | Update an existing drawer's content and/or location                         |
 
 `mempalace_add_drawer` performs a duplicate check before inserting.
 If a highly similar drawer already exists it returns
