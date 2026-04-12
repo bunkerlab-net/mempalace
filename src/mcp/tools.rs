@@ -645,45 +645,7 @@ async fn tool_list_drawers(conn: &Connection, args: &Value) -> Value {
         Err(e) => return e,
     };
 
-    // Exclude diary entries (ingest_mode = 'diary') — they use UUID IDs, not
-    // the drawer_ prefix scheme, and have their own mempalace_diary_read tool.
-    // Use id DESC as a tiebreaker so pages are stable when filed_at values collide.
-    let rows = match (&wing, &room) {
-        (Some(w), Some(r)) => {
-            query_all(
-                conn,
-                "SELECT id, content, wing, room FROM drawers WHERE wing = ?1 AND room = ?2 AND (ingest_mode IS NULL OR ingest_mode != 'diary') ORDER BY filed_at DESC, id DESC LIMIT ?3 OFFSET ?4",
-                (w.as_str(), r.as_str(), limit, offset),
-            )
-            .await
-        }
-        (Some(w), None) => {
-            query_all(
-                conn,
-                "SELECT id, content, wing, room FROM drawers WHERE wing = ?1 AND (ingest_mode IS NULL OR ingest_mode != 'diary') ORDER BY filed_at DESC, id DESC LIMIT ?2 OFFSET ?3",
-                (w.as_str(), limit, offset),
-            )
-            .await
-        }
-        (None, Some(r)) => {
-            query_all(
-                conn,
-                "SELECT id, content, wing, room FROM drawers WHERE room = ?1 AND (ingest_mode IS NULL OR ingest_mode != 'diary') ORDER BY filed_at DESC, id DESC LIMIT ?2 OFFSET ?3",
-                (r.as_str(), limit, offset),
-            )
-            .await
-        }
-        (None, None) => {
-            query_all(
-                conn,
-                "SELECT id, content, wing, room FROM drawers WHERE (ingest_mode IS NULL OR ingest_mode != 'diary') ORDER BY filed_at DESC, id DESC LIMIT ?1 OFFSET ?2",
-                (limit, offset),
-            )
-            .await
-        }
-    };
-
-    match rows {
+    match tool_list_drawers_query(conn, wing.as_ref(), room.as_ref(), limit, offset).await {
         Ok(rows) => {
             let drawers: Vec<Value> = rows
                 .iter()
@@ -714,6 +676,34 @@ async fn tool_list_drawers(conn: &Connection, args: &Value) -> Value {
             })
         }
         Err(e) => json!({"error": e.to_string()}),
+    }
+}
+
+/// Run the parameterized drawer list query for the given wing/room filter combination.
+///
+/// Excludes diary entries — they use UUID IDs (not the `drawer_` prefix scheme) and
+/// have their own `mempalace_diary_read` tool. Uses `id DESC` as a tiebreaker so
+/// pages are stable when `filed_at` values collide.
+async fn tool_list_drawers_query(
+    conn: &Connection,
+    wing: Option<&String>,
+    room: Option<&String>,
+    limit: i64,
+    offset: i64,
+) -> crate::error::Result<Vec<turso::Row>> {
+    match (wing, room) {
+        (Some(w), Some(r)) => {
+            query_all(conn, "SELECT id, content, wing, room FROM drawers WHERE wing = ?1 AND room = ?2 AND (ingest_mode IS NULL OR ingest_mode != 'diary') ORDER BY filed_at DESC, id DESC LIMIT ?3 OFFSET ?4", (w.as_str(), r.as_str(), limit, offset)).await
+        }
+        (Some(w), None) => {
+            query_all(conn, "SELECT id, content, wing, room FROM drawers WHERE wing = ?1 AND (ingest_mode IS NULL OR ingest_mode != 'diary') ORDER BY filed_at DESC, id DESC LIMIT ?2 OFFSET ?3", (w.as_str(), limit, offset)).await
+        }
+        (None, Some(r)) => {
+            query_all(conn, "SELECT id, content, wing, room FROM drawers WHERE room = ?1 AND (ingest_mode IS NULL OR ingest_mode != 'diary') ORDER BY filed_at DESC, id DESC LIMIT ?2 OFFSET ?3", (r.as_str(), limit, offset)).await
+        }
+        (None, None) => {
+            query_all(conn, "SELECT id, content, wing, room FROM drawers WHERE (ingest_mode IS NULL OR ingest_mode != 'diary') ORDER BY filed_at DESC, id DESC LIMIT ?1 OFFSET ?2", (limit, offset)).await
+        }
     }
 }
 
