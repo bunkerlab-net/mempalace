@@ -93,7 +93,13 @@ async fn handle_request(conn: &Connection, request: &Value) -> Option<Value> {
             }))
         }
 
-        "notifications/initialized" => None,
+        "ping" => Some(json!({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {}
+        })),
+
+        m if m.starts_with("notifications/") => None,
 
         "tools/list" => {
             let tools = protocol::tool_definitions();

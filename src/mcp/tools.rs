@@ -30,6 +30,9 @@ pub async fn dispatch(conn: &Connection, name: &str, args: &Value) -> Value {
         "mempalace_check_duplicate" => tool_check_duplicate(conn, args).await,
         "mempalace_add_drawer" => tool_add_drawer(conn, args).await,
         "mempalace_delete_drawer" => tool_delete_drawer(conn, args).await,
+        "mempalace_get_drawer" => tool_get_drawer(conn, args).await,
+        "mempalace_list_drawers" => tool_list_drawers(conn, args).await,
+        "mempalace_update_drawer" => tool_update_drawer(conn, args).await,
         "mempalace_kg_query" => tool_kg_query(conn, args).await,
         "mempalace_kg_add" => tool_kg_add(conn, args).await,
         "mempalace_kg_invalidate" => tool_kg_invalidate(conn, args).await,
@@ -355,7 +358,7 @@ async fn tool_search(conn: &Connection, args: &Value) -> Value {
     if raw_query.is_empty() {
         return json!({"error": "query must be a non-empty string", "public": true});
     }
-    let limit = usize::try_from(int_arg(args, "limit", 5)).unwrap_or(5);
+    let limit = usize::try_from(int_arg(args, "limit", 5).clamp(1, 100)).unwrap_or(5);
     let context_received = !str_arg(args, "context").trim().is_empty();
     let wing = match sanitize_opt_name(str_arg(args, "wing"), "wing") {
         Ok(v) => v,
@@ -473,7 +476,6 @@ async fn tool_add_drawer(conn: &Connection, args: &Value) -> Value {
         s
     });
     let id = format!("drawer_{wing}_{room}_{}", &hex[..24]);
-    let content_preview: String = content.chars().take(200).collect();
     wal_log(
         "add_drawer",
         json!({
@@ -482,7 +484,7 @@ async fn tool_add_drawer(conn: &Connection, args: &Value) -> Value {
             "room": room,
             "added_by": added_by,
             "content_length": content.len(),
-            "content_preview": content_preview,
+            "content_preview": format!("[REDACTED {} chars]", content.chars().count()),
         }),
     )
     .await;
@@ -547,6 +549,228 @@ async fn tool_delete_drawer(conn: &Connection, args: &Value) -> Value {
     }
 }
 
+async fn tool_get_drawer(conn: &Connection, args: &Value) -> Value {
+    let drawer_id = match sanitize_name(str_arg(args, "drawer_id"), "drawer_id") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+
+    let rows = query_all(
+        conn,
+        "SELECT id, content, wing, room, source_file, filed_at FROM drawers WHERE id = ?",
+        [drawer_id.as_str()],
+    )
+    .await;
+
+    match rows {
+        Ok(rows) if rows.is_empty() => {
+            json!({"error": format!("Drawer not found: {drawer_id}"), "public": true})
+        }
+        Ok(rows) => {
+            let row = &rows[0];
+            let content: String = row.get(1).unwrap_or_default();
+            let wing: String = row.get(2).unwrap_or_default();
+            let room: String = row.get(3).unwrap_or_default();
+            let source_file: String = row.get(4).unwrap_or_default();
+            let filed_at: String = row.get(5).unwrap_or_default();
+            json!({
+                "drawer_id": drawer_id,
+                "content": content,
+                "wing": wing,
+                "room": room,
+                "source_file": source_file,
+                "filed_at": filed_at,
+            })
+        }
+        Err(e) => json!({"error": e.to_string()}),
+    }
+}
+
+async fn tool_list_drawers(conn: &Connection, args: &Value) -> Value {
+    const MAX_LIMIT: i64 = 100;
+    let limit = int_arg(args, "limit", 20).clamp(1, MAX_LIMIT);
+    let offset = args
+        .get("offset")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0)
+        .max(0);
+    let wing = match sanitize_opt_name(str_arg(args, "wing"), "wing") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let room = match sanitize_opt_name(str_arg(args, "room"), "room") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+
+    // Build WHERE clause based on filters
+    let rows = match (&wing, &room) {
+        (Some(w), Some(r)) => {
+            query_all(
+                conn,
+                "SELECT id, content, wing, room FROM drawers WHERE wing = ?1 AND room = ?2 ORDER BY filed_at DESC LIMIT ?3 OFFSET ?4",
+                (w.as_str(), r.as_str(), limit, offset),
+            )
+            .await
+        }
+        (Some(w), None) => {
+            query_all(
+                conn,
+                "SELECT id, content, wing, room FROM drawers WHERE wing = ?1 ORDER BY filed_at DESC LIMIT ?2 OFFSET ?3",
+                (w.as_str(), limit, offset),
+            )
+            .await
+        }
+        (None, Some(r)) => {
+            query_all(
+                conn,
+                "SELECT id, content, wing, room FROM drawers WHERE room = ?1 ORDER BY filed_at DESC LIMIT ?2 OFFSET ?3",
+                (r.as_str(), limit, offset),
+            )
+            .await
+        }
+        (None, None) => {
+            query_all(
+                conn,
+                "SELECT id, content, wing, room FROM drawers ORDER BY filed_at DESC LIMIT ?1 OFFSET ?2",
+                (limit, offset),
+            )
+            .await
+        }
+    };
+
+    match rows {
+        Ok(rows) => {
+            let drawers: Vec<Value> = rows
+                .iter()
+                .map(|row| {
+                    let id: String = row.get(0).unwrap_or_default();
+                    let content: String = row.get(1).unwrap_or_default();
+                    let wing_val: String = row.get(2).unwrap_or_default();
+                    let room_val: String = row.get(3).unwrap_or_default();
+                    let preview = if content.chars().count() > 200 {
+                        format!("{}...", content.chars().take(200).collect::<String>())
+                    } else {
+                        content.clone()
+                    };
+                    json!({
+                        "drawer_id": id,
+                        "wing": wing_val,
+                        "room": room_val,
+                        "content_preview": preview,
+                    })
+                })
+                .collect();
+            let count = drawers.len();
+            json!({
+                "drawers": drawers,
+                "count": count,
+                "offset": offset,
+                "limit": limit,
+            })
+        }
+        Err(e) => json!({"error": e.to_string()}),
+    }
+}
+
+async fn tool_update_drawer(conn: &Connection, args: &Value) -> Value {
+    let drawer_id = match sanitize_name(str_arg(args, "drawer_id"), "drawer_id") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+
+    let new_content = {
+        let s = str_arg(args, "content");
+        if s.is_empty() {
+            None
+        } else {
+            match sanitize_content(s) {
+                Ok(v) => Some(v),
+                Err(e) => return e,
+            }
+        }
+    };
+    let new_wing = match sanitize_opt_name(str_arg(args, "wing"), "wing") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let new_room = match sanitize_opt_name(str_arg(args, "room"), "room") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+
+    // No-op: nothing to change
+    if new_content.is_none() && new_wing.is_none() && new_room.is_none() {
+        return json!({"success": true, "drawer_id": drawer_id, "noop": true});
+    }
+
+    // Fetch existing drawer
+    let rows = query_all(
+        conn,
+        "SELECT wing, room, content FROM drawers WHERE id = ?",
+        [drawer_id.as_str()],
+    )
+    .await;
+
+    let rows = match rows {
+        Ok(r) => r,
+        Err(e) => return json!({"success": false, "error": e.to_string()}),
+    };
+
+    if rows.is_empty() {
+        return json!({"success": false, "error": format!("Drawer not found: {drawer_id}"), "public": true});
+    }
+
+    let old_wing: String = rows[0].get(0).unwrap_or_default();
+    let old_room: String = rows[0].get(1).unwrap_or_default();
+    let old_content: String = rows[0].get(2).unwrap_or_default();
+
+    let final_wing = new_wing.as_deref().unwrap_or(&old_wing);
+    let final_room = new_room.as_deref().unwrap_or(&old_room);
+    let final_content = new_content.as_deref().unwrap_or(&old_content);
+
+    wal_log(
+        "update_drawer",
+        json!({
+            "drawer_id": drawer_id,
+            "old_wing": old_wing,
+            "old_room": old_room,
+            "new_wing": final_wing,
+            "new_room": final_room,
+            "content_changed": new_content.is_some(),
+        }),
+    )
+    .await;
+
+    match conn
+        .execute(
+            "UPDATE drawers SET wing = ?1, room = ?2, content = ?3 WHERE id = ?4",
+            turso::params![final_wing, final_room, final_content, drawer_id.as_str()],
+        )
+        .await
+    {
+        Ok(_) => {
+            // Re-index words if content changed
+            if new_content.is_some() {
+                let _ = conn
+                    .execute(
+                        "DELETE FROM drawer_words WHERE drawer_id = ?",
+                        [drawer_id.as_str()],
+                    )
+                    .await;
+                let _ = drawer::index_words(conn, &drawer_id, final_content).await;
+            }
+            json!({
+                "success": true,
+                "drawer_id": drawer_id,
+                "wing": final_wing,
+                "room": final_room,
+            })
+        }
+        Err(e) => json!({"success": false, "error": e.to_string()}),
+    }
+}
+
 async fn tool_kg_query(conn: &Connection, args: &Value) -> Value {
     let entity = match sanitize_name(str_arg(args, "entity"), "entity") {
         Ok(v) => v,
@@ -564,6 +788,9 @@ async fn tool_kg_query(conn: &Connection, args: &Value) -> Value {
         let d = str_arg(args, "direction");
         if d.is_empty() { "both" } else { d }
     };
+    if !matches!(direction, "outgoing" | "incoming" | "both") {
+        return json!({"error": "direction must be 'outgoing', 'incoming', or 'both'", "public": true});
+    }
 
     match kg::query::query_entity(conn, &entity, as_of.as_deref(), direction).await {
         Ok(facts) => {
@@ -720,7 +947,7 @@ async fn tool_traverse(conn: &Connection, args: &Value) -> Value {
         Ok(v) => v,
         Err(e) => return e,
     };
-    let max_hops = usize::try_from(int_arg(args, "max_hops", 2)).unwrap_or(2);
+    let max_hops = usize::try_from(int_arg(args, "max_hops", 2).clamp(1, 10)).unwrap_or(2);
 
     match graph::traverse(conn, &start_room, max_hops).await {
         Ok(results) => json!(results),
@@ -779,14 +1006,13 @@ async fn tool_diary_write(conn: &Connection, args: &Value) -> Value {
     let now = Utc::now();
     let id = Uuid::new_v4().to_string();
 
-    let entry_preview: String = entry.chars().take(200).collect();
     wal_log(
         "diary_write",
         json!({
             "agent_name": agent_name,
             "topic": topic,
             "entry_id": id,
-            "entry_preview": entry_preview,
+            "entry_preview": format!("[REDACTED {} chars]", entry.chars().count()),
         }),
     )
     .await;
@@ -815,7 +1041,7 @@ async fn tool_diary_write(conn: &Connection, args: &Value) -> Value {
 
 async fn tool_diary_read(conn: &Connection, args: &Value) -> Value {
     let agent_name = str_arg(args, "agent_name");
-    let last_n = int_arg(args, "last_n", 10);
+    let last_n = int_arg(args, "last_n", 10).clamp(1, 100);
 
     let agent_name = match sanitize_name(agent_name, "agent_name") {
         Ok(v) => v,

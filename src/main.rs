@@ -45,6 +45,21 @@ fn main() {
         });
 }
 
+/// Expand a leading `~` to the user's home directory.
+fn expand_tilde(path: &std::path::Path) -> std::path::PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(rest) = s.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return std::path::PathBuf::from(home).join(rest);
+        }
+    } else if s == "~"
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        return std::path::PathBuf::from(home);
+    }
+    path.to_path_buf()
+}
+
 /// Open the palace DB, ensuring schema exists. Returns `(db, conn, path)`.
 async fn open_palace() -> error::Result<(turso::Database, turso::Connection, std::path::PathBuf)> {
     let cfg = MempalaceConfig::init()?;
@@ -54,6 +69,7 @@ async fn open_palace() -> error::Result<(turso::Database, turso::Connection, std
     Ok((db, conn, db_path))
 }
 
+#[allow(clippy::too_many_lines)]
 async fn run(cli: Cli) -> error::Result<()> {
     match cli.command {
         Command::Status => {
@@ -143,6 +159,9 @@ async fn run(cli: Cli) -> error::Result<()> {
             dry_run,
             min_sessions,
         } => {
+            // Expand ~ so that `mempalace split ~/convos` works as expected.
+            let dir = expand_tilde(&dir);
+            let output_dir = output_dir.as_deref().map(expand_tilde);
             cli::split::run(&dir, output_dir.as_deref(), dry_run, min_sessions)?;
         }
 
