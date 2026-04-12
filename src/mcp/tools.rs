@@ -554,6 +554,9 @@ async fn tool_get_drawer(conn: &Connection, args: &Value) -> Value {
         Ok(v) => v,
         Err(e) => return e,
     };
+    if !drawer_id.starts_with("drawer_") {
+        return json!({"error": "drawer_id has invalid format", "public": true});
+    }
 
     let rows = query_all(
         conn,
@@ -589,11 +592,7 @@ async fn tool_get_drawer(conn: &Connection, args: &Value) -> Value {
 async fn tool_list_drawers(conn: &Connection, args: &Value) -> Value {
     const MAX_LIMIT: i64 = 100;
     let limit = int_arg(args, "limit", 20).clamp(1, MAX_LIMIT);
-    let offset = args
-        .get("offset")
-        .and_then(serde_json::Value::as_i64)
-        .unwrap_or(0)
-        .max(0);
+    let offset = int_arg(args, "offset", 0).max(0);
     let wing = match sanitize_opt_name(str_arg(args, "wing"), "wing") {
         Ok(v) => v,
         Err(e) => return e,
@@ -603,12 +602,14 @@ async fn tool_list_drawers(conn: &Connection, args: &Value) -> Value {
         Err(e) => return e,
     };
 
-    // Build WHERE clause based on filters
+    // Exclude diary entries (ingest_mode = 'diary') — they use UUID IDs, not
+    // the drawer_ prefix scheme, and have their own mempalace_diary_read tool.
+    // Use id DESC as a tiebreaker so pages are stable when filed_at values collide.
     let rows = match (&wing, &room) {
         (Some(w), Some(r)) => {
             query_all(
                 conn,
-                "SELECT id, content, wing, room FROM drawers WHERE wing = ?1 AND room = ?2 ORDER BY filed_at DESC LIMIT ?3 OFFSET ?4",
+                "SELECT id, content, wing, room FROM drawers WHERE wing = ?1 AND room = ?2 AND ingest_mode != 'diary' ORDER BY filed_at DESC, id DESC LIMIT ?3 OFFSET ?4",
                 (w.as_str(), r.as_str(), limit, offset),
             )
             .await
@@ -616,7 +617,7 @@ async fn tool_list_drawers(conn: &Connection, args: &Value) -> Value {
         (Some(w), None) => {
             query_all(
                 conn,
-                "SELECT id, content, wing, room FROM drawers WHERE wing = ?1 ORDER BY filed_at DESC LIMIT ?2 OFFSET ?3",
+                "SELECT id, content, wing, room FROM drawers WHERE wing = ?1 AND ingest_mode != 'diary' ORDER BY filed_at DESC, id DESC LIMIT ?2 OFFSET ?3",
                 (w.as_str(), limit, offset),
             )
             .await
@@ -624,7 +625,7 @@ async fn tool_list_drawers(conn: &Connection, args: &Value) -> Value {
         (None, Some(r)) => {
             query_all(
                 conn,
-                "SELECT id, content, wing, room FROM drawers WHERE room = ?1 ORDER BY filed_at DESC LIMIT ?2 OFFSET ?3",
+                "SELECT id, content, wing, room FROM drawers WHERE room = ?1 AND ingest_mode != 'diary' ORDER BY filed_at DESC, id DESC LIMIT ?2 OFFSET ?3",
                 (r.as_str(), limit, offset),
             )
             .await
@@ -632,7 +633,7 @@ async fn tool_list_drawers(conn: &Connection, args: &Value) -> Value {
         (None, None) => {
             query_all(
                 conn,
-                "SELECT id, content, wing, room FROM drawers ORDER BY filed_at DESC LIMIT ?1 OFFSET ?2",
+                "SELECT id, content, wing, room FROM drawers WHERE ingest_mode != 'diary' ORDER BY filed_at DESC, id DESC LIMIT ?1 OFFSET ?2",
                 (limit, offset),
             )
             .await
@@ -673,11 +674,19 @@ async fn tool_list_drawers(conn: &Connection, args: &Value) -> Value {
     }
 }
 
+// The complexity comes from: ID recomputation, duplicate detection, conditional
+// reindex, and error propagation — each a distinct correctness concern that
+// cannot be collapsed without obscuring the logic.
+#[allow(clippy::too_many_lines)]
 async fn tool_update_drawer(conn: &Connection, args: &Value) -> Value {
     let drawer_id = match sanitize_name(str_arg(args, "drawer_id"), "drawer_id") {
         Ok(v) => v,
         Err(e) => return e,
     };
+    // Diary entries use UUID IDs; they must not be mutated via this handler.
+    if !drawer_id.starts_with("drawer_") {
+        return json!({"success": false, "error": "drawer_id has invalid format", "public": true});
+    }
 
     let new_content = {
         let s = str_arg(args, "content");
@@ -729,10 +738,23 @@ async fn tool_update_drawer(conn: &Connection, args: &Value) -> Value {
     let final_room = new_room.as_deref().unwrap_or(&old_room);
     let final_content = new_content.as_deref().unwrap_or(&old_content);
 
+    // Recompute the deterministic ID to keep it consistent with tool_add_drawer.
+    // wing/room/content are all baked into the ID, so any change means a new ID.
+    let hash = sha2::Sha256::digest(
+        format!("{final_wing}\u{1f}{final_room}\u{1f}{final_content}").as_bytes(),
+    );
+    let hex: String = hash.iter().fold(String::new(), |mut s, b| {
+        use std::fmt::Write as _;
+        let _ = write!(s, "{b:02x}");
+        s
+    });
+    let new_id = format!("drawer_{final_wing}_{final_room}_{}", &hex[..24]);
+
     wal_log(
         "update_drawer",
         json!({
             "drawer_id": drawer_id,
+            "new_drawer_id": new_id,
             "old_wing": old_wing,
             "old_room": old_room,
             "new_wing": final_wing,
@@ -742,27 +764,70 @@ async fn tool_update_drawer(conn: &Connection, args: &Value) -> Value {
     )
     .await;
 
+    // If the recomputed ID already exists (and differs), the new wing+room+content
+    // is a duplicate of another drawer — reject to prevent silent duplication.
+    if new_id != drawer_id {
+        let existing = query_all(
+            conn,
+            "SELECT id FROM drawers WHERE id = ?",
+            [new_id.as_str()],
+        )
+        .await;
+        match existing {
+            Ok(rows) if !rows.is_empty() => {
+                return json!({
+                    "success": false,
+                    "error": "A drawer with this wing/room/content already exists",
+                    "existing_drawer_id": new_id,
+                    "public": true,
+                });
+            }
+            Err(e) => return json!({"success": false, "error": e.to_string()}),
+            Ok(_) => {}
+        }
+    }
+
     match conn
         .execute(
-            "UPDATE drawers SET wing = ?1, room = ?2, content = ?3 WHERE id = ?4",
-            turso::params![final_wing, final_room, final_content, drawer_id.as_str()],
+            "UPDATE drawers SET id = ?1, wing = ?2, room = ?3, content = ?4 WHERE id = ?5",
+            turso::params![
+                new_id.as_str(),
+                final_wing,
+                final_room,
+                final_content,
+                drawer_id.as_str()
+            ],
         )
         .await
     {
         Ok(_) => {
-            // Re-index words if content changed
-            if new_content.is_some() {
+            // Re-index words: always needed when the ID changes or content changes.
+            if let Err(e) = conn
+                .execute(
+                    "DELETE FROM drawer_words WHERE drawer_id = ?",
+                    [drawer_id.as_str()],
+                )
+                .await
+            {
+                return json!({"success": false, "error": e.to_string()});
+            }
+            if new_id != drawer_id {
+                // drawer_words rows for the old ID were deleted above; if the new
+                // ID already had entries (shouldn't happen — we checked above),
+                // clean those too.
                 let _ = conn
                     .execute(
                         "DELETE FROM drawer_words WHERE drawer_id = ?",
-                        [drawer_id.as_str()],
+                        [new_id.as_str()],
                     )
                     .await;
-                let _ = drawer::index_words(conn, &drawer_id, final_content).await;
+            }
+            if let Err(e) = drawer::index_words(conn, &new_id, final_content).await {
+                return json!({"success": false, "error": e.to_string()});
             }
             json!({
                 "success": true,
-                "drawer_id": drawer_id,
+                "drawer_id": new_id,
                 "wing": final_wing,
                 "room": final_room,
             })
