@@ -111,11 +111,18 @@ pub async fn query_entity(
     as_of: Option<&str>,
     direction: &str,
 ) -> Result<Vec<Fact>> {
-    assert!(
-        direction == "outgoing" || direction == "incoming" || direction == "both",
-        "direction must be outgoing, incoming, or both — got \"{direction}\""
-    );
-    assert!(!name.is_empty(), "entity name must not be empty");
+    // Validate caller-supplied parameters: these come from external (MCP) input
+    // so invalid values are operating errors, not programmer bugs.
+    if direction != "outgoing" && direction != "incoming" && direction != "both" {
+        return Err(crate::error::Error::Other(format!(
+            "direction must be outgoing, incoming, or both — got \"{direction}\""
+        )));
+    }
+    if name.is_empty() {
+        return Err(crate::error::Error::Other(
+            "entity name must not be empty".to_string(),
+        ));
+    }
 
     let eid = entity_id(name);
     let mut results = Vec::new();

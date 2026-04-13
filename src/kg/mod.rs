@@ -223,6 +223,12 @@ pub async fn add_triple(connection: &Connection, params: &TripleParams<'_>) -> R
     let obj_id = entity_id(params.object);
     let pred = params.predicate.to_lowercase().replace(' ', "_");
 
+    // Pair assertions: entity_id can return "" for inputs like "'".
+    // An empty normalized ID would silently corrupt the graph with a blank key.
+    assert!(!sub_id.is_empty(), "triple subject normalizes to empty ID");
+    assert!(!obj_id.is_empty(), "triple object normalizes to empty ID");
+    assert!(!pred.is_empty(), "triple predicate normalizes to empty ID");
+
     // Auto-create entities
     connection
         .execute(

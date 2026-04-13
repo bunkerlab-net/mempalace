@@ -273,6 +273,12 @@ pub fn run(
 
     for (path, _n_sessions) in &mega_files {
         let out_dir = output_dir.unwrap_or_else(|| path.parent().unwrap_or(directory));
+        if !out_dir.is_dir() {
+            return Err(crate::error::Error::Other(format!(
+                "split: output directory not found or not a directory: {}",
+                out_dir.display()
+            )));
+        }
         total_written += split_file(path, out_dir, dry_run)?;
     }
 

@@ -138,7 +138,9 @@ fn walk_dir(directory: &Path, files: &mut Vec<PathBuf>) {
             depth <= WALK_DEPTH_LIMIT,
             "walk_dir: depth {depth} exceeds WALK_DEPTH_LIMIT"
         );
-        if depth >= WALK_DEPTH_LIMIT {
+        // depth > WALK_DEPTH_LIMIT is unreachable: subdirectory pushes are guarded
+        // below. This continue is a defensive safety net.
+        if depth > WALK_DEPTH_LIMIT {
             continue;
         }
         let Ok(entries) = std::fs::read_dir(&current_dir) else {
@@ -152,7 +154,8 @@ fn walk_dir(directory: &Path, files: &mut Vec<PathBuf>) {
                 continue;
             }
             if path.is_dir() {
-                if !is_skip_dir(&name) {
+                // Only descend if we haven't reached the depth limit yet.
+                if !is_skip_dir(&name) && depth < WALK_DEPTH_LIMIT {
                     stack.push((path, depth + 1));
                 }
             } else if let Some(extension) = path.extension() {
@@ -349,9 +352,9 @@ async fn mine_process_files(
 
 /// Mine a project directory into the palace.
 pub async fn mine(connection: &Connection, project_dir: &Path, opts: &MineParams) -> Result<()> {
-    if !project_dir.exists() {
+    if !project_dir.is_dir() {
         return Err(crate::error::Error::Other(format!(
-            "mine: directory not found: {}",
+            "mine: directory not found or not a directory: {}",
             project_dir.display()
         )));
     }

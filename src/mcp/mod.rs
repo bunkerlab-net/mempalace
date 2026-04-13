@@ -154,15 +154,13 @@ async fn handle_request_tools_call(
             .get("public")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        let error_msg: String = error_val
-            .as_str()
-            .unwrap_or("unknown")
-            .chars()
-            .take(100)
-            .collect();
-        eprintln!("tool error: tool={tool_name} error={error_msg}");
+        // Extract the full error string before deciding what to expose.
+        // Truncate only for logging so we don't shorten public error messages.
+        let full_error = error_val.as_str().unwrap_or("unknown");
+        let truncated: String = full_error.chars().take(100).collect();
+        eprintln!("tool error: tool={tool_name} error={truncated}");
         if is_public {
-            json!({"error": error_msg})
+            json!({"error": full_error})
         } else {
             json!({"error": "Internal tool error"})
         }

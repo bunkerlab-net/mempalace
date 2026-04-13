@@ -232,7 +232,9 @@ fn walk_convos(directory: &Path, files: &mut Vec<PathBuf>) {
             depth <= WALK_DEPTH_LIMIT,
             "walk_convos: depth {depth} exceeds WALK_DEPTH_LIMIT"
         );
-        if depth >= WALK_DEPTH_LIMIT {
+        // depth > WALK_DEPTH_LIMIT is unreachable: subdirectory pushes are guarded
+        // below. This continue is a defensive safety net.
+        if depth > WALK_DEPTH_LIMIT {
             continue;
         }
         let Ok(entries) = std::fs::read_dir(&current_dir) else {
@@ -248,7 +250,12 @@ fn walk_convos(directory: &Path, files: &mut Vec<PathBuf>) {
             if path.is_dir() {
                 // Skip global cache dirs plus Claude Code-specific output dirs that
                 // contain tool output and agent memory — not conversation transcripts.
-                if !is_skip_dir(&name) && name != "tool-results" && name != "memory" {
+                // Only descend if we haven't reached the depth limit yet.
+                if !is_skip_dir(&name)
+                    && name != "tool-results"
+                    && name != "memory"
+                    && depth < WALK_DEPTH_LIMIT
+                {
                     stack.push((path, depth + 1));
                 }
             } else if let Some(extension) = path.extension() {

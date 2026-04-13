@@ -202,7 +202,12 @@ fn sanitize_content(value: &str) -> Result<String, Value> {
 /// the WAL directory is unwritable.  I/O is offloaded to `spawn_blocking` so
 /// the async worker thread is not stalled by filesystem calls.
 async fn wal_log(operation: &str, params: Value) {
-    assert!(!operation.is_empty(), "WAL operation must not be empty");
+    // wal_log is best-effort and must never crash. An empty operation string is a
+    // programmer error caught in debug builds; in release builds we silently skip.
+    debug_assert!(!operation.is_empty(), "WAL operation must not be empty");
+    if operation.is_empty() {
+        return;
+    }
 
     let operation = operation.to_string();
     let _ = tokio::task::spawn_blocking(move || {

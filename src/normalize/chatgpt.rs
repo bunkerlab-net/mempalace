@@ -7,7 +7,9 @@ use super::messages_to_transcript;
 /// Try to parse a `ChatGPT` conversations.json mapping tree into transcript text.
 ///
 /// Traverses the node tree from root through `children` links, extracting
-/// user and assistant messages. Returns `None` if fewer than 2 messages.
+/// user and assistant messages. Returns `None` unless at least one message
+/// with role `"user"` and at least one with role `"assistant"` are present
+/// — one-sided transcripts (e.g. system-prompt-only files) are rejected.
 pub fn try_parse(data: &serde_json::Value) -> Option<String> {
     let mapping = data.as_object()?.get("mapping")?.as_object()?;
 
