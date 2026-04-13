@@ -40,7 +40,10 @@ pub fn normalize(filepath: &Path) -> Result<String> {
         return Ok(content);
     }
 
-    // Already has > markers — pass through
+    // If the file already contains ≥ 3 lines with `>` markers it is already
+    // in transcript format (or close enough). The threshold of 3 avoids
+    // misidentifying Markdown blockquotes (which commonly appear once or twice)
+    // as a transcript.
     let quote_count = content
         .lines()
         .filter(|l| l.trim_start().starts_with('>'))
@@ -49,7 +52,9 @@ pub fn normalize(filepath: &Path) -> Result<String> {
         return Ok(content);
     }
 
-    // Try JSON normalization
+    // JSONL formats (Claude Code, Codex) are tried before serde_json::from_str
+    // because they are not valid JSON — serde would reject them. Try them first
+    // so we never pass a multi-line JSONL file to the JSON parser.
     let extension = filepath
         .extension()
         .and_then(|e| e.to_str())

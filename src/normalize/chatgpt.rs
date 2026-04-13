@@ -68,6 +68,11 @@ pub fn try_parse(data: &serde_json::Value) -> Option<String> {
             }
         }
 
+        // ChatGPT exports can represent branching conversations (e.g. message
+        // edits produce sibling branches). We always follow the first child,
+        // which corresponds to the linear path of the original conversation
+        // before any edits. Branching paths are ignored — they are rare and
+        // would require a tree walk that could produce confusing transcripts.
         let children = node.get("children").and_then(|c| c.as_array());
         if let Some(kids) = children {
             if let Some(first) = kids.first().and_then(|k| k.as_str()) {
@@ -80,6 +85,8 @@ pub fn try_parse(data: &serde_json::Value) -> Option<String> {
         }
     }
 
+    // Require at least one user turn and one assistant turn so we never store
+    // a one-sided transcript (e.g. a file with only system prompts).
     if messages.len() >= 2 {
         let refs: Vec<(&str, &str)> = messages
             .iter()

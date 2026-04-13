@@ -8,7 +8,12 @@ use crate::config;
 use crate::db;
 use crate::error::Result;
 
+// L1 is injected into AI context windows. 15 drawers at ~200 chars each is
+// ~3 000 chars — enough for a meaningful summary without crowding the prompt.
 const MAX_DRAWERS: usize = 15;
+// Hard character cap so a wing with many long drawers cannot overflow the
+// context budget. 3 200 chars is roughly 800 tokens at the 4-chars/token
+// rule of thumb, leaving headroom for L0 and the user's own message.
 const MAX_CHARS: usize = 3200;
 
 /// Layer 0: Identity text from ~/.mempalace/identity.txt
@@ -50,7 +55,9 @@ pub async fn layer1(connection: &Connection, wing: Option<&str>) -> Result<Strin
         return Ok("## L1 — No memories yet.".to_string());
     }
 
-    // Take first MAX_DRAWERS (they're already stored in insertion order — good enough for v1)
+    // Use insertion order as a proxy for recency. A proper recency sort would
+    // require a timestamp column; insertion order is good enough until that
+    // column exists.
     let top = &rows[..rows.len().min(MAX_DRAWERS)];
     let by_room = layer1_build_room_map(top);
 
@@ -130,6 +137,7 @@ pub async fn wake_up(connection: &Connection, wing: Option<&str>) -> Result<Stri
     let l0 = layer0();
     let l1 = layer1(connection, wing).await?;
     let text = format!("{l0}\n\n{l1}");
+    // 4 chars per token is a standard rule-of-thumb for English text with GPT-family models.
     let tokens = text.len() / 4;
     Ok(format!("{text}\n\n(~{tokens} tokens)"))
 }

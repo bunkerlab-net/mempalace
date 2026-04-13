@@ -35,11 +35,14 @@ pub async fn search_memories(
         return Ok(vec![]);
     }
 
-    // Build placeholders for IN clause
+    // turso does not support dynamic-length prepared statements, so the SQL
+    // is built at call time. The word list comes from tokenize_query, which
+    // only produces lowercase alphanumeric tokens, so no sanitization is needed.
     let placeholders: Vec<String> = (1..=words.len()).map(|i| format!("?{i}")).collect();
     let in_clause = placeholders.join(", ");
 
-    // Build optional wing/room filters
+    // Wing and room filters are appended after the word placeholders, so their
+    // parameter indices must be offset past the word count.
     let mut filters = String::new();
     let mut param_offset = words.len();
     if wing.is_some() {
@@ -73,6 +76,8 @@ pub async fn search_memories(
     if let Some(r) = room {
         params.push(turso::Value::from(r));
     }
+    // SQLite LIMIT expects a signed integer. Callers are unlikely to request
+    // more than i32::MAX results, but we saturate rather than panic.
     let n_results_i32 = i32::try_from(n_results).unwrap_or(i32::MAX);
     params.push(turso::Value::from(n_results_i32));
 
@@ -135,6 +140,10 @@ fn search_memories_parse_rows(rows: &[turso::Row]) -> Vec<SearchResult> {
 }
 
 /// Tokenize a query string into searchable words.
+///
+/// The minimum length of 3 matches the indexing threshold in `index_words`:
+/// shorter tokens (single letters, two-letter words) are almost always noise
+/// and would fan out to enormous result sets, hurting relevance.
 fn tokenize_query(query: &str) -> Vec<String> {
     query
         .split(|c: char| !c.is_alphanumeric() && c != '_')

@@ -66,6 +66,9 @@ pub struct GraphStats {
 pub async fn build_graph(
     connection: &Connection,
 ) -> Result<(HashMap<String, RoomNode>, Vec<TunnelEdge>)> {
+    // "general" is the catch-all room assigned when no specific room matches.
+    // It appears in every wing and would create spurious tunnel edges between
+    // all wings if included, making the graph useless for navigation.
     let rows = query_all(
         connection,
         "SELECT room, wing, COUNT(*) as cnt FROM drawers WHERE room != 'general' AND room != '' GROUP BY room, wing",
@@ -191,7 +194,11 @@ pub async fn traverse(
         }
     }
 
+    // Sort by hop first so callers see the closest rooms first; break ties by
+    // drawer count so the most active rooms surface before sparse ones.
     results.sort_by(|a, b| a.hop.cmp(&b.hop).then_with(|| b.count.cmp(&a.count)));
+    // Cap at 50 to keep MCP responses within a reasonable token budget.
+    // A graph with hundreds of reachable rooms is not useful to an AI caller.
     results.truncate(50);
 
     // Postcondition: result count bounded by hard limit.
@@ -228,7 +235,9 @@ pub async fn find_tunnels(
         })
         .collect();
 
+    // Surface the busiest shared rooms first — they are the most useful bridges.
     tunnels.sort_by(|a, b| b.count.cmp(&a.count));
+    // Cap at 50 for the same token-budget reason as `traverse`.
     tunnels.truncate(50);
 
     // Postcondition: all returned nodes span at least 2 wings.

@@ -154,6 +154,10 @@ fn extract_candidates(text: &str) -> HashMap<String, usize> {
         "extract_candidates: text must not be empty"
     );
     let stops = extract_candidates_stop_words();
+    // Match capitalized words of 2–20 chars. The lower bound (1 lowercase char
+    // after the capital) avoids single-letter initials like "I" or "A". The
+    // upper bound (19 lowercase chars) rejects long common nouns that happen
+    // to be capitalized at sentence starts (e.g. "Congratulations").
     let single_re = Regex::new(r"\b([A-Z][a-z]{1,19})\b").expect(
         "single-word capitalized name regex is a compile-time literal and cannot fail to compile",
     );
@@ -180,7 +184,9 @@ fn extract_candidates(text: &str) -> HashMap<String, usize> {
         }
     }
 
-    // Filter: must appear at least 3 times
+    // Require at least 3 occurrences before treating a name as an entity.
+    // Once or twice is likely a passing reference; three times suggests the
+    // name is a recurring actor or concept worth storing.
     counts.retain(|_, v| *v >= 3);
 
     // Postcondition: all surviving candidates have frequency >= 3.
