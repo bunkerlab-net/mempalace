@@ -49,6 +49,14 @@ fn tokenize(text: &str) -> Vec<String> {
     words
 }
 
+/// Return `true` if `word` should be excluded from the search word index.
+///
+/// This list is intentionally separate from `dialect::topics::stop_words()`:
+/// that list is tuned for topic extraction (recall matters — include borderline
+/// words to avoid spurious topics), whereas this list is tuned for FTS
+/// relevance (precision matters — only omit words so common that they never
+/// help distinguish one drawer from another). The two lists have different
+/// owners and should evolve independently.
 // Large static stop-word list — line count reflects data volume, not logic.
 #[rustfmt::skip]
 pub(super) fn is_stop_word(word: &str) -> bool {

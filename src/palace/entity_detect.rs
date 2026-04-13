@@ -98,14 +98,22 @@ pub fn detect_entities(file_paths: &[&Path], max_files: usize) -> DetectionResul
     }
 }
 
-// Large static stopword list — line count reflects data volume, not code complexity.
-#[rustfmt::skip]
 /// Build the stop word set for entity candidate extraction.
 ///
-/// Starts from the canonical `dialect::topics::stop_words()` list and extends
-/// with terms that are valid topics but poor entity candidates: programming
-/// keywords, UI interaction verbs, macOS filesystem labels, and AI/ML domain
-/// terms that appear frequently but are too generic to be named entities.
+/// Entity detection needs a stricter filter than topic extraction: a word like
+/// `"model"` is a useful topic token but a terrible entity candidate because it
+/// matches thousands of unrelated drawers. This function starts from the
+/// canonical `dialect::topics::stop_words()` base list (which covers common
+/// English function words) and extends it with terms that are valid topics but
+/// poor entity candidates: programming keywords, UI verbs, macOS filesystem
+/// labels, and AI/ML domain terms that appear frequently but name no specific
+/// real-world entity.
+///
+/// It is separate from `drawer::is_stop_word` (used for FTS indexing) because
+/// the two filtering jobs have different precision/recall tradeoffs and must
+/// evolve independently as the two features are tuned.
+// Large static stopword list — line count reflects data volume, not code complexity.
+#[rustfmt::skip]
 fn extract_candidates_stop_words() -> HashSet<&'static str> {
     let mut stops = crate::dialect::topics::stop_words();
     stops.extend([
