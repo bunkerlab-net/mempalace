@@ -14,10 +14,9 @@ pub fn entity_id(name: &str) -> String {
     // Postcondition: result has no spaces and no uppercase.
     debug_assert!(!result.contains(' '));
     debug_assert!(result.chars().all(|c| !c.is_uppercase()));
-    // Postcondition: non-empty input produces non-empty output.
-    if !name.is_empty() {
-        debug_assert!(!result.is_empty());
-    }
+    // Note: non-empty input does NOT guarantee non-empty output — names
+    // consisting entirely of apostrophes (e.g. "'") normalize to "".
+    // Callers that need a non-empty ID must validate before calling.
 
     result
 }

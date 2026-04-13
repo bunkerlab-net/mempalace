@@ -97,8 +97,10 @@ async fn stored_mtime(connection: &Connection, source_file: &str) -> Result<Opti
         let Some(m): Option<f64> = row.get(0).ok() else {
             return Ok(None);
         };
-        // Postcondition: mtime from OS must be non-negative.
-        assert!(m >= 0.0, "stored mtime must be non-negative, got {m}");
+        // Negative mtime indicates data corruption; treat as stale so the file is re-mined.
+        if m < 0.0 {
+            return Ok(None);
+        }
 
         // mtime values come from the OS (no floating-point arithmetic), so
         // bitwise equality is safe for detecting inconsistency between rows.

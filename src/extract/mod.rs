@@ -4,6 +4,7 @@
 pub mod markers;
 
 use std::collections::HashSet;
+use std::sync::LazyLock;
 
 use regex::Regex;
 
@@ -216,10 +217,14 @@ const NEGATIVE_WORDS: &[&str] = &[
     "mess",
 ];
 
-fn get_sentiment(text: &str) -> &'static str {
-    let positive: HashSet<&str> = POSITIVE_WORDS.iter().copied().collect();
-    let negative: HashSet<&str> = NEGATIVE_WORDS.iter().copied().collect();
+// Built once at first use; POSITIVE_WORDS and NEGATIVE_WORDS are `'static` slices
+// so the sets never need to be rebuilt.
+static POSITIVE_SET: LazyLock<HashSet<&str>> =
+    LazyLock::new(|| POSITIVE_WORDS.iter().copied().collect());
+static NEGATIVE_SET: LazyLock<HashSet<&str>> =
+    LazyLock::new(|| NEGATIVE_WORDS.iter().copied().collect());
 
+fn get_sentiment(text: &str) -> &'static str {
     let words: HashSet<String> = text
         .split(|c: char| !c.is_alphanumeric())
         .map(str::to_lowercase)
@@ -227,11 +232,11 @@ fn get_sentiment(text: &str) -> &'static str {
 
     let pos = words
         .iter()
-        .filter(|w| positive.contains(w.as_str()))
+        .filter(|w| POSITIVE_SET.contains(w.as_str()))
         .count();
     let neg = words
         .iter()
-        .filter(|w| negative.contains(w.as_str()))
+        .filter(|w| NEGATIVE_SET.contains(w.as_str()))
         .count();
 
     let result = match pos.cmp(&neg) {

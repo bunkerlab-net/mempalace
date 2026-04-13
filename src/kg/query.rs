@@ -253,8 +253,8 @@ pub async fn stats(connection: &Connection) -> Result<KgStats> {
         .collect();
 
     let expired = triples - current;
-    // Postcondition: expired + current must equal total triples.
-    assert!(
+    // Postcondition: expired + current must equal total (tautologically true by construction).
+    debug_assert!(
         expired + current == triples,
         "expired ({expired}) + current ({current}) must equal total ({triples})"
     );

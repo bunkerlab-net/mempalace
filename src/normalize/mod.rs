@@ -14,11 +14,12 @@ use crate::error::Result;
 /// Detects format automatically and converts to `> user\nresponse\n\n` format.
 pub fn normalize(filepath: &Path) -> Result<String> {
     const MAX_SIZE: u64 = 500 * 1024 * 1024; // 500 MB safety limit
-    assert!(
-        filepath.exists(),
-        "normalize: file must exist: {}",
-        filepath.display()
-    );
+    if !filepath.exists() {
+        return Err(crate::error::Error::Other(format!(
+            "normalize: file not found: {}",
+            filepath.display()
+        )));
+    }
     let file_size = std::fs::metadata(filepath)
         .map_err(|e| {
             crate::error::Error::Other(format!("could not read {}: {e}", filepath.display()))

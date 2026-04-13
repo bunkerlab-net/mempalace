@@ -200,6 +200,7 @@ fn mine_print_summary(
     dry_run: bool,
     file_count: usize,
     files_skipped: usize,
+    files_unreadable: usize,
     total_drawers: usize,
     room_counts: &HashMap<String, usize>,
 ) {
@@ -209,9 +210,12 @@ fn mine_print_summary(
     } else {
         println!("  Done.");
     }
-    let files_processed = file_count - files_skipped;
+    let files_processed = file_count - files_skipped - files_unreadable;
     println!("  Files processed: {files_processed}");
     println!("  Files skipped (already filed): {files_skipped}");
+    if files_unreadable > 0 {
+        println!("  Files skipped (empty/unreadable): {files_unreadable}");
+    }
     println!(
         "  Drawers {}: {total_drawers}",
         if dry_run { "would be filed" } else { "filed" }
@@ -280,7 +284,7 @@ fn mine_read_file(filepath: &Path) -> Option<String> {
     Some(content)
 }
 
-/// Process all files in the mine loop. Returns `(total_drawers, files_skipped, room_counts)`.
+/// Process all files in the mine loop. Returns `(total_drawers, files_skipped, files_unreadable, room_counts)`.
 async fn mine_process_files(
     connection: &Connection,
     files: &[PathBuf],
@@ -288,9 +292,10 @@ async fn mine_process_files(
     rooms: &[crate::config::RoomConfig],
     project_dir: &Path,
     opts: &MineParams,
-) -> Result<(usize, usize, HashMap<String, usize>)> {
+) -> Result<(usize, usize, usize, HashMap<String, usize>)> {
     let mut total_drawers: usize = 0;
     let mut files_skipped: usize = 0;
+    let mut files_unreadable: usize = 0;
     let mut room_counts: HashMap<String, usize> = HashMap::new();
 
     for (i, filepath) in files.iter().enumerate() {
@@ -302,6 +307,7 @@ async fn mine_process_files(
         }
 
         let Some(content) = mine_read_file(filepath) else {
+            files_unreadable += 1;
             continue;
         };
 
@@ -338,16 +344,17 @@ async fn mine_process_files(
         );
     }
 
-    Ok((total_drawers, files_skipped, room_counts))
+    Ok((total_drawers, files_skipped, files_unreadable, room_counts))
 }
 
 /// Mine a project directory into the palace.
 pub async fn mine(connection: &Connection, project_dir: &Path, opts: &MineParams) -> Result<()> {
-    assert!(
-        project_dir.exists(),
-        "project_dir must exist: {}",
-        project_dir.display()
-    );
+    if !project_dir.exists() {
+        return Err(crate::error::Error::Other(format!(
+            "mine: directory not found: {}",
+            project_dir.display()
+        )));
+    }
 
     let project_dir = project_dir.canonicalize().map_err(|e| {
         crate::error::Error::Other(format!(
@@ -360,7 +367,16 @@ pub async fn mine(connection: &Connection, project_dir: &Path, opts: &MineParams
     let config = ProjectConfig::load(&config_path)?;
 
     let wing = opts.wing.as_deref().unwrap_or(&config.wing);
-    let rooms = &config.rooms;
+    let mut rooms = config.rooms;
+    if rooms.is_empty() {
+        // Empty rooms list in mempalace.yaml would violate detect_room's precondition;
+        // fall back to a single general room so mining can proceed.
+        rooms.push(crate::config::RoomConfig {
+            name: "general".to_string(),
+            description: String::new(),
+            keywords: vec![],
+        });
+    }
     let all_files = scan_project_with_opts(&project_dir, opts.respect_gitignore);
     let files: Vec<_> = if opts.limit == 0 {
         all_files
@@ -368,15 +384,16 @@ pub async fn mine(connection: &Connection, project_dir: &Path, opts: &MineParams
         all_files.into_iter().take(opts.limit).collect()
     };
 
-    mine_print_header(wing, rooms, files.len(), opts.dry_run);
+    mine_print_header(wing, &rooms, files.len(), opts.dry_run);
 
-    let (total_drawers, files_skipped, room_counts) =
-        mine_process_files(connection, &files, wing, rooms, &project_dir, opts).await?;
+    let (total_drawers, files_skipped, files_unreadable, room_counts) =
+        mine_process_files(connection, &files, wing, &rooms, &project_dir, opts).await?;
 
     mine_print_summary(
         opts.dry_run,
         files.len(),
         files_skipped,
+        files_unreadable,
         total_drawers,
         &room_counts,
     );

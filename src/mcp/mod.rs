@@ -67,7 +67,15 @@ pub async fn run(connection: &Connection) -> Result<()> {
 }
 
 async fn handle_request(connection: &Connection, request: &Value) -> Option<Value> {
-    assert!(request.is_object(), "MCP request must be a JSON object");
+    // Malformed (non-object) requests get a JSON-RPC error rather than a panic;
+    // the MCP server must stay alive for subsequent well-formed requests.
+    if !request.is_object() {
+        return Some(json!({
+            "jsonrpc": "2.0",
+            "id": null,
+            "error": {"code": -32600, "message": "Invalid Request: expected JSON object"}
+        }));
+    }
 
     let method = request.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let params = request.get("params").cloned().unwrap_or(json!({}));

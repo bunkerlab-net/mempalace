@@ -135,7 +135,7 @@ fn chunk_by_exchange(lines: &[&str]) -> Vec<Chunk> {
 
     while i < lines.len() {
         // Upper bound: i strictly increases each iteration, bounded by lines.len().
-        assert!(i < lines.len());
+        debug_assert!(i < lines.len());
         let line = lines[i].trim();
         if line.starts_with('>') {
             let user_turn = line;
@@ -144,7 +144,7 @@ fn chunk_by_exchange(lines: &[&str]) -> Vec<Chunk> {
             let mut ai_lines = Vec::new();
             while i < lines.len() {
                 // Upper bound: i strictly increases each inner iteration, bounded by lines.len().
-                assert!(i < lines.len());
+                debug_assert!(i < lines.len());
                 let next = lines[i].trim();
                 if next.starts_with('>') || next.starts_with("---") {
                     break;

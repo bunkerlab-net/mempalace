@@ -51,11 +51,12 @@ static MULTI_UNDERSCORE_RE: LazyLock<Regex> = LazyLock::new(|| {
 const MAX_SPLIT_FILE_SIZE: u64 = 500 * 1024 * 1024; // 500 MB safety limit
 
 /// Find lines where true new sessions begin (Claude Code v header not followed by context restore).
+///
+/// Returns an empty Vec for empty input — callers treat zero boundaries as "nothing to split".
 fn find_session_boundaries(lines: &[&str]) -> Vec<usize> {
-    assert!(
-        !lines.is_empty(),
-        "find_session_boundaries: lines must not be empty"
-    );
+    if lines.is_empty() {
+        return vec![];
+    }
     let mut boundaries = Vec::new();
     for (i, line) in lines.iter().enumerate() {
         if line.contains("Claude Code v") {
@@ -224,11 +225,17 @@ pub fn run(
     dry_run: bool,
     min_sessions: usize,
 ) -> Result<()> {
-    assert!(
-        directory.is_dir(),
-        "split::run: directory must be an existing directory"
-    );
-    assert!(min_sessions >= 2, "split::run: min_sessions must be >= 2");
+    if !directory.is_dir() {
+        return Err(crate::error::Error::Other(format!(
+            "split: '{}' is not an existing directory",
+            directory.display()
+        )));
+    }
+    if min_sessions < 2 {
+        return Err(crate::error::Error::Other(
+            "split: min_sessions must be at least 2".to_string(),
+        ));
+    }
     let mut mega_files: Vec<(PathBuf, usize)> = Vec::new();
 
     for entry in fs::read_dir(directory)? {

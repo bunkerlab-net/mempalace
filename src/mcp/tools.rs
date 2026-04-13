@@ -20,8 +20,14 @@ const MAX_EXACT_INT_F64: f64 = 9_007_199_254_740_991.0;
 
 /// Dispatch a tool call by name and return the JSON result.
 pub async fn dispatch(connection: &Connection, name: &str, args: &Value) -> Value {
-    assert!(!name.is_empty(), "tool name must not be empty");
-    assert!(args.is_object(), "tool args must be a JSON object");
+    // Empty name and non-object args can arrive from untrusted MCP clients;
+    // return a structured error rather than panicking.
+    if name.is_empty() {
+        return json!({"error": "tool name must not be empty", "public": true});
+    }
+    if !args.is_object() {
+        return json!({"error": "tool arguments must be a JSON object", "public": true});
+    }
 
     match name {
         "mempalace_status" => tool_status(connection).await,
