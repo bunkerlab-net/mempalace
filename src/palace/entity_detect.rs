@@ -1,8 +1,37 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
+use std::sync::LazyLock;
 
 use regex::Regex;
+
+// Regex statics are compile-time literals; .expect() cannot fail at runtime.
+#[allow(clippy::expect_used)]
+// Compiled once at first use rather than on every call to extract_candidates.
+// Match capitalized words of 2-20 chars. The lower bound (1 lowercase char
+// after the capital) avoids single-letter initials like "I" or "A". The
+// upper bound (19 lowercase chars) rejects long common nouns that happen
+// to be capitalized at sentence starts (e.g. "Congratulations").
+static SINGLE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b([A-Z][a-z]{1,19})\b").expect(
+        "single-word capitalized name regex is a compile-time literal and cannot fail to compile",
+    )
+});
+
+#[allow(clippy::expect_used)]
+// Matches two or more consecutive capitalized words (multi-word entity names).
+static MULTI_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b").expect(
+        "multi-word capitalized name regex is a compile-time literal and cannot fail to compile",
+    )
+});
+
+#[allow(clippy::expect_used)]
+// Matches gendered and plural pronouns to score person-like proximity.
+static PRONOUN_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(she|her|hers|he|him|his|they|them|their)\b")
+        .expect("pronoun regex is a compile-time literal and cannot fail to compile")
+});
 
 /// A detected entity with classification.
 pub struct DetectedEntity {
@@ -146,35 +175,23 @@ fn extract_candidates_stop_words() -> HashSet<&'static str> {
     stops
 }
 
-// Regex literals are compile-time constants that can never fail to compile.
-#[allow(clippy::expect_used)]
 fn extract_candidates(text: &str) -> HashMap<String, usize> {
     assert!(
         !text.is_empty(),
         "extract_candidates: text must not be empty"
     );
     let stops = extract_candidates_stop_words();
-    // Match capitalized words of 2–20 chars. The lower bound (1 lowercase char
-    // after the capital) avoids single-letter initials like "I" or "A". The
-    // upper bound (19 lowercase chars) rejects long common nouns that happen
-    // to be capitalized at sentence starts (e.g. "Congratulations").
-    let single_re = Regex::new(r"\b([A-Z][a-z]{1,19})\b").expect(
-        "single-word capitalized name regex is a compile-time literal and cannot fail to compile",
-    );
-    let multi_re = Regex::new(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b").expect(
-        "multi-word capitalized name regex is a compile-time literal and cannot fail to compile",
-    );
 
     let mut counts: HashMap<String, usize> = HashMap::new();
 
-    for cap in single_re.captures_iter(text) {
+    for cap in SINGLE_RE.captures_iter(text) {
         let word = &cap[1];
         if word.len() > 1 && !stops.contains(word.to_lowercase().as_str()) {
             *counts.entry(word.to_string()).or_insert(0) += 1;
         }
     }
 
-    for cap in multi_re.captures_iter(text) {
+    for cap in MULTI_RE.captures_iter(text) {
         let phrase = &cap[1];
         if !phrase
             .split_whitespace()
@@ -203,8 +220,6 @@ struct EntityScores {
 }
 
 /// Score person-related signals: verb patterns, dialogue markers, pronouns, direct address.
-// Regex literals are compile-time constants that can never fail to compile.
-#[allow(clippy::expect_used)]
 fn score_entity_person(
     name: &str,
     escaped: &str,
@@ -244,15 +259,13 @@ fn score_entity_person(
     }
 
     let name_lower = name.to_lowercase();
-    let pronoun_re = Regex::new(r"(?i)\b(she|her|hers|he|him|his|they|them|their)\b")
-        .expect("pronoun regex is a compile-time literal and cannot fail to compile");
     let mut pronoun_hits = 0;
     for (i, line) in lines.iter().enumerate() {
         if line.to_lowercase().contains(&name_lower) {
             let start = i.saturating_sub(2);
             let end = (i + 3).min(lines.len());
             let window: String = lines[start..end].join(" ");
-            if pronoun_re.is_match(&window) {
+            if PRONOUN_RE.is_match(&window) {
                 pronoun_hits += 1;
             }
         }

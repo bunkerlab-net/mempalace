@@ -11,7 +11,7 @@
 //!   3. Tail sentence — take the last meaningful newline-delimited segment.
 //!   4. Tail truncation — fallback, take the last 500 chars.
 
-use std::sync::OnceLock;
+use std::sync::LazyLock;
 
 use regex::Regex;
 
@@ -19,16 +19,13 @@ const MAX_QUERY_LEN: usize = 500;
 const SAFE_QUERY_LEN: usize = 200;
 const MIN_QUESTION_SEGMENT_LEN: usize = 3;
 
-static QUESTION_RE: OnceLock<Regex> = OnceLock::new();
-
-// Regex literal is a compile-time constant that can never fail to compile.
 #[allow(clippy::expect_used)]
-fn question_re() -> &'static Regex {
-    QUESTION_RE.get_or_init(|| {
-        Regex::new(r#"[?？]\s*["']?\s*$"#)
-            .expect("valid regex: question_re pattern is a compile-time constant")
-    })
-}
+// Matches a sentence ending with a question mark (including Unicode `？`),
+// with optional trailing quote/whitespace. Compiled once at first use.
+static QUESTION_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"[?？]\s*["']?\s*$"#)
+        .expect("question regex is a compile-time literal and cannot fail to compile")
+});
 
 /// Result of [`sanitize_query`].
 pub struct SanitizedQuery {
@@ -73,7 +70,7 @@ pub fn sanitize_query(raw: &str) -> SanitizedQuery {
     // Step 2/3: treat the trailing segment as the primary intent carrier.
     if let Some(last_seg) = segments.last().copied() {
         let last_len = last_seg.chars().count();
-        if question_re().is_match(last_seg) && last_len >= MIN_QUESTION_SEGMENT_LEN {
+        if QUESTION_RE.is_match(last_seg) && last_len >= MIN_QUESTION_SEGMENT_LEN {
             let candidate = tail_guard(last_seg);
             eprintln!(
                 "mempalace: query sanitized {original_length} → {} chars (method=question_extraction)",

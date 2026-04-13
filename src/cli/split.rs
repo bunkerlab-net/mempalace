@@ -1,9 +1,52 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use regex::Regex;
 
 use crate::error::Result;
+
+// Regex statics are compile-time literals; .expect() cannot fail at runtime.
+#[allow(clippy::expect_used)]
+// Matches the timestamp header line emitted by Claude Code session logs.
+static TS_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"⏺\s+(\d{1,2}):(\d{2})\s+(AM|PM)\s+\w+,\s+(\w+)\s+(\d{1,2}),\s+(\d{4})")
+        .expect("timestamp regex is a compile-time literal and cannot fail to compile")
+});
+
+#[allow(clippy::expect_used)]
+// Matches shell commands and tool invocations that are not useful subjects.
+static SKIP_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(\./|cd |ls |python|bash|git |cat |source |export |claude|./activate)")
+        .expect("skip regex is a compile-time literal and cannot fail to compile")
+});
+
+#[allow(clippy::expect_used)]
+// Strips characters that are not safe in filenames.
+static CLEAN_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"[^\w\s-]")
+        .expect("clean regex is a compile-time literal and cannot fail to compile")
+});
+
+#[allow(clippy::expect_used)]
+// Collapses runs of whitespace to a single hyphen in filename subjects.
+static SPACE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\s+").expect("space regex is a compile-time literal and cannot fail to compile")
+});
+
+#[allow(clippy::expect_used)]
+// Strips characters unsafe in filenames when sanitizing the source stem.
+static SANITIZE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"[^\w.\-]")
+        .expect("sanitize regex is a compile-time literal and cannot fail to compile")
+});
+
+#[allow(clippy::expect_used)]
+// Collapses repeated underscores left by SANITIZE_RE.
+static MULTI_UNDERSCORE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"_+")
+        .expect("multi-underscore regex is a compile-time literal and cannot fail to compile")
+});
 
 const MAX_SPLIT_FILE_SIZE: u64 = 500 * 1024 * 1024; // 500 MB safety limit
 
@@ -28,10 +71,6 @@ fn find_session_boundaries(lines: &[&str]) -> Vec<usize> {
 
 /// Extract timestamp from session lines.
 fn extract_timestamp(lines: &[&str]) -> Option<String> {
-    let ts_re =
-        Regex::new(r"⏺\s+(\d{1,2}):(\d{2})\s+(AM|PM)\s+\w+,\s+(\w+)\s+(\d{1,2}),\s+(\d{4})")
-            .ok()?;
-
     let months = [
         ("January", "01"),
         ("February", "02"),
@@ -48,7 +87,7 @@ fn extract_timestamp(lines: &[&str]) -> Option<String> {
     ];
 
     for line in lines.iter().take(50) {
-        if let Some(caps) = ts_re.captures(line) {
+        if let Some(caps) = TS_RE.captures(line) {
             let hour = &caps[1];
             let min = &caps[2];
             let ampm = &caps[3];
@@ -71,24 +110,13 @@ fn extract_timestamp(lines: &[&str]) -> Option<String> {
 }
 
 /// Extract a subject from the first meaningful user prompt.
-// Regex literals are compile-time constants that can never fail to compile.
-#[allow(clippy::expect_used)]
 fn extract_subject(lines: &[&str]) -> String {
-    let skip_re =
-        Regex::new(r"^(\./|cd |ls |python|bash|git |cat |source |export |claude|./activate)")
-            .expect("valid regex: skip_re pattern is a compile-time constant");
-
-    let clean_re =
-        Regex::new(r"[^\w\s-]").expect("valid regex: clean_re pattern is a compile-time constant");
-    let space_re =
-        Regex::new(r"\s+").expect("valid regex: space_re pattern is a compile-time constant");
-
     for line in lines {
         if let Some(prompt) = line.strip_prefix("> ") {
             let prompt = prompt.trim();
-            if prompt.len() > 5 && !skip_re.is_match(prompt) {
-                let subject = clean_re.replace_all(prompt, "");
-                let subject = space_re.replace_all(subject.trim(), "-");
+            if prompt.len() > 5 && !SKIP_RE.is_match(prompt) {
+                let subject = CLEAN_RE.replace_all(prompt, "");
+                let subject = SPACE_RE.replace_all(subject.trim(), "-");
                 let truncated = if subject.len() > 60 {
                     &subject[..60]
                 } else {
@@ -102,13 +130,7 @@ fn extract_subject(lines: &[&str]) -> String {
 }
 
 /// Process a single mega-file: split it into per-session files and return the number written.
-fn split_file(
-    path: &Path,
-    output_dir: &Path,
-    dry_run: bool,
-    sanitize_re: &Regex,
-    multi_underscore: &Regex,
-) -> Result<usize> {
+fn split_file(path: &Path, output_dir: &Path, dry_run: bool) -> Result<usize> {
     assert!(path.is_file(), "split_file: path must be an existing file");
     assert!(
         output_dir.is_dir(),
@@ -135,7 +157,7 @@ fn split_file(
         .chars()
         .take(40)
         .collect::<String>();
-    let src_stem = sanitize_re.replace_all(&src_stem, "_");
+    let src_stem = SANITIZE_RE.replace_all(&src_stem, "_");
 
     println!(
         "\n  {}  ({} sessions)",
@@ -157,8 +179,8 @@ fn split_file(
         let subject = extract_subject(&chunk);
 
         let name = format!("{src_stem}__{ts_part}_{subject}.txt");
-        let name = sanitize_re.replace_all(&name, "_");
-        let name = multi_underscore.replace_all(&name, "_");
+        let name = SANITIZE_RE.replace_all(&name, "_");
+        let name = MULTI_UNDERSCORE_RE.replace_all(&name, "_");
 
         let out_path = output_dir.join(name.as_ref());
 
@@ -240,15 +262,11 @@ pub fn run(
 
     println!("Found {} mega-files to split:", mega_files.len());
 
-    let sanitize_re = Regex::new(r"[^\w.\-]")
-        .expect("valid regex: sanitize_re pattern is a compile-time constant");
-    let multi_underscore = Regex::new(r"_+")
-        .expect("valid regex: multi_underscore pattern is a compile-time constant");
     let mut total_written = 0usize;
 
     for (path, _n_sessions) in &mega_files {
         let out_dir = output_dir.unwrap_or_else(|| path.parent().unwrap_or(directory));
-        total_written += split_file(path, out_dir, dry_run, &sanitize_re, &multi_underscore)?;
+        total_written += split_file(path, out_dir, dry_run)?;
     }
 
     println!();
