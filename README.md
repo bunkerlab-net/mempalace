@@ -459,27 +459,16 @@ src/
 
 ---
 
-## Lint Configuration
+## Code Style
 
-```toml
-[lints.rust]
-unsafe_code = "deny"
-warnings = "deny"
-
-[lints.clippy]
-enum_glob_use = "deny"
-expect_used = "deny"
-pedantic = { level = "deny", priority = -1 }
-unwrap_used = "deny"
-```
-
-All clippy suppressions have an inline comment explaining why the lint cannot be resolved without harming correctness
-or readability.
+See [STYLEGUIDE.md](STYLEGUIDE.md) for the full coding conventions: assertions,
+loop bounds, no-abbreviation naming, function length limits, clippy configuration,
+and the "always say why" comment rule.
 
 ---
 
 ## Tests
 
 ```bash
-cargo test
+cargo nextest run
 ```
