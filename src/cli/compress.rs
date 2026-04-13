@@ -10,8 +10,8 @@ fn run_load_dialect(config_path: Option<&str>) -> Result<Dialect> {
         return Ok(Dialect::empty());
     };
     let content = std::fs::read_to_string(path)?;
-    let cfg: serde_json::Value = serde_json::from_str(&content)?;
-    let entities = cfg
+    let config: serde_json::Value = serde_json::from_str(&content)?;
+    let entities = config
         .get("entities")
         .and_then(|e| e.as_object())
         .map(|obj| {
@@ -20,7 +20,7 @@ fn run_load_dialect(config_path: Option<&str>) -> Result<Dialect> {
                 .collect()
         })
         .unwrap_or_default();
-    let skip = cfg
+    let skip = config
         .get("skip_names")
         .and_then(|s| s.as_array())
         .map(|arr| {
@@ -34,7 +34,7 @@ fn run_load_dialect(config_path: Option<&str>) -> Result<Dialect> {
 
 /// Compress one drawer row and persist or preview it. Returns `(original_len, compressed_len)`.
 async fn run_compress_row(
-    conn: &Connection,
+    connection: &Connection,
     row: &turso::Row,
     dialect: &Dialect,
     dry_run: bool,
@@ -72,7 +72,7 @@ async fn run_compress_row(
             println!("  ({original_len} → {compressed_len} bytes, {ratio:.1}x)\n");
         }
     } else {
-        conn.execute(
+        connection.execute(
             "INSERT OR REPLACE INTO compressed (id, content, compression_ratio, wing, room) VALUES (?, ?, ?, ?, ?)",
             (id, compressed, ratio, wing_val, room),
         )
@@ -84,7 +84,7 @@ async fn run_compress_row(
 
 /// Run the compress command: compress drawers into AAAK dialect format.
 pub async fn run(
-    conn: &Connection,
+    connection: &Connection,
     wing: Option<&str>,
     dry_run: bool,
     config_path: Option<&str>,
@@ -93,13 +93,13 @@ pub async fn run(
 
     let rows = if let Some(w) = wing {
         query_all(
-            conn,
+            connection,
             "SELECT id, content, wing, room, source_file, filed_at FROM drawers WHERE wing = ? ORDER BY filed_at",
             [w.to_string()],
         ).await?
     } else {
         query_all(
-            conn,
+            connection,
             "SELECT id, content, wing, room, source_file, filed_at FROM drawers ORDER BY filed_at",
             (),
         )
@@ -115,7 +115,7 @@ pub async fn run(
     let mut total_compressed = 0usize;
 
     for (count, row) in rows.iter().enumerate() {
-        let (orig, comp) = run_compress_row(conn, row, &dialect, dry_run, count + 1).await?;
+        let (orig, comp) = run_compress_row(connection, row, &dialect, dry_run, count + 1).await?;
         total_original += orig;
         total_compressed += comp;
     }

@@ -1,2 +1,5 @@
 # TigerStyle: functions must not exceed 70 lines.
 too-many-lines-threshold = 70
+
+# TigerStyle: do not abbreviate variable names.
+disallowed-names = ["conn", "cfg", "dir", "ext", "vf", "vt", "sc", "sf"]

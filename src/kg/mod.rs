@@ -57,14 +57,14 @@ mod async_tests {
 
     #[tokio::test]
     async fn add_entity_inserts_and_returns_id() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        let id = add_entity(&conn, "Alice Smith", "person", None)
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let id = add_entity(&connection, "Alice Smith", "person", None)
             .await
             .expect("add_entity should succeed for valid name and entity type");
         assert_eq!(id, "alice_smith");
 
         let rows = crate::db::query_all(
-            &conn,
+            &connection,
             "SELECT name FROM entities WHERE id = ?1",
             turso::params!["alice_smith"],
         )
@@ -75,9 +75,9 @@ mod async_tests {
 
     #[tokio::test]
     async fn add_triple_creates_entities_automatically() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
+        let (_db, connection) = crate::test_helpers::test_db().await;
         let _tid = add_triple(
-            &conn,
+            &connection,
             &TripleParams {
                 subject: "Alice",
                 predicate: "works at",
@@ -93,7 +93,7 @@ mod async_tests {
         .expect("add_triple should succeed for valid subject/predicate/object params");
 
         // Both entities should exist
-        let entities = crate::db::query_all(&conn, "SELECT id FROM entities ORDER BY id", ())
+        let entities = crate::db::query_all(&connection, "SELECT id FROM entities ORDER BY id", ())
             .await
             .expect(
                 "SELECT FROM entities should succeed after add_triple with auto-entity creation",
@@ -103,7 +103,7 @@ mod async_tests {
 
     #[tokio::test]
     async fn add_triple_dedup_returns_existing_id() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
+        let (_db, connection) = crate::test_helpers::test_db().await;
         let params = TripleParams {
             subject: "Bob",
             predicate: "likes",
@@ -114,10 +114,10 @@ mod async_tests {
             source_closet: None,
             source_file: None,
         };
-        let id1 = add_triple(&conn, &params)
+        let id1 = add_triple(&connection, &params)
             .await
             .expect("first add_triple should succeed for new triple");
-        let id2 = add_triple(&conn, &params)
+        let id2 = add_triple(&connection, &params)
             .await
             .expect("second add_triple on same params should return existing id without error");
         assert_eq!(id1, id2);
@@ -125,9 +125,9 @@ mod async_tests {
 
     #[tokio::test]
     async fn invalidate_sets_valid_to() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
+        let (_db, connection) = crate::test_helpers::test_db().await;
         let _tid = add_triple(
-            &conn,
+            &connection,
             &TripleParams {
                 subject: "Carol",
                 predicate: "works at",
@@ -142,40 +142,47 @@ mod async_tests {
         .await
         .expect("add_triple should succeed for Carol/works at/OldCo");
 
-        invalidate(&conn, "Carol", "works at", "OldCo", Some("2024-06-01"))
-            .await
-            .expect("invalidate should succeed for existing Carol/works at/OldCo triple");
+        invalidate(
+            &connection,
+            "Carol",
+            "works at",
+            "OldCo",
+            Some("2024-06-01"),
+        )
+        .await
+        .expect("invalidate should succeed for existing Carol/works at/OldCo triple");
 
         let rows = crate::db::query_all(
-            &conn,
+            &connection,
             "SELECT valid_to FROM triples WHERE subject = 'carol' AND predicate = 'works_at'",
             (),
         )
         .await
         .expect("SELECT valid_to should succeed after invalidate");
         assert_eq!(rows.len(), 1);
-        let vt: String = rows[0]
+        let valid_to: String = rows[0]
             .get(0)
             .expect("valid_to column 0 must be present in triples result row");
-        assert_eq!(vt, "2024-06-01");
+        assert_eq!(valid_to, "2024-06-01");
     }
 }
 
 /// Add or update an entity node.
 #[allow(dead_code)]
 pub async fn add_entity(
-    conn: &Connection,
+    connection: &Connection,
     name: &str,
     entity_type: &str,
     properties: Option<&str>,
 ) -> Result<String> {
     let eid = entity_id(name);
     let props = properties.unwrap_or("{}");
-    conn.execute(
-        "INSERT OR REPLACE INTO entities (id, name, type, properties) VALUES (?1, ?2, ?3, ?4)",
-        turso::params![eid.as_str(), name, entity_type, props],
-    )
-    .await?;
+    connection
+        .execute(
+            "INSERT OR REPLACE INTO entities (id, name, type, properties) VALUES (?1, ?2, ?3, ?4)",
+            turso::params![eid.as_str(), name, entity_type, props],
+        )
+        .await?;
     Ok(eid)
 }
 
@@ -201,34 +208,39 @@ pub struct TripleParams<'a> {
 
 /// Add a relationship triple. Auto-creates entities if they don't exist.
 /// Returns the triple ID.
-pub async fn add_triple(conn: &Connection, p: &TripleParams<'_>) -> Result<String> {
+pub async fn add_triple(connection: &Connection, params: &TripleParams<'_>) -> Result<String> {
     // Preconditions: subject, predicate, and object must all be non-empty.
-    assert!(!p.subject.is_empty(), "triple subject must not be empty");
     assert!(
-        !p.predicate.is_empty(),
+        !params.subject.is_empty(),
+        "triple subject must not be empty"
+    );
+    assert!(
+        !params.predicate.is_empty(),
         "triple predicate must not be empty"
     );
-    assert!(!p.object.is_empty(), "triple object must not be empty");
+    assert!(!params.object.is_empty(), "triple object must not be empty");
 
-    let sub_id = entity_id(p.subject);
-    let obj_id = entity_id(p.object);
-    let pred = p.predicate.to_lowercase().replace(' ', "_");
+    let sub_id = entity_id(params.subject);
+    let obj_id = entity_id(params.object);
+    let pred = params.predicate.to_lowercase().replace(' ', "_");
 
     // Auto-create entities
-    conn.execute(
-        "INSERT OR IGNORE INTO entities (id, name) VALUES (?1, ?2)",
-        turso::params![sub_id.as_str(), p.subject],
-    )
-    .await?;
-    conn.execute(
-        "INSERT OR IGNORE INTO entities (id, name) VALUES (?1, ?2)",
-        turso::params![obj_id.as_str(), p.object],
-    )
-    .await?;
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO entities (id, name) VALUES (?1, ?2)",
+            turso::params![sub_id.as_str(), params.subject],
+        )
+        .await?;
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO entities (id, name) VALUES (?1, ?2)",
+            turso::params![obj_id.as_str(), params.object],
+        )
+        .await?;
 
     // Check for existing identical active triple
     let existing = db::query_all(
-        conn,
+        connection,
         "SELECT id FROM triples WHERE subject=?1 AND predicate=?2 AND object=?3 AND valid_to IS NULL",
         turso::params![sub_id.as_str(), pred.as_str(), obj_id.as_str()],
     )
@@ -246,19 +258,19 @@ pub async fn add_triple(conn: &Connection, p: &TripleParams<'_>) -> Result<Strin
         &uuid::Uuid::new_v4().to_string().replace('-', "")[..8]
     );
 
-    let vf: turso::Value = match p.valid_from {
+    let valid_from_value: turso::Value = match params.valid_from {
         Some(v) => turso::Value::from(v),
         None => turso::Value::Null,
     };
-    let vt: turso::Value = match p.valid_to {
+    let valid_to_value: turso::Value = match params.valid_to {
         Some(v) => turso::Value::from(v),
         None => turso::Value::Null,
     };
-    let sc: turso::Value = match p.source_closet {
+    let source_closet_value: turso::Value = match params.source_closet {
         Some(v) => turso::Value::from(v),
         None => turso::Value::Null,
     };
-    let sf: turso::Value = match p.source_file {
+    let source_file_value: turso::Value = match params.source_file {
         Some(v) => turso::Value::from(v),
         None => turso::Value::Null,
     };
@@ -266,9 +278,9 @@ pub async fn add_triple(conn: &Connection, p: &TripleParams<'_>) -> Result<Strin
     // Postcondition: triple ID follows naming convention.
     assert!(triple_id.starts_with("t_"), "triple_id must start with t_");
 
-    conn.execute(
+    connection.execute(
         "INSERT INTO triples (id, subject, predicate, object, valid_from, valid_to, confidence, source_closet, source_file) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-        turso::params![triple_id.as_str(), sub_id.as_str(), pred.as_str(), obj_id.as_str(), vf, vt, p.confidence, sc, sf],
+        turso::params![triple_id.as_str(), sub_id.as_str(), pred.as_str(), obj_id.as_str(), valid_from_value, valid_to_value, params.confidence, source_closet_value, source_file_value],
     )
     .await?;
 
@@ -277,7 +289,7 @@ pub async fn add_triple(conn: &Connection, p: &TripleParams<'_>) -> Result<Strin
 
 /// Mark a relationship as ended (set `valid_to`).
 pub async fn invalidate(
-    conn: &Connection,
+    connection: &Connection,
     subject: &str,
     predicate: &str,
     object: &str,
@@ -298,7 +310,7 @@ pub async fn invalidate(
         std::string::ToString::to_string,
     );
 
-    conn.execute(
+    connection.execute(
         "UPDATE triples SET valid_to=?1 WHERE subject=?2 AND predicate=?3 AND object=?4 AND valid_to IS NULL",
         turso::params![ended.as_str(), sub_id.as_str(), pred.as_str(), obj_id.as_str()],
     )

@@ -50,12 +50,15 @@ pub fn normalize(filepath: &Path) -> Result<String> {
     }
 
     // Try JSON normalization
-    let ext = filepath
+    let extension = filepath
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_lowercase();
-    if (ext == "json" || ext == "jsonl" || content.starts_with('{') || content.starts_with('['))
+    if (extension == "json"
+        || extension == "jsonl"
+        || content.starts_with('{')
+        || content.starts_with('['))
         && let Some(normalized) = try_normalize_json(&content)
     {
         return Ok(normalized);
@@ -148,8 +151,8 @@ mod tests {
     #[test]
     fn normalize_passthrough_with_markers() {
         // Text with >= 3 lines starting with > should pass through
-        let dir = tempfile::tempdir().expect("create temp dir");
-        let path = dir.path().join("test.txt");
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let path = temp_dir.path().join("test.txt");
         std::fs::write(
             &path,
             "> hello\nresponse\n\n> second\nreply\n\n> third\nanother",

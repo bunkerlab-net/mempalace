@@ -213,16 +213,19 @@ fn chunk_by_paragraph(content: &str) -> Vec<Chunk> {
         .collect()
 }
 
-fn scan_convos(dir: &Path) -> Vec<PathBuf> {
-    assert!(dir.is_dir(), "scan_convos: dir must be a directory");
+fn scan_convos(directory: &Path) -> Vec<PathBuf> {
+    assert!(
+        directory.is_dir(),
+        "scan_convos: directory must be a directory"
+    );
     let mut files = Vec::new();
-    walk_convos(dir, &mut files);
+    walk_convos(directory, &mut files);
     files
 }
 
-fn walk_convos(dir: &Path, files: &mut Vec<PathBuf>) {
+fn walk_convos(directory: &Path, files: &mut Vec<PathBuf>) {
     // Iterative DFS with explicit depth tracking — no recursion.
-    let mut stack: Vec<(PathBuf, usize)> = vec![(dir.to_path_buf(), 0)];
+    let mut stack: Vec<(PathBuf, usize)> = vec![(directory.to_path_buf(), 0)];
 
     while let Some((current_dir, depth)) = stack.pop() {
         assert!(
@@ -248,11 +251,13 @@ fn walk_convos(dir: &Path, files: &mut Vec<PathBuf>) {
                 if !is_skip_dir(&name) && name != "tool-results" && name != "memory" {
                     stack.push((path, depth + 1));
                 }
-            } else if let Some(ext) = path.extension() {
-                let ext_lower = ext.to_string_lossy().to_lowercase();
+            } else if let Some(extension) = path.extension() {
+                let extension_lower = extension.to_string_lossy().to_lowercase();
                 // Skip .meta.json files — these are Claude Code session metadata,
                 // not conversation content.
-                if CONVO_EXTENSIONS.contains(&ext_lower.as_str()) && !name.ends_with(".meta.json") {
+                if CONVO_EXTENSIONS.contains(&extension_lower.as_str())
+                    && !name.ends_with(".meta.json")
+                {
                     if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_FILE_SIZE) {
                         continue;
                     }
@@ -265,7 +270,7 @@ fn walk_convos(dir: &Path, files: &mut Vec<PathBuf>) {
 
 fn mine_convos_print_header(
     wing: &str,
-    dir: &Path,
+    directory: &Path,
     file_count: usize,
     extract_mode: &str,
     dry_run: bool,
@@ -278,7 +283,7 @@ fn mine_convos_print_header(
     }
     println!("=======================================================");
     println!("  Wing:    {wing}");
-    println!("  Source:  {}", dir.display());
+    println!("  Source:  {}", directory.display());
     println!("  Files:   {file_count}");
     println!("  Mode:    {extract_mode}");
     println!("-------------------------------------------------------\n");
@@ -323,7 +328,7 @@ fn mine_convos_print_summary(
 
 /// Write all chunks for one conversation file into the palace.
 async fn mine_convos_write_chunks(
-    conn: &Connection,
+    connection: &Connection,
     chunks: &[Chunk],
     wing: &str,
     room: &str,
@@ -336,7 +341,7 @@ async fn mine_convos_write_chunks(
             &uuid::Uuid::new_v4().to_string().replace('-', "")[..16]
         );
         drawer::add_drawer(
-            conn,
+            connection,
             &drawer::DrawerParams {
                 id: &id,
                 wing,
@@ -355,16 +360,16 @@ async fn mine_convos_write_chunks(
 }
 
 pub async fn mine_convos(
-    conn: &Connection,
-    dir: &Path,
+    connection: &Connection,
+    directory: &Path,
     extract_mode: &str,
     opts: &MineParams,
 ) -> Result<()> {
-    let dir = dir.canonicalize().map_err(|e| {
-        crate::error::Error::Other(format!("directory not found: {}: {e}", dir.display()))
+    let directory = directory.canonicalize().map_err(|e| {
+        crate::error::Error::Other(format!("directory not found: {}: {e}", directory.display()))
     })?;
 
-    let dir_name = dir
+    let dir_name = directory
         .file_name()
         .unwrap_or_default()
         .to_string_lossy()
@@ -372,14 +377,14 @@ pub async fn mine_convos(
         .replace([' ', '-'], "_");
     let wing = opts.wing.as_deref().unwrap_or(&dir_name);
 
-    let all_files = scan_convos(&dir);
+    let all_files = scan_convos(&directory);
     let files: Vec<_> = if opts.limit == 0 {
         all_files
     } else {
         all_files.into_iter().take(opts.limit).collect()
     };
 
-    mine_convos_print_header(wing, &dir, files.len(), extract_mode, opts.dry_run);
+    mine_convos_print_header(wing, &directory, files.len(), extract_mode, opts.dry_run);
 
     let mut total_drawers: usize = 0;
     let mut files_skipped: usize = 0;
@@ -388,7 +393,7 @@ pub async fn mine_convos(
     for (i, filepath) in files.iter().enumerate() {
         let source_file = filepath.to_string_lossy().to_string();
 
-        if !opts.dry_run && drawer::file_already_mined(conn, &source_file).await? {
+        if !opts.dry_run && drawer::file_already_mined(connection, &source_file).await? {
             files_skipped += 1;
             continue;
         }
@@ -409,7 +414,7 @@ pub async fn mine_convos(
         let drawers_added = chunks.len();
 
         if !opts.dry_run {
-            mine_convos_write_chunks(conn, &chunks, wing, &room, &source_file, opts).await?;
+            mine_convos_write_chunks(connection, &chunks, wing, &room, &source_file, opts).await?;
         }
 
         total_drawers += drawers_added;

@@ -18,7 +18,7 @@ const SUPPORTED_PROTOCOL_VERSIONS: &[&str] =
     &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
 /// Run the MCP server: read JSON-RPC 2.0 requests from stdin, write responses to stdout.
-pub async fn run(conn: &Connection) -> Result<()> {
+pub async fn run(connection: &Connection) -> Result<()> {
     let stdin = tokio::io::stdin();
     let mut stdout = tokio::io::stdout();
     let mut reader = BufReader::new(stdin);
@@ -53,7 +53,7 @@ pub async fn run(conn: &Connection) -> Result<()> {
             }
         };
 
-        let response = handle_request(conn, &request).await;
+        let response = handle_request(connection, &request).await;
 
         if let Some(resp) = response {
             let out = serde_json::to_string(&resp).unwrap_or_default();
@@ -66,7 +66,7 @@ pub async fn run(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-async fn handle_request(conn: &Connection, request: &Value) -> Option<Value> {
+async fn handle_request(connection: &Connection, request: &Value) -> Option<Value> {
     assert!(request.is_object(), "MCP request must be a JSON object");
 
     let method = request.get("method").and_then(|m| m.as_str()).unwrap_or("");
@@ -113,7 +113,7 @@ async fn handle_request(conn: &Connection, request: &Value) -> Option<Value> {
             }))
         }
 
-        "tools/call" => Some(handle_request_tools_call(conn, &params, req_id).await),
+        "tools/call" => Some(handle_request_tools_call(connection, &params, req_id).await),
 
         _ => Some(json!({
             "jsonrpc": "2.0",
@@ -124,7 +124,11 @@ async fn handle_request(conn: &Connection, request: &Value) -> Option<Value> {
 }
 
 /// Dispatch a `tools/call` request and return a sanitized JSON-RPC response.
-async fn handle_request_tools_call(conn: &Connection, params: &Value, req_id: Value) -> Value {
+async fn handle_request_tools_call(
+    connection: &Connection,
+    params: &Value,
+    req_id: Value,
+) -> Value {
     let tool_name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
     let tool_args = params
         .get("arguments")
@@ -132,7 +136,7 @@ async fn handle_request_tools_call(conn: &Connection, params: &Value, req_id: Va
         .cloned()
         .unwrap_or(json!({}));
 
-    let result = tools::dispatch(conn, tool_name, &tool_args).await;
+    let result = tools::dispatch(connection, tool_name, &tool_args).await;
 
     // Sanitize: only expose errors that tools explicitly mark as public.
     // All other errors are masked so internal paths and database details

@@ -52,8 +52,8 @@ impl MempalaceConfig {
         let path = config_path();
         if path.exists() {
             let data = std::fs::read_to_string(&path)?;
-            let cfg: Self = serde_json::from_str(&data)?;
-            Ok(cfg)
+            let config: Self = serde_json::from_str(&data)?;
+            Ok(config)
         } else {
             Ok(Self::default())
         }
@@ -61,17 +61,17 @@ impl MempalaceConfig {
 
     /// Ensure the config directory and default config exist.
     pub fn init() -> Result<Self> {
-        let dir = config_dir();
-        std::fs::create_dir_all(&dir)?;
+        let directory = config_dir();
+        std::fs::create_dir_all(&directory)?;
 
         let path = config_path();
         if path.exists() {
             Self::load()
         } else {
-            let cfg = Self::default();
-            let data = serde_json::to_string_pretty(&cfg)?;
+            let config = Self::default();
+            let data = serde_json::to_string_pretty(&config)?;
             std::fs::write(&path, data)?;
-            Ok(cfg)
+            Ok(config)
         }
     }
 
@@ -131,8 +131,8 @@ impl ProjectConfig {
             return Err(Error::ConfigNotFound(path.to_path_buf()));
         }
         let data = std::fs::read_to_string(path)?;
-        let cfg: Self = serde_yaml::from_str(&data)?;
-        Ok(cfg)
+        let config: Self = serde_yaml::from_str(&data)?;
+        Ok(config)
     }
 }
 
@@ -144,16 +144,16 @@ mod tests {
 
     #[test]
     fn default_config_has_palace_path() {
-        let cfg = MempalaceConfig::default();
-        let path_str = cfg.palace_path.to_string_lossy();
+        let config = MempalaceConfig::default();
+        let path_str = config.palace_path.to_string_lossy();
         assert!(path_str.contains(".mempalace"));
         assert!(path_str.ends_with("palace.db"));
     }
 
     #[test]
     fn config_dir_ends_with_mempalace() {
-        let dir = config_dir();
-        assert!(dir.to_string_lossy().ends_with(".mempalace"));
+        let directory = config_dir();
+        assert!(directory.to_string_lossy().ends_with(".mempalace"));
     }
 
     #[test]
@@ -170,19 +170,19 @@ rooms:
     description: UI code
     keywords: []
 ";
-        let cfg: ProjectConfig = serde_yaml::from_str(yaml).expect("parse yaml");
-        assert_eq!(cfg.wing, "my_project");
-        assert_eq!(cfg.rooms.len(), 2);
-        assert_eq!(cfg.rooms[0].name, "backend");
-        assert!(cfg.rooms[0].keywords.contains(&"api".to_string()));
+        let config: ProjectConfig = serde_yaml::from_str(yaml).expect("parse yaml");
+        assert_eq!(config.wing, "my_project");
+        assert_eq!(config.rooms.len(), 2);
+        assert_eq!(config.rooms[0].name, "backend");
+        assert!(config.rooms[0].keywords.contains(&"api".to_string()));
 
         // Serialize back and deserialize to verify round-trip
-        let serialized = serde_yaml::to_string(&cfg).expect("serialize yaml");
-        let cfg_roundtrip: ProjectConfig =
+        let serialized = serde_yaml::to_string(&config).expect("serialize yaml");
+        let config_roundtrip: ProjectConfig =
             serde_yaml::from_str(&serialized).expect("parse roundtrip yaml");
-        assert_eq!(cfg.wing, cfg_roundtrip.wing);
-        assert_eq!(cfg.rooms.len(), cfg_roundtrip.rooms.len());
-        for (orig, rt) in cfg.rooms.iter().zip(cfg_roundtrip.rooms.iter()) {
+        assert_eq!(config.wing, config_roundtrip.wing);
+        assert_eq!(config.rooms.len(), config_roundtrip.rooms.len());
+        for (orig, rt) in config.rooms.iter().zip(config_roundtrip.rooms.iter()) {
             assert_eq!(orig.name, rt.name);
             assert_eq!(orig.description, rt.description);
             assert_eq!(orig.keywords, rt.keywords);

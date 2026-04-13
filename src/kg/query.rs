@@ -106,7 +106,7 @@ fn query_entity_sql(
 
 /// Query all relationships for an entity.
 pub async fn query_entity(
-    conn: &Connection,
+    connection: &Connection,
     name: &str,
     as_of: Option<&str>,
     direction: &str,
@@ -122,7 +122,7 @@ pub async fn query_entity(
 
     if direction == "outgoing" || direction == "both" {
         let (sql, params) = query_entity_sql(&eid, as_of, "object", "subject");
-        let rows = db::query_all(conn, &sql, turso::params_from_iter(params)).await?;
+        let rows = db::query_all(connection, &sql, turso::params_from_iter(params)).await?;
         for row in &rows {
             let obj_name = row
                 .get_value(6)
@@ -135,7 +135,7 @@ pub async fn query_entity(
 
     if direction == "incoming" || direction == "both" {
         let (sql, params) = query_entity_sql(&eid, as_of, "subject", "object");
-        let rows = db::query_all(conn, &sql, turso::params_from_iter(params)).await?;
+        let rows = db::query_all(connection, &sql, turso::params_from_iter(params)).await?;
         for row in &rows {
             let sub_name = row
                 .get_value(6)
@@ -150,7 +150,7 @@ pub async fn query_entity(
 }
 
 /// Get chronological timeline of facts.
-pub async fn timeline(conn: &Connection, entity: Option<&str>) -> Result<Vec<Fact>> {
+pub async fn timeline(connection: &Connection, entity: Option<&str>) -> Result<Vec<Fact>> {
     let (sql, params) = if let Some(name) = entity {
         let eid = entity_id(name);
         (
@@ -176,7 +176,7 @@ pub async fn timeline(conn: &Connection, entity: Option<&str>) -> Result<Vec<Fac
         )
     };
 
-    let rows = db::query_all(conn, &sql, turso::params_from_iter(params)).await?;
+    let rows = db::query_all(connection, &sql, turso::params_from_iter(params)).await?;
     let mut facts = Vec::new();
 
     for row in &rows {
@@ -214,15 +214,15 @@ pub async fn timeline(conn: &Connection, entity: Option<&str>) -> Result<Vec<Fac
 }
 
 /// Knowledge graph stats.
-pub async fn stats(conn: &Connection) -> Result<KgStats> {
-    let entity_rows = db::query_all(conn, "SELECT COUNT(*) FROM entities", ()).await?;
+pub async fn stats(connection: &Connection) -> Result<KgStats> {
+    let entity_rows = db::query_all(connection, "SELECT COUNT(*) FROM entities", ()).await?;
     let entities = entity_rows
         .first()
         .and_then(|r| r.get_value(0).ok())
         .and_then(|v| v.as_integer().copied())
         .unwrap_or(0);
 
-    let triple_rows = db::query_all(conn, "SELECT COUNT(*) FROM triples", ()).await?;
+    let triple_rows = db::query_all(connection, "SELECT COUNT(*) FROM triples", ()).await?;
     let triples = triple_rows
         .first()
         .and_then(|r| r.get_value(0).ok())
@@ -230,7 +230,7 @@ pub async fn stats(conn: &Connection) -> Result<KgStats> {
         .unwrap_or(0);
 
     let current_rows = db::query_all(
-        conn,
+        connection,
         "SELECT COUNT(*) FROM triples WHERE valid_to IS NULL",
         (),
     )
@@ -242,7 +242,7 @@ pub async fn stats(conn: &Connection) -> Result<KgStats> {
         .unwrap_or(0);
 
     let pred_rows = db::query_all(
-        conn,
+        connection,
         "SELECT DISTINCT predicate FROM triples ORDER BY predicate",
         (),
     )

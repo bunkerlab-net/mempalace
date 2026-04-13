@@ -376,13 +376,13 @@ mod tests {
 
     #[test]
     fn detect_rooms_from_folders_creates_rooms() {
-        let dir = tempfile::tempdir().expect("create temp dir");
-        let dir_path = dir.path();
-        std::fs::create_dir_all(dir_path.join("frontend")).expect("create frontend");
-        std::fs::create_dir_all(dir_path.join("backend")).expect("create backend");
-        std::fs::create_dir_all(dir_path.join("docs")).expect("create docs");
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let temp_directory_path = temp_dir.path();
+        std::fs::create_dir_all(temp_directory_path.join("frontend")).expect("create frontend");
+        std::fs::create_dir_all(temp_directory_path.join("backend")).expect("create backend");
+        std::fs::create_dir_all(temp_directory_path.join("docs")).expect("create docs");
 
-        let rooms = detect_rooms_from_folders(dir_path);
+        let rooms = detect_rooms_from_folders(temp_directory_path);
         let names: Vec<&str> = rooms.iter().map(|r| r.name.as_str()).collect();
 
         assert!(names.contains(&"frontend"));

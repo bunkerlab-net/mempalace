@@ -114,12 +114,12 @@ fn walk_dir_gitignore(project_dir: &Path) -> Vec<PathBuf> {
             continue;
         }
 
-        let ext = path
+        let extension = path
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_lowercase();
-        if READABLE_EXTENSIONS.contains(&ext.as_str()) {
+        if READABLE_EXTENSIONS.contains(&extension.as_str()) {
             if entry.metadata().is_ok_and(|m| m.len() > MAX_FILE_SIZE) {
                 continue;
             }
@@ -129,9 +129,9 @@ fn walk_dir_gitignore(project_dir: &Path) -> Vec<PathBuf> {
     files
 }
 
-fn walk_dir(dir: &Path, files: &mut Vec<PathBuf>) {
+fn walk_dir(directory: &Path, files: &mut Vec<PathBuf>) {
     // Iterative DFS with explicit depth tracking — no recursion.
-    let mut stack: Vec<(PathBuf, usize)> = vec![(dir.to_path_buf(), 0)];
+    let mut stack: Vec<(PathBuf, usize)> = vec![(directory.to_path_buf(), 0)];
 
     while let Some((current_dir, depth)) = stack.pop() {
         assert!(
@@ -155,9 +155,9 @@ fn walk_dir(dir: &Path, files: &mut Vec<PathBuf>) {
                 if !is_skip_dir(&name) {
                     stack.push((path, depth + 1));
                 }
-            } else if let Some(ext) = path.extension() {
-                let ext_lower = ext.to_string_lossy().to_lowercase();
-                if READABLE_EXTENSIONS.contains(&ext_lower.as_str())
+            } else if let Some(extension) = path.extension() {
+                let extension_lower = extension.to_string_lossy().to_lowercase();
+                if READABLE_EXTENSIONS.contains(&extension_lower.as_str())
                     && !SKIP_FILES.contains(&name.as_str())
                 {
                     if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_FILE_SIZE) {
@@ -231,7 +231,7 @@ fn mine_print_summary(
 
 /// Write all chunks for one file into the palace.
 async fn mine_write_chunks(
-    conn: &Connection,
+    connection: &Connection,
     chunks: &[crate::palace::chunker::Chunk],
     wing: &str,
     room: &str,
@@ -245,7 +245,7 @@ async fn mine_write_chunks(
             &uuid::Uuid::new_v4().to_string().replace('-', "")[..16]
         );
         drawer::add_drawer(
-            conn,
+            connection,
             &drawer::DrawerParams {
                 id: &id,
                 wing,
@@ -280,8 +280,69 @@ fn mine_read_file(filepath: &Path) -> Option<String> {
     Some(content)
 }
 
+/// Process all files in the mine loop. Returns `(total_drawers, files_skipped, room_counts)`.
+async fn mine_process_files(
+    connection: &Connection,
+    files: &[PathBuf],
+    wing: &str,
+    rooms: &[crate::config::RoomConfig],
+    project_dir: &Path,
+    opts: &MineParams,
+) -> Result<(usize, usize, HashMap<String, usize>)> {
+    let mut total_drawers: usize = 0;
+    let mut files_skipped: usize = 0;
+    let mut room_counts: HashMap<String, usize> = HashMap::new();
+
+    for (i, filepath) in files.iter().enumerate() {
+        let source_file = filepath.to_string_lossy().to_string();
+
+        if !opts.dry_run && drawer::file_already_mined(connection, &source_file).await? {
+            files_skipped += 1;
+            continue;
+        }
+
+        let Some(content) = mine_read_file(filepath) else {
+            continue;
+        };
+
+        let room = detect_room(filepath, &content, rooms, project_dir);
+        let chunks = chunk_text(&content);
+        let drawers_added = chunks.len();
+
+        if !opts.dry_run {
+            // Capture mtime now so all chunks from the same file share the same timestamp.
+            let source_mtime: Option<f64> = std::fs::metadata(filepath)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs_f64());
+            mine_write_chunks(
+                connection,
+                &chunks,
+                wing,
+                &room,
+                &source_file,
+                source_mtime,
+                opts,
+            )
+            .await?;
+        }
+
+        total_drawers += drawers_added;
+        *room_counts.entry(room.clone()).or_insert(0) += 1;
+        println!(
+            "  [{:4}/{}] {:50} +{drawers_added}",
+            i + 1,
+            files.len(),
+            filepath.file_name().unwrap_or_default().to_string_lossy(),
+        );
+    }
+
+    Ok((total_drawers, files_skipped, room_counts))
+}
+
 /// Mine a project directory into the palace.
-pub async fn mine(conn: &Connection, project_dir: &Path, opts: &MineParams) -> Result<()> {
+pub async fn mine(connection: &Connection, project_dir: &Path, opts: &MineParams) -> Result<()> {
     assert!(
         project_dir.exists(),
         "project_dir must exist: {}",
@@ -309,45 +370,8 @@ pub async fn mine(conn: &Connection, project_dir: &Path, opts: &MineParams) -> R
 
     mine_print_header(wing, rooms, files.len(), opts.dry_run);
 
-    let mut total_drawers: usize = 0;
-    let mut files_skipped: usize = 0;
-    let mut room_counts: HashMap<String, usize> = HashMap::new();
-
-    for (i, filepath) in files.iter().enumerate() {
-        let source_file = filepath.to_string_lossy().to_string();
-
-        if !opts.dry_run && drawer::file_already_mined(conn, &source_file).await? {
-            files_skipped += 1;
-            continue;
-        }
-
-        let Some(content) = mine_read_file(filepath) else {
-            continue;
-        };
-
-        let room = detect_room(filepath, &content, rooms, &project_dir);
-        let chunks = chunk_text(&content);
-        let drawers_added = chunks.len();
-
-        if !opts.dry_run {
-            // Capture mtime now so all chunks from the same file share the same timestamp.
-            let source_mtime: Option<f64> = std::fs::metadata(filepath)
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs_f64());
-            mine_write_chunks(conn, &chunks, wing, &room, &source_file, source_mtime, opts).await?;
-        }
-
-        total_drawers += drawers_added;
-        *room_counts.entry(room.clone()).or_insert(0) += 1;
-        println!(
-            "  [{:4}/{}] {:50} +{drawers_added}",
-            i + 1,
-            files.len(),
-            filepath.file_name().unwrap_or_default().to_string_lossy(),
-        );
-    }
+    let (total_drawers, files_skipped, room_counts) =
+        mine_process_files(connection, &files, wing, rooms, &project_dir, opts).await?;
 
     mine_print_summary(
         opts.dry_run,

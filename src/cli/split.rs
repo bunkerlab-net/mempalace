@@ -197,19 +197,19 @@ fn split_file(
 // Regex literals are compile-time constants that can never fail to compile.
 #[allow(clippy::expect_used)]
 pub fn run(
-    dir: &Path,
+    directory: &Path,
     output_dir: Option<&Path>,
     dry_run: bool,
     min_sessions: usize,
 ) -> Result<()> {
     assert!(
-        dir.is_dir(),
-        "split::run: dir must be an existing directory"
+        directory.is_dir(),
+        "split::run: directory must be an existing directory"
     );
     assert!(min_sessions >= 2, "split::run: min_sessions must be >= 2");
     let mut mega_files: Vec<(PathBuf, usize)> = Vec::new();
 
-    for entry in fs::read_dir(dir)? {
+    for entry in fs::read_dir(directory)? {
         let entry = entry?;
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("txt") {
@@ -231,7 +231,7 @@ pub fn run(
     if mega_files.is_empty() {
         println!(
             "No mega-files found in {} (min {min_sessions} sessions).",
-            dir.display()
+            directory.display()
         );
         return Ok(());
     }
@@ -247,7 +247,7 @@ pub fn run(
     let mut total_written = 0usize;
 
     for (path, _n_sessions) in &mega_files {
-        let out_dir = output_dir.unwrap_or_else(|| path.parent().unwrap_or(dir));
+        let out_dir = output_dir.unwrap_or_else(|| path.parent().unwrap_or(directory));
         total_written += split_file(path, out_dir, dry_run, &sanitize_re, &multi_underscore)?;
     }
 

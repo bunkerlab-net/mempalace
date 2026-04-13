@@ -76,18 +76,18 @@ CREATE TABLE IF NOT EXISTS compressed (
 /// added after initial release).  Each migration is expected to be idempotent —
 /// `SQLite` returns an error when a column already exists, which we deliberately
 /// ignore.
-pub async fn ensure_schema(conn: &Connection) -> Result<()> {
-    conn.execute_batch(SCHEMA).await?;
+pub async fn ensure_schema(connection: &Connection) -> Result<()> {
+    connection.execute_batch(SCHEMA).await?;
 
     // Migration: add source_mtime column (introduced to support re-mining
     // modified files).  Silently ignored for databases that already have it.
-    let _ = conn
+    let _ = connection
         .execute("ALTER TABLE drawers ADD COLUMN source_mtime REAL", ())
         .await;
 
     // Pair assertion: verify all five core tables were created.
     let rows = crate::db::query_all(
-        conn,
+        connection,
         "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
         (),
     )

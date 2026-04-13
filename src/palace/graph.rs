@@ -64,10 +64,10 @@ pub struct GraphStats {
 /// Build the palace graph from drawer metadata.
 /// Returns (nodes, edges) where nodes are rooms and edges are tunnels.
 pub async fn build_graph(
-    conn: &Connection,
+    connection: &Connection,
 ) -> Result<(HashMap<String, RoomNode>, Vec<TunnelEdge>)> {
     let rows = query_all(
-        conn,
+        connection,
         "SELECT room, wing, COUNT(*) as cnt FROM drawers WHERE room != 'general' AND room != '' GROUP BY room, wing",
         (),
     )
@@ -123,14 +123,14 @@ pub async fn build_graph(
 
 /// BFS traversal from a starting room. Find connected rooms through shared wings.
 pub async fn traverse(
-    conn: &Connection,
+    connection: &Connection,
     start_room: &str,
     max_hops: usize,
 ) -> Result<Vec<TraversalResult>> {
     assert!(max_hops > 0, "max_hops must be positive");
     assert!(!start_room.is_empty(), "start_room must not be empty");
 
-    let (nodes, _) = build_graph(conn).await?;
+    let (nodes, _) = build_graph(connection).await?;
 
     let start = match nodes.get(start_room) {
         Some(node) => node.clone(),
@@ -202,11 +202,11 @@ pub async fn traverse(
 
 /// Find rooms that connect two wings (tunnels).
 pub async fn find_tunnels(
-    conn: &Connection,
+    connection: &Connection,
     wing_a: Option<&str>,
     wing_b: Option<&str>,
 ) -> Result<Vec<RoomNode>> {
-    let (nodes, _) = build_graph(conn).await?;
+    let (nodes, _) = build_graph(connection).await?;
 
     let mut tunnels: Vec<RoomNode> = nodes
         .into_values()
@@ -238,8 +238,8 @@ pub async fn find_tunnels(
 }
 
 /// Summary statistics about the palace graph.
-pub async fn graph_stats(conn: &Connection) -> Result<GraphStats> {
-    let (nodes, edges) = build_graph(conn).await?;
+pub async fn graph_stats(connection: &Connection) -> Result<GraphStats> {
+    let (nodes, edges) = build_graph(connection).await?;
 
     let tunnel_rooms = nodes.values().filter(|n| n.wings.len() >= 2).count();
 
@@ -273,7 +273,7 @@ pub async fn graph_stats(conn: &Connection) -> Result<GraphStats> {
 mod tests {
     use super::*;
 
-    async fn seed_graph(conn: &Connection) {
+    async fn seed_graph(connection: &Connection) {
         // Create drawers across wings and rooms to build a graph
         for (id, wing, room) in [
             ("g1", "proj_a", "backend"),
@@ -281,20 +281,21 @@ mod tests {
             ("g3", "proj_b", "backend"), // "backend" spans both wings — tunnel
             ("g4", "proj_b", "database"),
         ] {
-            conn.execute(
-                "INSERT INTO drawers (id, wing, room, content) VALUES (?1, ?2, ?3, 'content')",
-                turso::params![id, wing, room],
-            )
-            .await
-            .expect("seed drawer");
+            connection
+                .execute(
+                    "INSERT INTO drawers (id, wing, room, content) VALUES (?1, ?2, ?3, 'content')",
+                    turso::params![id, wing, room],
+                )
+                .await
+                .expect("seed drawer");
         }
     }
 
     #[tokio::test]
     async fn build_graph_creates_nodes_and_edges() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        seed_graph(&conn).await;
-        let (nodes, edges) = build_graph(&conn).await.expect("build_graph");
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        seed_graph(&connection).await;
+        let (nodes, edges) = build_graph(&connection).await.expect("build_graph");
         // "backend" spans 2 wings, "frontend" in 1, "database" in 1
         assert!(nodes.contains_key("backend"));
         assert!(nodes.contains_key("frontend"));
@@ -306,9 +307,11 @@ mod tests {
 
     #[tokio::test]
     async fn traverse_reaches_connected_rooms() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        seed_graph(&conn).await;
-        let results = traverse(&conn, "frontend", 2).await.expect("traverse");
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        seed_graph(&connection).await;
+        let results = traverse(&connection, "frontend", 2)
+            .await
+            .expect("traverse");
         // frontend (hop 0) → backend (hop 1, shared proj_a) → database (hop 2, shared proj_b)
         assert!(!results.is_empty());
         assert_eq!(results[0].room, "frontend");
@@ -334,9 +337,11 @@ mod tests {
 
     #[tokio::test]
     async fn find_tunnels_returns_multi_wing_rooms() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        seed_graph(&conn).await;
-        let tunnels = find_tunnels(&conn, None, None).await.expect("find_tunnels");
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        seed_graph(&connection).await;
+        let tunnels = find_tunnels(&connection, None, None)
+            .await
+            .expect("find_tunnels");
         assert_eq!(tunnels.len(), 1);
         assert_eq!(tunnels[0].room, "backend");
         assert_eq!(tunnels[0].wings.len(), 2);

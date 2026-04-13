@@ -3,9 +3,9 @@ use turso::Connection;
 use crate::db;
 use crate::error::Result;
 
-async fn run_print_wings(conn: &Connection) -> Result<()> {
+async fn run_print_wings(connection: &Connection) -> Result<()> {
     let rows = db::query_all(
-        conn,
+        connection,
         "SELECT wing, COUNT(*) as cnt FROM drawers GROUP BY wing ORDER BY cnt DESC",
         (),
     )
@@ -28,9 +28,9 @@ async fn run_print_wings(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-async fn run_print_rooms(conn: &Connection) -> Result<()> {
+async fn run_print_rooms(connection: &Connection) -> Result<()> {
     let rows = db::query_all(
-        conn,
+        connection,
         "SELECT wing, room, COUNT(*) as cnt FROM drawers GROUP BY wing, room ORDER BY wing, cnt DESC",
         (),
     )
@@ -64,15 +64,15 @@ async fn run_print_rooms(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-async fn run_print_kg(conn: &Connection) -> Result<()> {
-    let entity_rows = db::query_all(conn, "SELECT COUNT(*) FROM entities", ()).await?;
+async fn run_print_kg(connection: &Connection) -> Result<()> {
+    let entity_rows = db::query_all(connection, "SELECT COUNT(*) FROM entities", ()).await?;
     let entity_count: i64 = entity_rows
         .first()
         .and_then(|r| r.get_value(0).ok())
         .and_then(|v| v.as_integer().copied())
         .unwrap_or(0);
 
-    let triple_rows = db::query_all(conn, "SELECT COUNT(*) FROM triples", ()).await?;
+    let triple_rows = db::query_all(connection, "SELECT COUNT(*) FROM triples", ()).await?;
     let triple_count: i64 = triple_rows
         .first()
         .and_then(|r| r.get_value(0).ok())
@@ -87,8 +87,8 @@ async fn run_print_kg(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-pub async fn run(conn: &Connection) -> Result<()> {
-    let rows = db::query_all(conn, "SELECT COUNT(*) FROM drawers", ()).await?;
+pub async fn run(connection: &Connection) -> Result<()> {
+    let rows = db::query_all(connection, "SELECT COUNT(*) FROM drawers", ()).await?;
     let total: i64 = rows
         .first()
         .and_then(|r| r.get_value(0).ok())
@@ -105,9 +105,9 @@ pub async fn run(conn: &Connection) -> Result<()> {
     println!("=== MemPalace Status ===\n");
     println!("Total drawers: {total}\n");
 
-    run_print_wings(conn).await?;
-    run_print_rooms(conn).await?;
-    run_print_kg(conn).await?;
+    run_print_wings(connection).await?;
+    run_print_rooms(connection).await?;
+    run_print_kg(connection).await?;
 
     Ok(())
 }

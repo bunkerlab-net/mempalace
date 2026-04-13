@@ -34,7 +34,7 @@ pub fn layer0() -> String {
 }
 
 /// Layer 1: Essential story — top drawers grouped by room.
-pub async fn layer1(conn: &Connection, wing: Option<&str>) -> Result<String> {
+pub async fn layer1(connection: &Connection, wing: Option<&str>) -> Result<String> {
     let sql = if let Some(w) = wing {
         format!(
             "SELECT content, wing, room, source_file FROM drawers WHERE wing = '{}' LIMIT 1000",
@@ -44,7 +44,7 @@ pub async fn layer1(conn: &Connection, wing: Option<&str>) -> Result<String> {
         "SELECT content, wing, room, source_file FROM drawers LIMIT 1000".to_string()
     };
 
-    let rows = db::query_all(conn, &sql, ()).await?;
+    let rows = db::query_all(connection, &sql, ()).await?;
 
     if rows.is_empty() {
         return Ok("## L1 — No memories yet.".to_string());
@@ -126,9 +126,9 @@ fn layer1_build_room_map(rows: &[turso::Row]) -> HashMap<String, Vec<(String, St
 }
 
 /// Generate full wake-up text (L0 + L1).
-pub async fn wake_up(conn: &Connection, wing: Option<&str>) -> Result<String> {
+pub async fn wake_up(connection: &Connection, wing: Option<&str>) -> Result<String> {
     let l0 = layer0();
-    let l1 = layer1(conn, wing).await?;
+    let l1 = layer1(connection, wing).await?;
     let text = format!("{l0}\n\n{l1}");
     let tokens = text.len() / 4;
     Ok(format!("{text}\n\n(~{tokens} tokens)"))

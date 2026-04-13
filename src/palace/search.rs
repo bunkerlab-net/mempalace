@@ -22,7 +22,7 @@ pub struct SearchResult {
 
 /// Search the palace using the inverted index (keyword matching with relevance scoring).
 pub async fn search_memories(
-    conn: &Connection,
+    connection: &Connection,
     query: &str,
     wing: Option<&str>,
     room: Option<&str>,
@@ -76,7 +76,7 @@ pub async fn search_memories(
     let n_results_i32 = i32::try_from(n_results).unwrap_or(i32::MAX);
     params.push(turso::Value::from(n_results_i32));
 
-    let rows = db::query_all(conn, &sql, turso::params_from_iter(params)).await?;
+    let rows = db::query_all(connection, &sql, turso::params_from_iter(params)).await?;
     let results = search_memories_parse_rows(&rows);
 
     // Postcondition: result count bounded by the SQL LIMIT.
@@ -187,10 +187,10 @@ mod tests {
 mod async_tests {
     use super::*;
 
-    async fn seed_drawers(conn: &Connection) {
+    async fn seed_drawers(connection: &Connection) {
         // Insert two drawers with indexed words
         crate::palace::drawer::add_drawer(
-            conn,
+            connection,
             &crate::palace::drawer::DrawerParams {
                 id: "s1",
                 wing: "project_a",
@@ -207,7 +207,7 @@ mod async_tests {
         .expect("add_drawer should succeed when seeding test drawer s1 (rust/project_a)");
 
         crate::palace::drawer::add_drawer(
-            conn,
+            connection,
             &crate::palace::drawer::DrawerParams {
                 id: "s2",
                 wing: "project_b",
@@ -226,9 +226,9 @@ mod async_tests {
 
     #[tokio::test]
     async fn search_single_word() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        seed_drawers(&conn).await;
-        let results = search_memories(&conn, "rust", None, None, 10)
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        seed_drawers(&connection).await;
+        let results = search_memories(&connection, "rust", None, None, 10)
             .await
             .expect("search_memories should not error when searching for 'rust'");
         assert_eq!(results.len(), 1);
@@ -239,10 +239,10 @@ mod async_tests {
 
     #[tokio::test]
     async fn search_multi_word_relevance() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        seed_drawers(&conn).await;
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        seed_drawers(&connection).await;
         // "programming" appears in both, but searching "rust programming" should rank s1 higher
-        let results = search_memories(&conn, "rust programming", None, None, 10)
+        let results = search_memories(&connection, "rust programming", None, None, 10)
             .await
             .expect("search_memories should not error when searching for 'rust programming'");
         assert!(!results.is_empty());
@@ -253,9 +253,9 @@ mod async_tests {
 
     #[tokio::test]
     async fn search_with_wing_filter() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        seed_drawers(&conn).await;
-        let results = search_memories(&conn, "programming", Some("project_b"), None, 10)
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        seed_drawers(&connection).await;
+        let results = search_memories(&connection, "programming", Some("project_b"), None, 10)
             .await
             .expect("search_memories should not error when filtering by wing 'project_b'");
         assert_eq!(results.len(), 1);
@@ -266,9 +266,9 @@ mod async_tests {
 
     #[tokio::test]
     async fn search_with_room_filter() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        seed_drawers(&conn).await;
-        let results = search_memories(&conn, "programming", None, Some("backend"), 10)
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        seed_drawers(&connection).await;
+        let results = search_memories(&connection, "programming", None, Some("backend"), 10)
             .await
             .expect("search_memories should not error when filtering by room 'backend'");
         assert_eq!(results.len(), 1);
@@ -280,9 +280,9 @@ mod async_tests {
 
     #[tokio::test]
     async fn search_no_results() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        seed_drawers(&conn).await;
-        let results = search_memories(&conn, "elephant", None, None, 10)
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        seed_drawers(&connection).await;
+        let results = search_memories(&connection, "elephant", None, None, 10)
             .await
             .expect("search_memories should not error when query matches no drawers");
         assert!(results.is_empty());

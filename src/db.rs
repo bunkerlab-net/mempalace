@@ -21,41 +21,41 @@ pub async fn open_db(path: &str) -> Result<(Database, Connection)> {
         .experimental_triggers(true)
         .build()
         .await?;
-    let conn = db.connect()?;
+    let connection = db.connect()?;
 
     // Only enable WAL for file-backed databases; in-memory DBs do not support it.
     let is_in_memory = path == ":memory:"
         || path.starts_with("file::memory:")
         || (path.starts_with("file:") && path.contains("mode=memory"));
     if !is_in_memory {
-        let mut wal_rows = conn.query("PRAGMA journal_mode=WAL", ()).await?;
+        let mut wal_rows = connection.query("PRAGMA journal_mode=WAL", ()).await?;
         // Upper bound: PRAGMA journal_mode returns exactly one row; drain it.
         while wal_rows.next().await?.is_some() {}
     }
 
     // Allow waiting up to 5 seconds for write locks when another process is
     // writing, instead of failing immediately.
-    conn.busy_timeout(Duration::from_secs(5))?;
+    connection.busy_timeout(Duration::from_secs(5))?;
 
     // Postcondition: verify the connection is usable.
-    let mut check = conn.query("SELECT 1", ()).await?;
+    let mut check = connection.query("SELECT 1", ()).await?;
     assert!(
         check.next().await?.is_some(),
         "connection must be usable after open"
     );
 
-    Ok((db, conn))
+    Ok((db, connection))
 }
 
 /// Collect all rows from a query into a Vec.
 pub async fn query_all(
-    conn: &Connection,
+    connection: &Connection,
     sql: &str,
     params: impl turso::IntoParams,
 ) -> Result<Vec<turso::Row>> {
     assert!(!sql.is_empty(), "SQL query must not be empty");
 
-    let mut rows = conn.query(sql, params).await?;
+    let mut rows = connection.query(sql, params).await?;
     let mut results = Vec::new();
     while let Some(row) = rows.next().await? {
         results.push(row);

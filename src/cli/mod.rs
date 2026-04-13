@@ -28,7 +28,7 @@ pub enum Command {
     /// Initialize a new palace from a project directory
     Init {
         /// Path to project directory
-        dir: PathBuf,
+        directory: PathBuf,
 
         /// Auto-accept detected rooms without prompting (non-interactive / CI mode)
         #[arg(long, short = 'y')]
@@ -38,7 +38,7 @@ pub enum Command {
     /// Mine files into the palace
     Mine {
         /// Path to project directory
-        dir: PathBuf,
+        directory: PathBuf,
 
         /// Mining mode: projects or convos
         #[arg(long, default_value = "projects")]
@@ -112,7 +112,7 @@ pub enum Command {
     /// Split concatenated mega-files into per-session files
     Split {
         /// Path to directory containing files to split
-        dir: PathBuf,
+        directory: PathBuf,
 
         /// Output directory
         #[arg(long)]

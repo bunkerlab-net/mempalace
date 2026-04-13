@@ -84,13 +84,13 @@ fn expand_tilde(path: &std::path::Path) -> std::path::PathBuf {
     }
 }
 
-/// Open the palace DB, ensuring schema exists. Returns `(db, conn, path)`.
+/// Open the palace DB, ensuring schema exists. Returns `(db, connection, path)`.
 async fn open_palace() -> error::Result<(turso::Database, turso::Connection, std::path::PathBuf)> {
-    let cfg = MempalaceConfig::init()?;
-    let db_path = cfg.palace_db_path();
-    let (db, conn) = db::open_db(db_path.to_str().unwrap_or(":memory:")).await?;
-    schema::ensure_schema(&conn).await?;
-    Ok((db, conn, db_path))
+    let config = MempalaceConfig::init()?;
+    let db_path = config.palace_db_path();
+    let (db, connection) = db::open_db(db_path.to_str().unwrap_or(":memory:")).await?;
+    schema::ensure_schema(&connection).await?;
+    Ok((db, connection, db_path))
 }
 
 // Each match arm is a single CLI subcommand — splitting this into separate
@@ -102,12 +102,12 @@ async fn run(cli: Cli) -> error::Result<()> {
             run_status().await?;
         }
 
-        Command::Init { dir, yes } => {
-            cli::init::run(&dir, yes)?;
+        Command::Init { directory, yes } => {
+            cli::init::run(&directory, yes)?;
         }
 
         Command::Mine {
-            dir,
+            directory,
             mode,
             extract_mode,
             wing,
@@ -117,7 +117,7 @@ async fn run(cli: Cli) -> error::Result<()> {
             no_gitignore,
         } => {
             run_mine(
-                dir,
+                directory,
                 mode,
                 extract_mode,
                 wing,
@@ -135,13 +135,20 @@ async fn run(cli: Cli) -> error::Result<()> {
             room,
             results,
         } => {
-            let (_db, conn, _path) = open_palace().await?;
-            cli::search::run(&conn, &query, wing.as_deref(), room.as_deref(), results).await?;
+            let (_db, connection, _path) = open_palace().await?;
+            cli::search::run(
+                &connection,
+                &query,
+                wing.as_deref(),
+                room.as_deref(),
+                results,
+            )
+            .await?;
         }
 
         Command::WakeUp { wing } => {
-            let (_db, conn, _path) = open_palace().await?;
-            cli::wakeup::run(&conn, wing.as_deref()).await?;
+            let (_db, connection, _path) = open_palace().await?;
+            cli::wakeup::run(&connection, wing.as_deref()).await?;
         }
 
         Command::Compress {
@@ -153,25 +160,25 @@ async fn run(cli: Cli) -> error::Result<()> {
         }
 
         Command::Split {
-            dir,
+            directory,
             output_dir,
             dry_run,
             min_sessions,
         } => {
             // Expand ~ so that `mempalace split ~/convos` works as expected.
-            let dir = expand_tilde(&dir);
+            let directory = expand_tilde(&directory);
             let output_dir = output_dir.as_deref().map(expand_tilde);
-            cli::split::run(&dir, output_dir.as_deref(), dry_run, min_sessions)?;
+            cli::split::run(&directory, output_dir.as_deref(), dry_run, min_sessions)?;
         }
 
         Command::Repair => {
-            let (_db, conn, palace_path) = open_palace().await?;
-            cli::repair::run(&conn, &palace_path).await?;
+            let (_db, connection, palace_path) = open_palace().await?;
+            cli::repair::run(&connection, &palace_path).await?;
         }
 
         Command::Mcp => {
-            let (_db, conn, _path) = open_palace().await?;
-            mcp::run(&conn).await?;
+            let (_db, connection, _path) = open_palace().await?;
+            mcp::run(&connection).await?;
         }
     }
 
@@ -180,8 +187,8 @@ async fn run(cli: Cli) -> error::Result<()> {
 
 /// Handle the `status` sub-command — opens the palace read-only if it exists.
 async fn run_status() -> error::Result<()> {
-    let cfg = MempalaceConfig::load()?;
-    let db_path = cfg.palace_db_path();
+    let config = MempalaceConfig::load()?;
+    let db_path = config.palace_db_path();
 
     if !db_path.exists() {
         println!("No palace found at {}", db_path.display());
@@ -189,8 +196,8 @@ async fn run_status() -> error::Result<()> {
         return Ok(());
     }
 
-    let (_db, conn) = db::open_db(db_path.to_str().unwrap_or(":memory:")).await?;
-    cli::status::run(&conn).await
+    let (_db, connection) = db::open_db(db_path.to_str().unwrap_or(":memory:")).await?;
+    cli::status::run(&connection).await
 }
 
 /// Handle the `compress` sub-command — compresses drawers into AAAK dialect format.
@@ -199,9 +206,9 @@ async fn run_compress(
     dry_run: bool,
     config: Option<std::path::PathBuf>,
 ) -> error::Result<()> {
-    let (_db, conn, _path) = open_palace().await?;
+    let (_db, connection, _path) = open_palace().await?;
     cli::compress::run(
-        &conn,
+        &connection,
         wing.as_deref(),
         dry_run,
         config.as_ref().and_then(|p| p.to_str()),
@@ -213,7 +220,7 @@ async fn run_compress(
 // Arguments mirror the CLI fields 1:1 — no meaningful grouping exists.
 #[allow(clippy::too_many_arguments)]
 async fn run_mine(
-    dir: std::path::PathBuf,
+    directory: std::path::PathBuf,
     mode: String,
     extract_mode: String,
     wing: Option<String>,
@@ -231,12 +238,12 @@ async fn run_mine(
     };
     match mode.as_str() {
         "projects" => {
-            let (_db, conn, _path) = open_palace().await?;
-            palace::miner::mine(&conn, &dir, &opts).await?;
+            let (_db, connection, _path) = open_palace().await?;
+            palace::miner::mine(&connection, &directory, &opts).await?;
         }
         "convos" => {
-            let (_db, conn, _path) = open_palace().await?;
-            palace::convo_miner::mine_convos(&conn, &dir, &extract_mode, &opts).await?;
+            let (_db, connection, _path) = open_palace().await?;
+            palace::convo_miner::mine_convos(&connection, &directory, &extract_mode, &opts).await?;
         }
         other => {
             eprintln!("unknown mine mode: {other} (expected 'projects' or 'convos')");
