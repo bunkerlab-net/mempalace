@@ -124,12 +124,19 @@ pub async fn build_graph(
     Ok((nodes, edges))
 }
 
+/// Maximum results returned by `traverse` and `find_tunnels` to keep MCP
+/// responses within a reasonable token budget.
+const GRAPH_RESULT_CAP: usize = 50;
+
 /// BFS traversal from a starting room. Find connected rooms through shared wings.
+///
+/// Returns `(results, truncated)` where `truncated` is `true` when the full
+/// result set exceeded `GRAPH_RESULT_CAP` and was capped.
 pub async fn traverse(
     connection: &Connection,
     start_room: &str,
     max_hops: usize,
-) -> Result<Vec<TraversalResult>> {
+) -> Result<(Vec<TraversalResult>, bool)> {
     assert!(max_hops > 0, "max_hops must be positive");
     assert!(!start_room.is_empty(), "start_room must not be empty");
 
@@ -137,7 +144,7 @@ pub async fn traverse(
 
     let start = match nodes.get(start_room) {
         Some(node) => node.clone(),
-        None => return Ok(Vec::new()),
+        None => return Ok((Vec::new(), false)),
     };
 
     let mut visited = HashSet::new();
@@ -197,22 +204,24 @@ pub async fn traverse(
     // Sort by hop first so callers see the closest rooms first; break ties by
     // drawer count so the most active rooms surface before sparse ones.
     results.sort_by(|a, b| a.hop.cmp(&b.hop).then_with(|| b.count.cmp(&a.count)));
-    // Cap at 50 to keep MCP responses within a reasonable token budget.
-    // A graph with hundreds of reachable rooms is not useful to an AI caller.
-    results.truncate(50);
+    let truncated = results.len() > GRAPH_RESULT_CAP;
+    results.truncate(GRAPH_RESULT_CAP);
 
     // Postcondition: result count bounded by hard limit.
-    debug_assert!(results.len() <= 50);
+    debug_assert!(results.len() <= GRAPH_RESULT_CAP);
 
-    Ok(results)
+    Ok((results, truncated))
 }
 
 /// Find rooms that connect two wings (tunnels).
+///
+/// Returns `(tunnels, truncated)` where `truncated` is `true` when the full
+/// result set exceeded `GRAPH_RESULT_CAP` and was capped.
 pub async fn find_tunnels(
     connection: &Connection,
     wing_a: Option<&str>,
     wing_b: Option<&str>,
-) -> Result<Vec<RoomNode>> {
+) -> Result<(Vec<RoomNode>, bool)> {
     let (nodes, _) = build_graph(connection).await?;
 
     let mut tunnels: Vec<RoomNode> = nodes
@@ -237,13 +246,13 @@ pub async fn find_tunnels(
 
     // Surface the busiest shared rooms first — they are the most useful bridges.
     tunnels.sort_by(|a, b| b.count.cmp(&a.count));
-    // Cap at 50 for the same token-budget reason as `traverse`.
-    tunnels.truncate(50);
+    let truncated = tunnels.len() > GRAPH_RESULT_CAP;
+    tunnels.truncate(GRAPH_RESULT_CAP);
 
     // Postcondition: all returned nodes span at least 2 wings.
     debug_assert!(tunnels.iter().all(|t| t.wings.len() >= 2));
 
-    Ok(tunnels)
+    Ok((tunnels, truncated))
 }
 
 /// Summary statistics about the palace graph.
@@ -318,9 +327,10 @@ mod tests {
     async fn traverse_reaches_connected_rooms() {
         let (_db, connection) = crate::test_helpers::test_db().await;
         seed_graph(&connection).await;
-        let results = traverse(&connection, "frontend", 2)
+        let (results, truncated) = traverse(&connection, "frontend", 2)
             .await
             .expect("traverse");
+        assert!(!truncated);
         // frontend (hop 0) → backend (hop 1, shared proj_a) → database (hop 2, shared proj_b)
         assert!(!results.is_empty());
         assert_eq!(results[0].room, "frontend");
@@ -348,9 +358,10 @@ mod tests {
     async fn find_tunnels_returns_multi_wing_rooms() {
         let (_db, connection) = crate::test_helpers::test_db().await;
         seed_graph(&connection).await;
-        let tunnels = find_tunnels(&connection, None, None)
+        let (tunnels, truncated) = find_tunnels(&connection, None, None)
             .await
             .expect("find_tunnels");
+        assert!(!truncated);
         assert_eq!(tunnels.len(), 1);
         assert_eq!(tunnels[0].room, "backend");
         assert_eq!(tunnels[0].wings.len(), 2);

@@ -1059,7 +1059,7 @@ async fn tool_traverse(connection: &Connection, args: &Value) -> Value {
     let max_hops = usize::try_from(int_arg(args, "max_hops", 2).clamp(1, 10)).unwrap_or(2);
 
     match graph::traverse(connection, &start_room, max_hops).await {
-        Ok(results) => json!(results),
+        Ok((results, truncated)) => json!({"results": results, "truncated": truncated}),
         Err(e) => json!({"error": e.to_string()}),
     }
 }
@@ -1075,7 +1075,7 @@ async fn tool_find_tunnels(connection: &Connection, args: &Value) -> Value {
     };
 
     match graph::find_tunnels(connection, wing_a.as_deref(), wing_b.as_deref()).await {
-        Ok(tunnels) => json!(tunnels),
+        Ok((tunnels, truncated)) => json!({"tunnels": tunnels, "truncated": truncated}),
         Err(e) => json!({"error": e.to_string()}),
     }
 }
