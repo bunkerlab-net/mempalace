@@ -445,6 +445,24 @@ mod tests {
             .as_array()
             .expect("tools should be an array");
         assert!(!tools.is_empty(), "tools list must not be empty");
+        // Every entry must be an object with the required MCP tool keys.
+        for tool in tools {
+            assert!(tool.is_object(), "each tool must be a JSON object");
+            assert!(tool.get("name").is_some(), "each tool must have a 'name'");
+            assert!(
+                tool.get("description").is_some(),
+                "each tool must have a 'description'"
+            );
+            assert!(
+                tool.get("inputSchema").is_some(),
+                "each tool must have an 'inputSchema'"
+            );
+        }
+        // At least one well-known tool must be present.
+        assert!(
+            tools.iter().any(|t| t["name"] == "mempalace_status"),
+            "tools list must include 'mempalace_status'"
+        );
     }
 
     #[tokio::test]
