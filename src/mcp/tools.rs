@@ -518,7 +518,7 @@ async fn tool_add_drawer(connection: &Connection, args: &Value) -> Value {
     tool_add_drawer_insert(connection, id, wing, room, content, source_file, added_by).await
 }
 
-/// Log the WAL event and write the drawer row. Returns the MCP response JSON.
+/// Write the drawer row and log the WAL event on confirmed insert. Returns the MCP response JSON.
 async fn tool_add_drawer_insert(
     connection: &Connection,
     id: String,
@@ -528,19 +528,6 @@ async fn tool_add_drawer_insert(
     source_file: &str,
     added_by: &str,
 ) -> Value {
-    wal_log(
-        "add_drawer",
-        json!({
-            "drawer_id": id,
-            "wing": wing,
-            "room": room,
-            "added_by": added_by,
-            "content_length": content.len(),
-            "content_preview": format!("[REDACTED {} chars]", content.chars().count()),
-        }),
-    )
-    .await;
-
     let params = drawer::DrawerParams {
         id: &id,
         wing: &wing,
@@ -559,8 +546,23 @@ async fn tool_add_drawer_insert(
 
     // Branch on add_drawer's bool rather than doing a separate SELECT first.
     // The INSERT OR IGNORE inside add_drawer is atomic, so this is race-free.
+    // WAL is only written on confirmed insert to avoid logging deduped/failed attempts.
     match drawer::add_drawer(connection, &params).await {
-        Ok(true) => json!({"success": true, "drawer_id": id, "wing": wing, "room": room}),
+        Ok(true) => {
+            wal_log(
+                "add_drawer",
+                json!({
+                    "drawer_id": id,
+                    "wing": wing,
+                    "room": room,
+                    "added_by": added_by,
+                    "content_length": content.len(),
+                    "content_preview": format!("[REDACTED {} chars]", content.chars().count()),
+                }),
+            )
+            .await;
+            json!({"success": true, "drawer_id": id, "wing": wing, "room": room})
+        }
         Ok(false) => json!({
             "success": true,
             "reason": "already_exists",
@@ -836,7 +838,13 @@ async fn tool_update_drawer(connection: &Connection, args: &Value) -> Value {
         }
     }
 
-    match connection
+    // Wrap the row update and index rebuild in a transaction so drawers and
+    // drawer_words cannot diverge if any step fails mid-flight.
+    if let Err(e) = connection.execute("BEGIN", ()).await {
+        return json!({"success": false, "error": e.to_string()});
+    }
+
+    if let Err(e) = connection
         .execute(
             "UPDATE drawers SET id = ?1, wing = ?2, room = ?3, content = ?4 WHERE id = ?5",
             turso::params![
@@ -849,40 +857,50 @@ async fn tool_update_drawer(connection: &Connection, args: &Value) -> Value {
         )
         .await
     {
-        Ok(_) => {
-            // Re-index words: always needed when the ID changes or content changes.
-            if let Err(e) = connection
-                .execute(
-                    "DELETE FROM drawer_words WHERE drawer_id = ?",
-                    [drawer_id.as_str()],
-                )
-                .await
-            {
-                return json!({"success": false, "error": e.to_string()});
-            }
-            if new_id != drawer_id {
-                // drawer_words rows for the old ID were deleted above; if the new
-                // ID already had entries (shouldn't happen — we checked above),
-                // clean those too.
-                let _ = connection
-                    .execute(
-                        "DELETE FROM drawer_words WHERE drawer_id = ?",
-                        [new_id.as_str()],
-                    )
-                    .await;
-            }
-            if let Err(e) = drawer::index_words(connection, &new_id, final_content).await {
-                return json!({"success": false, "error": e.to_string()});
-            }
-            json!({
-                "success": true,
-                "drawer_id": new_id,
-                "wing": final_wing,
-                "room": final_room,
-            })
-        }
-        Err(e) => json!({"success": false, "error": e.to_string()}),
+        let _ = connection.execute("ROLLBACK", ()).await;
+        return json!({"success": false, "error": e.to_string()});
     }
+
+    // Re-index words: always needed when the ID changes or content changes.
+    if let Err(e) = connection
+        .execute(
+            "DELETE FROM drawer_words WHERE drawer_id = ?",
+            [drawer_id.as_str()],
+        )
+        .await
+    {
+        let _ = connection.execute("ROLLBACK", ()).await;
+        return json!({"success": false, "error": e.to_string()});
+    }
+
+    if new_id != drawer_id {
+        // drawer_words rows for the old ID were deleted above; if the new
+        // ID already had entries (shouldn't happen — we checked above),
+        // clean those too.
+        let _ = connection
+            .execute(
+                "DELETE FROM drawer_words WHERE drawer_id = ?",
+                [new_id.as_str()],
+            )
+            .await;
+    }
+
+    if let Err(e) = drawer::index_words(connection, &new_id, final_content).await {
+        let _ = connection.execute("ROLLBACK", ()).await;
+        return json!({"success": false, "error": e.to_string()});
+    }
+
+    if let Err(e) = connection.execute("COMMIT", ()).await {
+        let _ = connection.execute("ROLLBACK", ()).await;
+        return json!({"success": false, "error": e.to_string()});
+    }
+
+    json!({
+        "success": true,
+        "drawer_id": new_id,
+        "wing": final_wing,
+        "room": final_room,
+    })
 }
 
 async fn tool_kg_query(connection: &Connection, args: &Value) -> Value {

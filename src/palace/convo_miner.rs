@@ -355,6 +355,7 @@ async fn mine_convos_write_chunks(
     wing: &str,
     room: &str,
     source_file: &str,
+    source_mtime: Option<f64>,
     opts: &MineParams,
 ) -> Result<()> {
     for chunk in chunks {
@@ -373,7 +374,7 @@ async fn mine_convos_write_chunks(
                 chunk_index: chunk.chunk_index,
                 added_by: &opts.agent,
                 ingest_mode: "convos",
-                source_mtime: None,
+                source_mtime,
             },
         )
         .await?;
@@ -407,7 +408,9 @@ pub async fn mine_convos(
         .replace([' ', '-'], "_");
     let wing = opts.wing.as_deref().unwrap_or(&dir_name);
 
-    let all_files = scan_convos(&directory);
+    let mut all_files = scan_convos(&directory);
+    // Sort for deterministic ordering before applying any limit.
+    all_files.sort_unstable();
     let files: Vec<_> = if opts.limit == 0 {
         all_files
     } else {
@@ -452,7 +455,22 @@ pub async fn mine_convos(
         let drawers_added = chunks.len();
 
         if !opts.dry_run {
-            mine_convos_write_chunks(connection, &chunks, wing, &room, &source_file, opts).await?;
+            // Capture mtime now so all chunks from the same file share the same timestamp.
+            let source_mtime: Option<f64> = std::fs::metadata(filepath)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs_f64());
+            mine_convos_write_chunks(
+                connection,
+                &chunks,
+                wing,
+                &room,
+                &source_file,
+                source_mtime,
+                opts,
+            )
+            .await?;
         }
 
         total_drawers += drawers_added;

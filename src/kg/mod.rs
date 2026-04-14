@@ -211,6 +211,41 @@ pub struct TripleParams<'a> {
     pub source_file: Option<&'a str>,
 }
 
+/// Validate confidence and ISO date fields on a `TripleParams`.
+/// Called by `add_triple` to keep that function within the 70-line limit.
+fn add_triple_validate_params(params: &TripleParams<'_>) -> Result<()> {
+    if params.confidence.is_nan() || params.confidence < 0.0 || params.confidence > 1.0 {
+        return Err(crate::error::Error::Other(format!(
+            "confidence must be between 0.0 and 1.0, got {}",
+            params.confidence
+        )));
+    }
+    let valid_from_date = params
+        .valid_from
+        .map(|v| {
+            chrono::NaiveDate::parse_from_str(v, "%Y-%m-%d")
+                .map_err(|_| crate::error::Error::Other(format!("invalid valid_from date: {v}")))
+        })
+        .transpose()?;
+    let valid_to_date = params
+        .valid_to
+        .map(|v| {
+            chrono::NaiveDate::parse_from_str(v, "%Y-%m-%d")
+                .map_err(|_| crate::error::Error::Other(format!("invalid valid_to date: {v}")))
+        })
+        .transpose()?;
+    if let (Some(from), Some(to)) = (valid_from_date, valid_to_date)
+        && from > to
+    {
+        return Err(crate::error::Error::Other(format!(
+            "valid_from ({}) must not be after valid_to ({})",
+            params.valid_from.unwrap_or(""),
+            params.valid_to.unwrap_or(""),
+        )));
+    }
+    Ok(())
+}
+
 /// Add a relationship triple. Auto-creates entities if they don't exist.
 /// Returns the triple ID.
 pub async fn add_triple(connection: &Connection, params: &TripleParams<'_>) -> Result<String> {
@@ -224,6 +259,8 @@ pub async fn add_triple(connection: &Connection, params: &TripleParams<'_>) -> R
         "triple predicate must not be empty"
     );
     assert!(!params.object.is_empty(), "triple object must not be empty");
+
+    add_triple_validate_params(params)?;
 
     let sub_id = entity_id(params.subject);
     let obj_id = entity_id(params.object);

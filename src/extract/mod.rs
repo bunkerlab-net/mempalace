@@ -28,12 +28,12 @@ pub fn extract_memories(text: &str, min_confidence: f64) -> Vec<Memory> {
     let segments = split_into_segments(text);
     let mut memories = Vec::new();
 
-    let all_markers: &[(&str, &[&str])] = &[
-        ("decision", DECISION_MARKERS),
-        ("preference", PREFERENCE_MARKERS),
-        ("milestone", MILESTONE_MARKERS),
-        ("problem", PROBLEM_MARKERS),
-        ("emotional", EMOTION_MARKERS),
+    let all_markers: &[(&str, &[Regex])] = &[
+        ("decision", DECISION_REGEXES.as_slice()),
+        ("preference", PREFERENCE_REGEXES.as_slice()),
+        ("milestone", MILESTONE_REGEXES.as_slice()),
+        ("problem", PROBLEM_REGEXES.as_slice()),
+        ("emotional", EMOTION_REGEXES.as_slice()),
     ];
 
     for para in &segments {
@@ -100,18 +100,16 @@ pub fn extract_memories(text: &str, min_confidence: f64) -> Vec<Memory> {
     memories
 }
 
-/// Score text against regex markers.
-fn score_markers(text: &str, markers: &[&str]) -> f64 {
+/// Score text against pre-compiled regex markers.
+fn score_markers(text: &str, markers: &[Regex]) -> f64 {
     let text_lower = text.to_lowercase();
     let mut score = 0.0;
-    for marker in markers {
-        if let Ok(re) = Regex::new(marker) {
-            let count = re.find_iter(&text_lower).count();
-            // Regex match count; always small enough for exact f64 representation
-            #[allow(clippy::cast_precision_loss)]
-            {
-                score += count as f64;
-            }
+    for re in markers {
+        let count = re.find_iter(&text_lower).count();
+        // Regex match count; always small enough for exact f64 representation
+        #[allow(clippy::cast_precision_loss)]
+        {
+            score += count as f64;
         }
     }
     // Postcondition: score must be non-negative.
@@ -175,6 +173,90 @@ static POSITIVE_SET: LazyLock<HashSet<&str>> =
 static NEGATIVE_SET: LazyLock<HashSet<&str>> =
     LazyLock::new(|| NEGATIVE_WORDS.iter().copied().collect());
 
+// Marker patterns compiled once; each static serves the corresponding score_markers() call.
+// filter_map silently drops any malformed literal — the patterns are all compile-time
+// constants so this path is unreachable in practice.
+static DECISION_REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    DECISION_MARKERS
+        .iter()
+        .filter_map(|p| Regex::new(p).ok())
+        .collect()
+});
+static PREFERENCE_REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    PREFERENCE_MARKERS
+        .iter()
+        .filter_map(|p| Regex::new(p).ok())
+        .collect()
+});
+static MILESTONE_REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    MILESTONE_MARKERS
+        .iter()
+        .filter_map(|p| Regex::new(p).ok())
+        .collect()
+});
+static PROBLEM_REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    PROBLEM_MARKERS
+        .iter()
+        .filter_map(|p| Regex::new(p).ok())
+        .collect()
+});
+static EMOTION_REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    EMOTION_MARKERS
+        .iter()
+        .filter_map(|p| Regex::new(p).ok())
+        .collect()
+});
+
+// Patterns compiled once; used by has_resolution().
+static RESOLUTION_REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    [
+        r"\bfixed\b",
+        r"\bsolved\b",
+        r"\bresolved\b",
+        r"\bpatched\b",
+        r"\bgot it working\b",
+        r"\bit works\b",
+        r"\bnailed it\b",
+        r"\bfigured (it )?out\b",
+        r"\bthe (fix|answer|solution)\b",
+    ]
+    .iter()
+    .filter_map(|p| Regex::new(p).ok())
+    .collect()
+});
+
+// Patterns compiled once; used by extract_prose().
+static PROSE_CODE_REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    [
+        r"^\s*[\$#]\s",
+        r"^\s*(cd|source|echo|export|pip|npm|git|python|bash|curl|wget|mkdir|rm|cp|mv|ls|cat|grep|find|chmod|sudo|brew|docker)\s",
+        r"^\s*```",
+        r"^\s*(import|from|def|class|function|const|let|var|return)\s",
+        r"^\s*[A-Z_]{2,}=",
+        r"^\s*\|",
+        r"^\s*[-]{2,}",
+        r"^\s*[\{\}\[\]]\s*$",
+        r"^\s*(if|for|while|try|except|elif|else:)\b",
+        r"^\s*\w+\.\w+\(",
+        r"^\s*\w+ = \w+\.\w+",
+    ]
+    .iter()
+    .filter_map(|p| Regex::new(p).ok())
+    .collect()
+});
+
+// Patterns compiled once; used by split_into_segments() and split_by_turns().
+static TURN_REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    [
+        r"^>\s",
+        r"(?i)^(Human|User|Q)\s*:",
+        r"(?i)^(Assistant|AI|A|Claude|ChatGPT)\s*:",
+    ]
+    .iter()
+    .filter_map(|p| Regex::new(p).ok())
+    .collect()
+});
+
 fn get_sentiment(text: &str) -> &'static str {
     let words: HashSet<String> = text
         .split(|c: char| !c.is_alphanumeric())
@@ -207,43 +289,11 @@ fn get_sentiment(text: &str) -> &'static str {
 
 fn has_resolution(text: &str) -> bool {
     let text_lower = text.to_lowercase();
-    let patterns = [
-        r"\bfixed\b",
-        r"\bsolved\b",
-        r"\bresolved\b",
-        r"\bpatched\b",
-        r"\bgot it working\b",
-        r"\bit works\b",
-        r"\bnailed it\b",
-        r"\bfigured (it )?out\b",
-        r"\bthe (fix|answer|solution)\b",
-    ];
-    patterns.iter().any(|p| {
-        Regex::new(p)
-            .map(|re| re.is_match(&text_lower))
-            .unwrap_or(false)
-    })
+    RESOLUTION_REGEXES.iter().any(|re| re.is_match(&text_lower))
 }
 
 /// Extract only prose lines (skip code blocks and code-like lines).
 fn extract_prose(text: &str) -> String {
-    let code_patterns: Vec<Regex> = [
-        r"^\s*[\$#]\s",
-        r"^\s*(cd|source|echo|export|pip|npm|git|python|bash|curl|wget|mkdir|rm|cp|mv|ls|cat|grep|find|chmod|sudo|brew|docker)\s",
-        r"^\s*```",
-        r"^\s*(import|from|def|class|function|const|let|var|return)\s",
-        r"^\s*[A-Z_]{2,}=",
-        r"^\s*\|",
-        r"^\s*[-]{2,}",
-        r"^\s*[\{\}\[\]]\s*$",
-        r"^\s*(if|for|while|try|except|elif|else:)\b",
-        r"^\s*\w+\.\w+\(",
-        r"^\s*\w+ = \w+\.\w+",
-    ]
-    .iter()
-    .filter_map(|p| Regex::new(p).ok())
-    .collect();
-
     let mut prose = Vec::new();
     let mut in_code = false;
 
@@ -256,7 +306,7 @@ fn extract_prose(text: &str) -> String {
         if in_code {
             continue;
         }
-        if !stripped.is_empty() && !code_patterns.iter().any(|re| re.is_match(stripped)) {
+        if !stripped.is_empty() && !PROSE_CODE_REGEXES.iter().any(|re| re.is_match(stripped)) {
             prose.push(line);
         }
     }
@@ -273,26 +323,17 @@ fn extract_prose(text: &str) -> String {
 fn split_into_segments(text: &str) -> Vec<String> {
     let lines: Vec<&str> = text.lines().collect();
 
-    let turn_patterns: Vec<Regex> = [
-        r"^>\s",
-        r"(?i)^(Human|User|Q)\s*:",
-        r"(?i)^(Assistant|AI|A|Claude|ChatGPT)\s*:",
-    ]
-    .iter()
-    .filter_map(|p| Regex::new(p).ok())
-    .collect();
-
     let turn_count = lines
         .iter()
         .filter(|line| {
             let stripped = line.trim();
-            turn_patterns.iter().any(|re| re.is_match(stripped))
+            TURN_REGEXES.iter().any(|re| re.is_match(stripped))
         })
         .count();
 
     // If enough turn markers, split by turns
     if turn_count >= 3 {
-        return split_by_turns(&lines, &turn_patterns);
+        return split_by_turns(&lines, TURN_REGEXES.as_slice());
     }
 
     // Fallback: paragraph splitting

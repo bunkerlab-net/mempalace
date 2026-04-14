@@ -129,12 +129,25 @@ fn extract_subject(lines: &[&str]) -> String {
 }
 
 /// Process a single mega-file: split it into per-session files and return the number written.
+// Sequential write loop with per-boundary state: file I/O, timestamp extraction, subject
+// extraction, dry-run branching, and backup rename — each step distinct but not extractable
+// without splitting across unrelated concerns.
+#[allow(clippy::too_many_lines)]
 fn split_file(path: &Path, output_dir: &Path, dry_run: bool) -> Result<usize> {
-    assert!(path.is_file(), "split_file: path must be an existing file");
-    assert!(
-        output_dir.is_dir(),
-        "split_file: output_dir must be an existing directory"
-    );
+    // These are operating conditions (filesystem state can change between scan and
+    // call), not programmer invariants — return Err rather than panic.
+    if !path.is_file() {
+        return Err(crate::error::Error::Other(format!(
+            "split_file: '{}' is not an existing file",
+            path.display()
+        )));
+    }
+    if !output_dir.is_dir() {
+        return Err(crate::error::Error::Other(format!(
+            "split_file: '{}' is not an existing directory",
+            output_dir.display()
+        )));
+    }
     if fs::metadata(path).is_ok_and(|m| m.len() > MAX_SPLIT_FILE_SIZE) {
         println!("  SKIP: {} exceeds 500 MB limit", path.display());
         return Ok(0);
