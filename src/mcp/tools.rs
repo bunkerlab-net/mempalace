@@ -18,6 +18,11 @@ use super::protocol::{AAAK_SPEC, PALACE_PROTOCOL};
 /// Values above this lose precision when stored in f64, so we reject them.
 const MAX_EXACT_INT_F64: f64 = 9_007_199_254_740_991.0;
 
+/// Maximum byte length for a tunnel label.  Labels are free-form strings stored
+/// in `SQLite`; without a cap an unbounded value could waste DB space or overflow
+/// index rows.  255 characters is generous for a short descriptive label.
+const MAX_LABEL_LEN: usize = 255;
+
 /// Dispatch a tool call by name and return the JSON result.
 pub async fn dispatch(connection: &Connection, name: &str, args: &Value) -> Value {
     // Empty name and non-object args can arrive from untrusted MCP clients;
@@ -1135,7 +1140,13 @@ async fn tool_create_tunnel(connection: &Connection, args: &Value) -> Value {
         Ok(v) => v,
         Err(e) => return e,
     };
-    let label = str_arg(args, "label");
+    let label = {
+        let v = str_arg(args, "label");
+        if v.len() > MAX_LABEL_LEN {
+            return json!({"success": false, "error": format!("label exceeds maximum length of {MAX_LABEL_LEN} characters"), "public": true});
+        }
+        v
+    };
     let source_drawer_id = {
         let v = str_arg(args, "source_drawer_id");
         if v.is_empty() { None } else { Some(v) }

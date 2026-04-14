@@ -15,7 +15,9 @@ use super::messages_to_transcript;
 /// export uses `"sender"` while the API format uses `"role"`).  A top-level
 /// `"text"` key is used as fallback when `"content"` is absent or empty.
 ///
-/// Returns `None` if fewer than 2 messages are found across all conversations.
+/// Returns `None` if no conversation yields at least 2 messages (the threshold
+/// is per conversation — a conversation with fewer than 2 messages is silently
+/// dropped; if all conversations are dropped the result is `None`).
 pub fn try_parse(data: &serde_json::Value) -> Option<String> {
     if let Some(arr) = data.as_array() {
         // Privacy export: array of conversation objects, each with a chat_messages

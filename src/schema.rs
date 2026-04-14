@@ -105,28 +105,6 @@ pub async fn ensure_schema(connection: &Connection) -> Result<()> {
         .execute("ALTER TABLE drawers ADD COLUMN source_mtime REAL", ())
         .await;
 
-    // Migration: add explicit_tunnels table and its indexes for existing databases.
-    // The CREATE TABLE IF NOT EXISTS in SCHEMA handles new databases; this migration
-    // covers databases created before tunnels were introduced.
-    let _ = connection
-        .execute_batch(
-            "CREATE TABLE IF NOT EXISTS explicit_tunnels (
-                id TEXT PRIMARY KEY,
-                source_wing TEXT NOT NULL,
-                source_room TEXT NOT NULL,
-                target_wing TEXT NOT NULL,
-                target_room TEXT NOT NULL,
-                source_drawer_id TEXT,
-                target_drawer_id TEXT,
-                label TEXT DEFAULT '',
-                created_at TEXT DEFAULT (datetime('now')),
-                updated_at TEXT
-            );
-            CREATE INDEX IF NOT EXISTS idx_tunnels_source ON explicit_tunnels(source_wing, source_room);
-            CREATE INDEX IF NOT EXISTS idx_tunnels_target ON explicit_tunnels(target_wing, target_room);",
-        )
-        .await;
-
     // Pair assertion: verify all six core tables were created.
     let rows = crate::db::query_all(
         connection,

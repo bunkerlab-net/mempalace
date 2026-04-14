@@ -131,6 +131,26 @@ fn chunk_exchanges(content: &str) -> Vec<Chunk> {
     }
 }
 
+/// Return the largest byte index ≤ `index` that is a UTF‑8 char boundary in `s`.
+///
+/// Slicing `s` by a raw byte offset is unsafe when the string contains multi‑byte
+/// characters (emoji, accented letters, CJK) because the offset may land mid‑
+/// codepoint, causing a panic.  This function walks backwards from `index` until
+/// it finds a valid boundary, guaranteeing `&s[..result]` never panics.
+fn chunk_by_exchange_floor_char_boundary(s: &str, index: usize) -> usize {
+    if index >= s.len() {
+        return s.len();
+    }
+    let mut i = index;
+    while !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    // Postcondition: i is a valid char boundary within s.
+    debug_assert!(s.is_char_boundary(i));
+    debug_assert!(i <= index);
+    i
+}
+
 /// One user turn (>) + the full AI response that follows = one or more chunks.
 ///
 /// The full AI response is preserved verbatim. When the combined user-turn +
@@ -172,7 +192,10 @@ fn chunk_by_exchange(lines: &[&str]) -> Vec<Chunk> {
 
             if content.len() > CHUNK_SIZE {
                 // First chunk: user turn + as much response as fits.
-                let first = &content[..CHUNK_SIZE];
+                // Use char-boundary-safe slicing: a raw byte offset can land
+                // mid-codepoint for multi-byte chars (emoji, CJK, accents).
+                let first_end = chunk_by_exchange_floor_char_boundary(&content, CHUNK_SIZE);
+                let first = &content[..first_end];
                 if first.trim().len() > MIN_CHUNK_SIZE {
                     chunks.push(Chunk {
                         content: first.to_string(),
@@ -180,9 +203,12 @@ fn chunk_by_exchange(lines: &[&str]) -> Vec<Chunk> {
                     });
                 }
                 // Remaining response in CHUNK_SIZE continuation drawers.
-                let mut remainder = &content[CHUNK_SIZE..];
+                let mut remainder = &content[first_end..];
                 while !remainder.is_empty() {
-                    let end = CHUNK_SIZE.min(remainder.len());
+                    let end = chunk_by_exchange_floor_char_boundary(remainder, CHUNK_SIZE);
+                    // floor_char_boundary returns at least 1 for non-empty input
+                    // when CHUNK_SIZE > 0, preventing an infinite loop.
+                    let end = end.max(1);
                     let part = &remainder[..end];
                     remainder = &remainder[end..];
                     if part.trim().len() > MIN_CHUNK_SIZE {
@@ -623,5 +649,39 @@ mod tests {
             chunks[0].content.contains("assistant replies"),
             "answer preserved"
         );
+    }
+
+    #[test]
+    fn chunk_by_exchange_multibyte_chars_no_panic() {
+        // Emoji and accented chars are multi-byte; a raw byte slice at CHUNK_SIZE
+        // could land mid-codepoint and panic.  This test verifies the split is
+        // UTF-8-boundary-safe and all content is preserved across chunks.
+        let emoji_line = "🚀".repeat(300); // 300 × 4 bytes = 1200 bytes, well above CHUNK_SIZE
+        let input = format!("> question\n{emoji_line}");
+        let lines: Vec<&str> = input.lines().collect();
+        // Must not panic and must produce valid UTF-8 in every chunk.
+        let chunks = chunk_by_exchange(&lines);
+        assert!(!chunks.is_empty(), "must produce at least one chunk");
+        for chunk in &chunks {
+            assert!(
+                std::str::from_utf8(chunk.content.as_bytes()).is_ok(),
+                "every chunk must be valid UTF-8"
+            );
+        }
+    }
+
+    #[test]
+    fn chunk_by_exchange_floor_char_boundary_ascii() {
+        // ASCII strings: every byte is a char boundary, so result == index.
+        assert_eq!(chunk_by_exchange_floor_char_boundary("hello", 3), 3);
+        assert_eq!(chunk_by_exchange_floor_char_boundary("hello", 10), 5); // clamped to len
+    }
+
+    #[test]
+    fn chunk_by_exchange_floor_char_boundary_multibyte() {
+        // "é" is 2 bytes (0xC3 0xA9); byte 1 is mid-codepoint.
+        let s = "aé"; // bytes: [0x61, 0xC3, 0xA9]
+        assert_eq!(chunk_by_exchange_floor_char_boundary(s, 2), 1); // step back to 'a' boundary
+        assert_eq!(chunk_by_exchange_floor_char_boundary(s, 3), 3); // end of 'é' is fine
     }
 }

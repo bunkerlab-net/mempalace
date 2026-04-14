@@ -1,5 +1,6 @@
 //! Parser for Claude Code JSONL conversation exports.
 
+use std::borrow::Cow;
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -103,20 +104,43 @@ static EXCESS_BLANK_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// Applied per message (never across boundaries) so a dangling open tag
 /// in one message cannot consume text from the next.
 pub fn strip_noise(text: &str) -> String {
-    assert!(!text.is_empty(), "strip_noise: text must not be empty");
+    // Early return: empty input needs no processing.
+    if text.is_empty() {
+        return String::new();
+    }
 
-    let mut result = text.to_owned();
+    // Use Cow to avoid allocating a new String per regex when nothing matches.
+    // replace_all returns Cow::Borrowed (no copy) when the pattern is absent.
+    let mut result: Cow<str> = Cow::Borrowed(text);
     for re in NOISE_TAG_RES.iter() {
-        result = re.replace_all(&result, "").into_owned();
+        let replaced = re.replace_all(result.as_ref(), "");
+        if let Cow::Owned(s) = replaced {
+            result = Cow::Owned(s);
+        }
     }
     for re in NOISE_LINE_RES.iter() {
-        result = re.replace_all(&result, "").into_owned();
+        let replaced = re.replace_all(result.as_ref(), "");
+        if let Cow::Owned(s) = replaced {
+            result = Cow::Owned(s);
+        }
     }
-    result = HOOK_LINE_RE.replace_all(&result, "").into_owned();
-    result = COLLAPSED_LINES_RE.replace_all(&result, "").into_owned();
-    result = TOKEN_MARKER_RE.replace_all(&result, "").into_owned();
+    let replaced = HOOK_LINE_RE.replace_all(result.as_ref(), "");
+    if let Cow::Owned(s) = replaced {
+        result = Cow::Owned(s);
+    }
+    let replaced = COLLAPSED_LINES_RE.replace_all(result.as_ref(), "");
+    if let Cow::Owned(s) = replaced {
+        result = Cow::Owned(s);
+    }
+    let replaced = TOKEN_MARKER_RE.replace_all(result.as_ref(), "");
+    if let Cow::Owned(s) = replaced {
+        result = Cow::Owned(s);
+    }
     // Collapse runs of 4+ blank lines down to 3 (a visual paragraph break).
-    result = EXCESS_BLANK_RE.replace_all(&result, "\n\n\n").into_owned();
+    let replaced = EXCESS_BLANK_RE.replace_all(result.as_ref(), "\n\n\n");
+    if let Cow::Owned(s) = replaced {
+        result = Cow::Owned(s);
+    }
 
     // Postcondition: result is trimmed (no leading/trailing whitespace).
     result.trim().to_string()
