@@ -25,9 +25,8 @@ pub struct MineParams {
 
 /// Files larger than this are skipped — prevents OOM on huge files.
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
-/// Maximum directory nesting depth for `walk_dir`. Prevents stack overflow on
-/// pathological symlink graphs and enforces the no-recursion rule.
-const WALK_DEPTH_LIMIT: usize = 64;
+
+use super::WALK_DEPTH_LIMIT;
 
 const READABLE_EXTENSIONS: &[&str] = &[
     "txt", "md", "py", "js", "ts", "jsx", "tsx", "json", "yaml", "yml", "html", "css", "java",
@@ -205,7 +204,7 @@ fn mine_print_summary(
     dry_run: bool,
     file_count: usize,
     files_skipped: usize,
-    files_unreadable: usize,
+    files_unreadable_or_too_short: usize,
     total_drawers: usize,
     room_counts: &HashMap<String, usize>,
 ) {
@@ -215,11 +214,13 @@ fn mine_print_summary(
     } else {
         println!("  Done.");
     }
-    let files_processed = file_count - files_skipped - files_unreadable;
+    let files_processed = file_count - files_skipped - files_unreadable_or_too_short;
     println!("  Files processed: {files_processed}");
     println!("  Files skipped (already filed): {files_skipped}");
-    if files_unreadable > 0 {
-        println!("  Files skipped (empty/unreadable): {files_unreadable}");
+    if files_unreadable_or_too_short > 0 {
+        // mine_read_file() returns None for both unreadable files and files shorter than 50
+        // characters — both cases are captured under this counter.
+        println!("  Files skipped (empty/unreadable/too short): {files_unreadable_or_too_short}");
     }
     println!(
         "  Drawers {}: {total_drawers}",
@@ -289,7 +290,7 @@ fn mine_read_file(filepath: &Path) -> Option<String> {
     Some(content)
 }
 
-/// Process all files in the mine loop. Returns `(total_drawers, files_skipped, files_unreadable, room_counts)`.
+/// Process all files in the mine loop. Returns `(total_drawers, files_skipped, files_unreadable_or_too_short, room_counts)`.
 async fn mine_process_files(
     connection: &Connection,
     files: &[PathBuf],
@@ -300,19 +301,21 @@ async fn mine_process_files(
 ) -> Result<(usize, usize, usize, HashMap<String, usize>)> {
     let mut total_drawers: usize = 0;
     let mut files_skipped: usize = 0;
-    let mut files_unreadable: usize = 0;
+    let mut files_unreadable_or_too_short: usize = 0;
     let mut room_counts: HashMap<String, usize> = HashMap::new();
 
     for (i, filepath) in files.iter().enumerate() {
         let source_file = filepath.to_string_lossy().to_string();
 
-        if !opts.dry_run && drawer::file_already_mined(connection, &source_file).await? {
+        // Always check for duplicates so dry runs report accurate skip counts.
+        // Only the write path below is gated on !opts.dry_run.
+        if drawer::file_already_mined(connection, &source_file).await? {
             files_skipped += 1;
             continue;
         }
 
         let Some(content) = mine_read_file(filepath) else {
-            files_unreadable += 1;
+            files_unreadable_or_too_short += 1;
             continue;
         };
 
@@ -349,7 +352,12 @@ async fn mine_process_files(
         );
     }
 
-    Ok((total_drawers, files_skipped, files_unreadable, room_counts))
+    Ok((
+        total_drawers,
+        files_skipped,
+        files_unreadable_or_too_short,
+        room_counts,
+    ))
 }
 
 /// Mine a project directory into the palace.
@@ -391,14 +399,14 @@ pub async fn mine(connection: &Connection, project_dir: &Path, opts: &MineParams
 
     mine_print_header(wing, &rooms, files.len(), opts.dry_run);
 
-    let (total_drawers, files_skipped, files_unreadable, room_counts) =
+    let (total_drawers, files_skipped, files_unreadable_or_too_short, room_counts) =
         mine_process_files(connection, &files, wing, &rooms, &project_dir, opts).await?;
 
     mine_print_summary(
         opts.dry_run,
         files.len(),
         files_skipped,
-        files_unreadable,
+        files_unreadable_or_too_short,
         total_drawers,
         &room_counts,
     );

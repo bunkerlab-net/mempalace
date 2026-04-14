@@ -317,6 +317,22 @@ pub async fn invalidate(
     let sub_id = entity_id(subject);
     let obj_id = entity_id(object);
     let pred = predicate.to_lowercase().replace(' ', "_");
+
+    // Pair assertions: entity_id can return "" for apostrophe-only inputs.
+    // An empty normalized ID would silently run an UPDATE with a blank key.
+    assert!(
+        !sub_id.is_empty(),
+        "invalidate: subject normalizes to empty ID"
+    );
+    assert!(
+        !obj_id.is_empty(),
+        "invalidate: object normalizes to empty ID"
+    );
+    assert!(
+        !pred.is_empty(),
+        "invalidate: predicate normalizes to empty ID"
+    );
+
     // Resolve the date once so the returned value always matches what was written.
     let persisted_ended = ended.map_or_else(
         || chrono::Local::now().format("%Y-%m-%d").to_string(),

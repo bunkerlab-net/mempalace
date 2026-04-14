@@ -1014,18 +1014,22 @@ async fn tool_kg_invalidate(connection: &Connection, args: &Value) -> Value {
         Err(e) => return e,
     };
 
-    wal_log(
-        "kg_invalidate",
-        json!({"subject": subject, "predicate": predicate, "object": object, "ended": ended}),
-    )
-    .await;
-
+    // Perform the mutation first so the WAL records persisted_ended — the value
+    // actually written to the database — rather than the raw input (which may be None
+    // and would be normalized to today's date by kg::invalidate).
     match kg::invalidate(connection, &subject, &predicate, &object, ended.as_deref()).await {
-        Ok(persisted_ended) => json!({
-            "success": true,
-            "fact": format!("{subject} → {predicate} → {object}"),
-            "ended": persisted_ended,
-        }),
+        Ok(persisted_ended) => {
+            wal_log(
+                "kg_invalidate",
+                json!({"subject": subject, "predicate": predicate, "object": object, "ended": persisted_ended}),
+            )
+            .await;
+            json!({
+                "success": true,
+                "fact": format!("{subject} → {predicate} → {object}"),
+                "ended": persisted_ended,
+            })
+        }
         Err(e) => json!({"success": false, "error": e.to_string()}),
     }
 }

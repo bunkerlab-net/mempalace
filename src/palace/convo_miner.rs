@@ -14,9 +14,8 @@ const CONVO_EXTENSIONS: &[&str] = &["txt", "md", "json", "jsonl"];
 const MIN_CHUNK_SIZE: usize = 30;
 /// Files larger than this are skipped — prevents OOM on huge files.
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
-/// Maximum directory nesting depth for `walk_convos`. Prevents stack overflow on
-/// pathological symlink graphs and enforces the no-recursion rule.
-const WALK_DEPTH_LIMIT: usize = 64;
+
+use super::WALK_DEPTH_LIMIT;
 
 const TOPIC_KEYWORDS: &[(&str, &[&str])] = &[
     (
@@ -427,7 +426,9 @@ pub async fn mine_convos(
     for (i, filepath) in files.iter().enumerate() {
         let source_file = filepath.to_string_lossy().to_string();
 
-        if !opts.dry_run && drawer::file_already_mined(connection, &source_file).await? {
+        // Always check for duplicates so dry runs report accurate skip counts.
+        // Only the write path below is gated on !opts.dry_run.
+        if drawer::file_already_mined(connection, &source_file).await? {
             files_skipped += 1;
             continue;
         }

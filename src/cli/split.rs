@@ -118,12 +118,10 @@ fn extract_subject(lines: &[&str]) -> String {
             if prompt.len() > 5 && !SKIP_RE.is_match(prompt) {
                 let subject = CLEAN_RE.replace_all(prompt, "");
                 let subject = SPACE_RE.replace_all(subject.trim(), "-");
-                let truncated = if subject.len() > 60 {
-                    &subject[..60]
-                } else {
-                    &subject
-                };
-                return truncated.to_string();
+                // Collect at most 60 Unicode scalar values — byte slicing would panic on
+                // multibyte characters that happen to straddle the 60-byte boundary.
+                let truncated: String = subject.chars().take(60).collect();
+                return truncated;
             }
         }
     }
@@ -253,6 +251,18 @@ pub fn run(
         if boundaries.len() >= min_sessions {
             mega_files.push((path, boundaries.len()));
         }
+    }
+
+    // Validate an explicit output directory up front. Without this, a caller that
+    // provides --output-dir /nonexistent would silently receive Ok(()) when no
+    // mega-files are found, hiding the bad path from the user.
+    if let Some(out_dir) = output_dir
+        && !out_dir.is_dir()
+    {
+        return Err(crate::error::Error::Other(format!(
+            "split: output directory not found or not a directory: {}",
+            out_dir.display()
+        )));
     }
 
     if mega_files.is_empty() {

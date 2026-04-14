@@ -77,7 +77,14 @@ async fn handle_request(connection: &Connection, request: &Value) -> Option<Valu
         }));
     }
 
-    let method = request.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    // A missing or non-string "method" field is also an Invalid Request per JSON-RPC 2.0.
+    let Some(method) = request.get("method").and_then(|m| m.as_str()) else {
+        return Some(json!({
+            "jsonrpc": "2.0",
+            "id": null,
+            "error": {"code": -32600, "message": "Invalid Request: expected string 'method'"}
+        }));
+    };
     let params = request.get("params").cloned().unwrap_or(json!({}));
     let req_id = request.get("id").cloned().unwrap_or(Value::Null);
 
