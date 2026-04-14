@@ -8,10 +8,10 @@
 pub mod protocol;
 pub mod tools;
 
-use futures_util::StreamExt;
+use std::pin::Pin;
+
 use serde_json::{Value, json};
-use tokio::io::AsyncWriteExt;
-use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use turso::Connection;
 
 use crate::error::Result;
@@ -24,22 +24,29 @@ const SUPPORTED_PROTOCOL_VERSIONS: &[&str] =
 /// before any validation runs. 1 MiB comfortably fits any real tool payload.
 const MAX_REQUEST_BYTES: usize = 1024 * 1024; // 1 MiB
 
+/// Outcome of reading a single newline-delimited frame from the buffered reader.
+enum LineRead {
+    /// A complete line was read (trailing newline stripped).
+    Line(String),
+    /// The line exceeded the byte limit — stream resynced past the next newline.
+    Overflow,
+    /// End-of-stream — stdin closed.
+    Eof,
+}
+
 /// Run the MCP server: read JSON-RPC 2.0 requests from stdin, write responses to stdout.
 pub async fn run(connection: &Connection) -> Result<()> {
     let stdin = tokio::io::stdin();
     let mut stdout = tokio::io::stdout();
-    // LinesCodec rejects frames at the framing layer — overlong bytes are never
-    // buffered beyond MAX_REQUEST_BYTES before the error is returned, preventing
-    // memory exhaustion from a client-controlled line. The codec automatically
-    // drains to the next newline after an oversize frame so the stream resyncs.
-    let mut framed = FramedRead::new(stdin, LinesCodec::new_with_max_length(MAX_REQUEST_BYTES));
+    let mut reader = BufReader::new(stdin);
+    // Reusable buffer for line reading — allocated once, cleared each iteration.
+    let mut line_buffer: Vec<u8> = Vec::with_capacity(4096);
 
-    // Intentional server loop: runs until stdin closes (None signals EOF).
+    // Intentional server loop: runs until stdin closes (Eof signals EOF).
     loop {
-        let item = framed.next().await;
-        let line = match item {
-            None => break, // EOF — client disconnected.
-            Some(Err(LinesCodecError::MaxLineLengthExceeded)) => {
+        let line = match run_read_line(&mut reader, &mut line_buffer, MAX_REQUEST_BYTES).await {
+            Ok(LineRead::Eof) => break, // Client disconnected.
+            Ok(LineRead::Overflow) => {
                 let err_response = json!({
                     "jsonrpc": "2.0",
                     "id": null,
@@ -51,8 +58,8 @@ pub async fn run(connection: &Connection) -> Result<()> {
                 stdout.flush().await?;
                 continue;
             }
-            Some(Err(LinesCodecError::Io(e))) => return Err(e.into()),
-            Some(Ok(line)) => line,
+            Err(e) => return Err(e.into()),
+            Ok(LineRead::Line(line)) => line,
         };
 
         let trimmed = line.trim();
@@ -87,6 +94,98 @@ pub async fn run(connection: &Connection) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Read one newline-delimited line from stdin, enforcing a hard byte limit.
+///
+/// Prevents OOM by never buffering more than `limit` bytes from a client-controlled
+/// line. On overflow, drains forward to the next newline so the stream resyncs
+/// for subsequent reads (same resync behavior as `LinesCodec`).
+async fn run_read_line(
+    reader: &mut BufReader<tokio::io::Stdin>,
+    buffer: &mut Vec<u8>,
+    limit: usize,
+) -> std::io::Result<LineRead> {
+    assert!(limit > 0);
+    buffer.clear();
+
+    loop {
+        let available = reader.fill_buf().await?;
+
+        // EOF: return accumulated buffer or signal end-of-stream.
+        if available.is_empty() {
+            if buffer.is_empty() {
+                return Ok(LineRead::Eof);
+            }
+            debug_assert!(buffer.len() <= limit);
+            let line = String::from_utf8_lossy(buffer).into_owned();
+            return Ok(LineRead::Line(line));
+        }
+
+        let chunk_length = available.len();
+
+        if let Some(newline_index) = available.iter().position(|&b| b == b'\n') {
+            let within_limit = buffer.len() + newline_index <= limit;
+            if within_limit {
+                buffer.extend_from_slice(&available[..newline_index]);
+            }
+            // Last use of `available` — immutable borrow on reader ends here.
+            Pin::new(&mut *reader).consume(newline_index + 1);
+
+            if !within_limit {
+                return Ok(LineRead::Overflow);
+            }
+
+            // Strip trailing \r for \r\n line endings.
+            if buffer.last() == Some(&b'\r') {
+                buffer.pop();
+            }
+            debug_assert!(buffer.len() <= limit);
+            let line = String::from_utf8_lossy(buffer).into_owned();
+            return Ok(LineRead::Line(line));
+        }
+
+        // No newline in this chunk — accumulate if within limit.
+        let within_limit = buffer.len() + chunk_length <= limit;
+        if within_limit {
+            buffer.extend_from_slice(available);
+        }
+        // Last use of `available` — immutable borrow on reader ends here.
+        Pin::new(&mut *reader).consume(chunk_length);
+
+        if !within_limit {
+            // Overlong line with no newline yet — drain to resync.
+            return run_read_line_drain(reader).await;
+        }
+    }
+}
+
+/// Drain bytes from the reader until the next newline or EOF.
+/// Called after detecting an overlong line to resync the stream.
+async fn run_read_line_drain(
+    reader: &mut BufReader<tokio::io::Stdin>,
+) -> std::io::Result<LineRead> {
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            // EOF during drain — still report overflow so the error response is sent.
+            return Ok(LineRead::Overflow);
+        }
+        let chunk_length = available.len();
+        assert!(chunk_length > 0); // Progress guarantee: non-empty after EOF check.
+        let newline_position = available.iter().position(|&b| b == b'\n');
+        let consume_count = match newline_position {
+            Some(index) => index + 1,
+            None => chunk_length,
+        };
+        assert!(consume_count > 0); // Forward progress: always consume at least one byte.
+        // Last use of `available` — immutable borrow on reader ends here.
+        Pin::new(&mut *reader).consume(consume_count);
+
+        if newline_position.is_some() {
+            return Ok(LineRead::Overflow);
+        }
+    }
 }
 
 async fn handle_request(connection: &Connection, request: &Value) -> Option<Value> {
