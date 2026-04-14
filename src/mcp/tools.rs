@@ -1202,7 +1202,23 @@ async fn tool_create_tunnel(connection: &Connection, args: &Value) -> Value {
     )
     .await
     {
-        Ok(tunnel) => json!(tunnel),
+        Ok(tunnel) => {
+            wal_log(
+                "create_tunnel",
+                json!({
+                    "tunnel_id": tunnel.id,
+                    "source_wing": tunnel.source_wing,
+                    "source_room": tunnel.source_room,
+                    "target_wing": tunnel.target_wing,
+                    "target_room": tunnel.target_room,
+                    "label": tunnel.label,
+                    "source_drawer_id": tunnel.source_drawer_id,
+                    "target_drawer_id": tunnel.target_drawer_id,
+                }),
+            )
+            .await;
+            json!(tunnel)
+        }
         Err(e) => json!({"error": e.to_string()}),
     }
 }
@@ -1230,6 +1246,8 @@ async fn tool_delete_tunnel(connection: &Connection, args: &Value) -> Value {
     if tunnel_id.len() != TUNNEL_ID_LEN || !tunnel_id.chars().all(|c| c.is_ascii_hexdigit()) {
         return json!({"error": "tunnel_id must be a 16-character hex string", "public": true});
     }
+
+    wal_log("delete_tunnel", json!({"tunnel_id": tunnel_id})).await;
 
     match graph::delete_tunnel(connection, tunnel_id).await {
         Ok(deleted) => json!({"deleted": deleted, "tunnel_id": tunnel_id}),
