@@ -335,7 +335,8 @@ fn mine_convos_print_summary(
     );
 
     let mut sorted_rooms: Vec<_> = room_counts.iter().collect();
-    sorted_rooms.sort_by(|a, b| b.1.cmp(a.1));
+    // Break count ties by room name so output is deterministic across runs.
+    sorted_rooms.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
     if !sorted_rooms.is_empty() {
         println!("\n  By room:");
         for (room, count) in sorted_rooms {
@@ -355,15 +356,21 @@ async fn mine_convos_write_chunks(
     wing: &str,
     room: &str,
     source_file: &str,
-    source_mtime: Option<f64>,
+    source_mtime: f64,
     opts: &MineParams,
 ) -> Result<()> {
+    // Outer savepoint ensures a partial failure cannot leave file_already_mined()
+    // seeing a half-ingested file on the next run.
+    connection
+        .execute("SAVEPOINT sp_mine_convos_file", ())
+        .await?;
+
     for chunk in chunks {
         let id = format!(
             "drawer_{wing}_{room}_{}",
             &uuid::Uuid::new_v4().to_string().replace('-', "")[..16]
         );
-        drawer::add_drawer(
+        if let Err(e) = drawer::add_drawer(
             connection,
             &drawer::DrawerParams {
                 id: &id,
@@ -374,11 +381,24 @@ async fn mine_convos_write_chunks(
                 chunk_index: chunk.chunk_index,
                 added_by: &opts.agent,
                 ingest_mode: "convos",
-                source_mtime,
+                source_mtime: Some(source_mtime),
             },
         )
-        .await?;
+        .await
+        {
+            let _ = connection
+                .execute("ROLLBACK TO SAVEPOINT sp_mine_convos_file", ())
+                .await;
+            let _ = connection
+                .execute("RELEASE SAVEPOINT sp_mine_convos_file", ())
+                .await;
+            return Err(e);
+        }
     }
+
+    connection
+        .execute("RELEASE SAVEPOINT sp_mine_convos_file", ())
+        .await?;
     Ok(())
 }
 
@@ -454,13 +474,20 @@ pub async fn mine_convos(
         let room = detect_convo_room(&content);
         let drawers_added = chunks.len();
 
+        // Mtime is required: None conflates "no on-disk source" with
+        // "unreadable filesystem", causing file_already_mined() to miss
+        // duplicates on reruns and producing stale duplicate chunks.
+        let Some(source_mtime) = std::fs::metadata(filepath)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs_f64())
+        else {
+            files_unreadable += 1;
+            continue;
+        };
+
         if !opts.dry_run {
-            // Capture mtime now so all chunks from the same file share the same timestamp.
-            let source_mtime: Option<f64> = std::fs::metadata(filepath)
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs_f64());
             mine_convos_write_chunks(
                 connection,
                 &chunks,

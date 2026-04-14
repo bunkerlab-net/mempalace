@@ -173,43 +173,32 @@ static POSITIVE_SET: LazyLock<HashSet<&str>> =
 static NEGATIVE_SET: LazyLock<HashSet<&str>> =
     LazyLock::new(|| NEGATIVE_WORDS.iter().copied().collect());
 
+// Compile a slice of pattern strings into Regexes, panicking on the first
+// invalid pattern. All callers pass compile-time literals; a panic here is a
+// startup invariant failure, not an operating error.
+#[allow(clippy::expect_used)]
+fn compile_regexes(patterns: &[&str]) -> Vec<Regex> {
+    patterns
+        .iter()
+        .map(|p| {
+            Regex::new(p)
+                .expect("regex pattern is a compile-time literal and cannot fail to compile")
+        })
+        .collect()
+}
+
 // Marker patterns compiled once; each static serves the corresponding score_markers() call.
-// filter_map silently drops any malformed literal — the patterns are all compile-time
-// constants so this path is unreachable in practice.
-static DECISION_REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    DECISION_MARKERS
-        .iter()
-        .filter_map(|p| Regex::new(p).ok())
-        .collect()
-});
-static PREFERENCE_REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    PREFERENCE_MARKERS
-        .iter()
-        .filter_map(|p| Regex::new(p).ok())
-        .collect()
-});
-static MILESTONE_REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    MILESTONE_MARKERS
-        .iter()
-        .filter_map(|p| Regex::new(p).ok())
-        .collect()
-});
-static PROBLEM_REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    PROBLEM_MARKERS
-        .iter()
-        .filter_map(|p| Regex::new(p).ok())
-        .collect()
-});
-static EMOTION_REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    EMOTION_MARKERS
-        .iter()
-        .filter_map(|p| Regex::new(p).ok())
-        .collect()
-});
+static DECISION_REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| compile_regexes(DECISION_MARKERS));
+static PREFERENCE_REGEXES: LazyLock<Vec<Regex>> =
+    LazyLock::new(|| compile_regexes(PREFERENCE_MARKERS));
+static MILESTONE_REGEXES: LazyLock<Vec<Regex>> =
+    LazyLock::new(|| compile_regexes(MILESTONE_MARKERS));
+static PROBLEM_REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| compile_regexes(PROBLEM_MARKERS));
+static EMOTION_REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| compile_regexes(EMOTION_MARKERS));
 
 // Patterns compiled once; used by has_resolution().
 static RESOLUTION_REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    [
+    compile_regexes(&[
         r"\bfixed\b",
         r"\bsolved\b",
         r"\bresolved\b",
@@ -219,15 +208,14 @@ static RESOLUTION_REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         r"\bnailed it\b",
         r"\bfigured (it )?out\b",
         r"\bthe (fix|answer|solution)\b",
-    ]
-    .iter()
-    .filter_map(|p| Regex::new(p).ok())
-    .collect()
+    ])
 });
 
 // Patterns compiled once; used by extract_prose().
+// Note: `else\b:` matches `else:` correctly — `\b` asserts a word boundary
+// between the keyword and the following `:`, which is not a word character.
 static PROSE_CODE_REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    [
+    compile_regexes(&[
         r"^\s*[\$#]\s",
         r"^\s*(cd|source|echo|export|pip|npm|git|python|bash|curl|wget|mkdir|rm|cp|mv|ls|cat|grep|find|chmod|sudo|brew|docker)\s",
         r"^\s*```",
@@ -236,25 +224,19 @@ static PROSE_CODE_REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         r"^\s*\|",
         r"^\s*[-]{2,}",
         r"^\s*[\{\}\[\]]\s*$",
-        r"^\s*(if|for|while|try|except|elif|else:)\b",
+        r"^\s*(if|for|while|try|except|elif|else)\b:",
         r"^\s*\w+\.\w+\(",
         r"^\s*\w+ = \w+\.\w+",
-    ]
-    .iter()
-    .filter_map(|p| Regex::new(p).ok())
-    .collect()
+    ])
 });
 
 // Patterns compiled once; used by split_into_segments() and split_by_turns().
 static TURN_REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    [
+    compile_regexes(&[
         r"^>\s",
         r"(?i)^(Human|User|Q)\s*:",
         r"(?i)^(Assistant|AI|A|Claude|ChatGPT)\s*:",
-    ]
-    .iter()
-    .filter_map(|p| Regex::new(p).ok())
-    .collect()
+    ])
 });
 
 fn get_sentiment(text: &str) -> &'static str {

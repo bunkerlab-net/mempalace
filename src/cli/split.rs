@@ -152,7 +152,9 @@ fn split_file(path: &Path, output_dir: &Path, dry_run: bool) -> Result<usize> {
         println!("  SKIP: {} exceeds 500 MB limit", path.display());
         return Ok(0);
     }
-    let content = fs::read_to_string(path).unwrap_or_default();
+    let content = fs::read_to_string(path).map_err(|e| {
+        crate::error::Error::Other(format!("failed to read {}: {e}", path.display()))
+    })?;
     let lines: Vec<&str> = content.lines().collect();
     let mut boundaries = find_session_boundaries(&lines);
 
@@ -228,6 +230,9 @@ fn split_file(path: &Path, output_dir: &Path, dry_run: bool) -> Result<usize> {
 }
 
 /// Split mega-files in a directory into per-session files.
+// Scan loop, output-dir validation, per-file splitting, and dry-run summary
+// are each a distinct step with branching that cannot be cleanly extracted.
+#[allow(clippy::too_many_lines)]
 pub fn run(
     directory: &Path,
     output_dir: Option<&Path>,
@@ -258,7 +263,9 @@ pub fn run(
             println!("  SKIP: {} exceeds 500 MB limit", path.display());
             continue;
         }
-        let content = fs::read_to_string(&path).unwrap_or_default();
+        let content = fs::read_to_string(&path).map_err(|e| {
+            crate::error::Error::Other(format!("failed to read {}: {e}", path.display()))
+        })?;
         let lines: Vec<&str> = content.lines().collect();
         let boundaries = find_session_boundaries(&lines);
         if boundaries.len() >= min_sessions {
