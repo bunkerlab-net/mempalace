@@ -175,6 +175,12 @@ pub async fn add_entity(
     properties: Option<&str>,
 ) -> Result<String> {
     let eid = entity_id(name);
+    // entity_id can return "" for inputs like "'"; reject before writing a blank key.
+    if eid.is_empty() {
+        return Err(crate::error::Error::Other(
+            "empty normalized entity id".to_string(),
+        ));
+    }
     let props = properties.unwrap_or("{}");
     connection
         .execute(
@@ -293,13 +299,14 @@ pub async fn add_triple(connection: &Connection, params: &TripleParams<'_>) -> R
 }
 
 /// Mark a relationship as ended (set `valid_to`).
+/// Invalidate (end-date) matching triples and return the date that was stored.
 pub async fn invalidate(
     connection: &Connection,
     subject: &str,
     predicate: &str,
     object: &str,
     ended: Option<&str>,
-) -> Result<()> {
+) -> Result<String> {
     assert!(!subject.is_empty(), "invalidate: subject must not be empty");
     assert!(
         !predicate.is_empty(),
@@ -310,16 +317,17 @@ pub async fn invalidate(
     let sub_id = entity_id(subject);
     let obj_id = entity_id(object);
     let pred = predicate.to_lowercase().replace(' ', "_");
-    let ended = ended.map_or_else(
+    // Resolve the date once so the returned value always matches what was written.
+    let persisted_ended = ended.map_or_else(
         || chrono::Local::now().format("%Y-%m-%d").to_string(),
         std::string::ToString::to_string,
     );
 
     connection.execute(
         "UPDATE triples SET valid_to=?1 WHERE subject=?2 AND predicate=?3 AND object=?4 AND valid_to IS NULL",
-        turso::params![ended.as_str(), sub_id.as_str(), pred.as_str(), obj_id.as_str()],
+        turso::params![persisted_ended.as_str(), sub_id.as_str(), pred.as_str(), obj_id.as_str()],
     )
     .await?;
 
-    Ok(())
+    Ok(persisted_ended)
 }

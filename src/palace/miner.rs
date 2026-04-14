@@ -87,6 +87,8 @@ fn walk_dir_gitignore(project_dir: &Path) -> Vec<PathBuf> {
         .git_global(true)
         .git_exclude(true)
         .hidden(false) // We handle skip dirs ourselves
+        // Cap depth to match walk_dir() so both scan paths respect the same limit.
+        .max_depth(Some(WALK_DEPTH_LIMIT))
         .build();
 
     let mut files = Vec::new();

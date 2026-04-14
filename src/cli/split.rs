@@ -217,8 +217,6 @@ fn split_file(path: &Path, output_dir: &Path, dry_run: bool) -> Result<usize> {
 }
 
 /// Split mega-files in a directory into per-session files.
-// Regex literals are compile-time constants that can never fail to compile.
-#[allow(clippy::expect_used)]
 pub fn run(
     directory: &Path,
     output_dir: Option<&Path>,

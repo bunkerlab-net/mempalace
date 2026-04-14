@@ -1021,10 +1021,10 @@ async fn tool_kg_invalidate(connection: &Connection, args: &Value) -> Value {
     .await;
 
     match kg::invalidate(connection, &subject, &predicate, &object, ended.as_deref()).await {
-        Ok(()) => json!({
+        Ok(persisted_ended) => json!({
             "success": true,
             "fact": format!("{subject} → {predicate} → {object}"),
-            "ended": ended.unwrap_or_else(|| "today".to_string()),
+            "ended": persisted_ended,
         }),
         Err(e) => json!({"success": false, "error": e.to_string()}),
     }

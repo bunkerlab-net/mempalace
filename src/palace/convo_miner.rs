@@ -296,24 +296,40 @@ fn mine_convos_print_header(
     println!("-------------------------------------------------------\n");
 }
 
+// Eight independent summary counters; a dedicated struct would be over-engineered for a single private call site.
+#[allow(clippy::too_many_arguments)]
 fn mine_convos_print_summary(
     dry_run: bool,
     file_count: usize,
     files_skipped: usize,
+    files_unreadable: usize,
+    files_too_short: usize,
+    files_empty_chunks: usize,
     total_drawers: usize,
     room_counts: &HashMap<String, usize>,
 ) {
+    let files_processed = file_count
+        .saturating_sub(files_skipped)
+        .saturating_sub(files_unreadable)
+        .saturating_sub(files_too_short)
+        .saturating_sub(files_empty_chunks);
     println!("\n=======================================================");
     if dry_run {
         println!("  Dry run complete — nothing was written.");
     } else {
         println!("  Done.");
     }
-    println!(
-        "  Files processed: {}",
-        file_count.saturating_sub(files_skipped)
-    );
-    println!("  Files skipped (already filed): {files_skipped}");
+    println!("  Files processed:                  {files_processed}");
+    println!("  Files skipped (already filed):    {files_skipped}");
+    if files_unreadable > 0 {
+        println!("  Files skipped (unreadable):       {files_unreadable}");
+    }
+    if files_too_short > 0 {
+        println!("  Files skipped (too short):        {files_too_short}");
+    }
+    if files_empty_chunks > 0 {
+        println!("  Files skipped (no chunks):        {files_empty_chunks}");
+    }
     println!(
         "  Drawers {}: {total_drawers}",
         if dry_run { "would be filed" } else { "filed" }
@@ -366,6 +382,8 @@ async fn mine_convos_write_chunks(
     Ok(())
 }
 
+// Sequential file-scan loop with per-file counters mutated via continue/+=; no clean extraction boundary within 70 lines.
+#[allow(clippy::too_many_lines)]
 pub async fn mine_convos(
     connection: &Connection,
     directory: &Path,
@@ -375,6 +393,12 @@ pub async fn mine_convos(
     let directory = directory.canonicalize().map_err(|e| {
         crate::error::Error::Other(format!("directory not found: {}: {e}", directory.display()))
     })?;
+    if !directory.is_dir() {
+        return Err(crate::error::Error::Other(format!(
+            "not a directory: {}",
+            directory.display()
+        )));
+    }
 
     let dir_name = directory
         .file_name()
@@ -395,6 +419,9 @@ pub async fn mine_convos(
 
     let mut total_drawers: usize = 0;
     let mut files_skipped: usize = 0;
+    let mut files_unreadable: usize = 0;
+    let mut files_too_short: usize = 0;
+    let mut files_empty_chunks: usize = 0;
     let mut room_counts: HashMap<String, usize> = HashMap::new();
 
     for (i, filepath) in files.iter().enumerate() {
@@ -406,14 +433,17 @@ pub async fn mine_convos(
         }
 
         let Ok(content) = normalize::normalize(filepath) else {
+            files_unreadable += 1;
             continue;
         };
         if content.trim().len() < MIN_CHUNK_SIZE {
+            files_too_short += 1;
             continue;
         }
 
         let chunks = chunk_exchanges(&content);
         if chunks.is_empty() {
+            files_empty_chunks += 1;
             continue;
         }
 
@@ -438,6 +468,9 @@ pub async fn mine_convos(
         opts.dry_run,
         files.len(),
         files_skipped,
+        files_unreadable,
+        files_too_short,
+        files_empty_chunks,
         total_drawers,
         &room_counts,
     );

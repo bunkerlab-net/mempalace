@@ -158,7 +158,17 @@ async fn handle_request_tools_call(
         // Truncate only for logging so we don't shorten public error messages.
         let full_error = error_val.as_str().unwrap_or("unknown");
         let truncated: String = full_error.chars().take(100).collect();
-        eprintln!("tool error: tool={tool_name} error={truncated}");
+        // Sanitize log fields: replace control characters so a hostile client
+        // cannot inject newlines or terminal escape sequences into stderr.
+        let tool_name_safe: String = tool_name
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect();
+        let error_safe: String = truncated
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect();
+        eprintln!("tool error: tool={tool_name_safe} error={error_safe}");
         if is_public {
             json!({"error": full_error})
         } else {
