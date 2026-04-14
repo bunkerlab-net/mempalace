@@ -142,6 +142,7 @@ pub async fn run(
 }
 
 #[cfg(test)]
+// Acceptable in tests: .expect() produces immediate, clear failures.
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
@@ -186,10 +187,17 @@ mod tests {
             output.contains("0:"),
             "compressed output must contain entity prefix"
         );
+        // Verify the loaded entity mappings were applied: "Rust" maps to "RS"
+        // and "Python" maps to "PY", so at least one code must appear.
+        assert!(
+            output.contains("RS") || output.contains("PY"),
+            "compressed output must contain entity codes from loaded dialect"
+        );
     }
 }
 
 #[cfg(test)]
+// Acceptable in tests: .expect() produces immediate, clear failures.
 #[allow(clippy::expect_used)]
 mod async_tests {
     use super::*;

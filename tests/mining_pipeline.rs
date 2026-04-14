@@ -137,11 +137,18 @@ fn scan_respects_gitignore() {
     let directory = tempfile::tempdir().expect("tempdir should be created");
 
     // Initialize a git repo so the ignore crate picks up .gitignore.
-    std::process::Command::new("git")
+    let git_init_output = std::process::Command::new("git")
         .args(["init"])
         .current_dir(directory.path())
         .output()
-        .expect("git init should succeed");
+        .expect("git init command should run");
+    assert!(
+        git_init_output.status.success(),
+        "git init failed: {:?} stdout={:?} stderr={:?}",
+        git_init_output.status,
+        String::from_utf8_lossy(&git_init_output.stdout),
+        String::from_utf8_lossy(&git_init_output.stderr),
+    );
 
     // Gitignore a .rs file (must use a readable extension to be meaningful).
     fs::write(directory.path().join(".gitignore"), "secret.rs\n")

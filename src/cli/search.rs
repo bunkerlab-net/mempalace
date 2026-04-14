@@ -44,6 +44,7 @@ pub async fn run(
 }
 
 #[cfg(test)]
+// Acceptable in tests: .expect() produces immediate, clear failures.
 #[allow(clippy::expect_used)]
 mod async_tests {
     use super::*;

@@ -414,6 +414,7 @@ pub async fn mine(connection: &Connection, project_dir: &Path, opts: &MineParams
 }
 
 #[cfg(test)]
+// Acceptable in tests: .expect() produces immediate, clear failures.
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
@@ -454,11 +455,18 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir should be created");
 
         // Initialize a git repo so the ignore crate respects .gitignore.
-        std::process::Command::new("git")
+        let git_init_output = std::process::Command::new("git")
             .args(["init"])
             .current_dir(dir.path())
             .output()
-            .expect("git init should succeed");
+            .expect("git init command should run");
+        assert!(
+            git_init_output.status.success(),
+            "git init failed: {:?} stdout={:?} stderr={:?}",
+            git_init_output.status,
+            String::from_utf8_lossy(&git_init_output.stdout),
+            String::from_utf8_lossy(&git_init_output.stderr),
+        );
 
         // Gitignore a .rs file — .log is not in READABLE_EXTENSIONS so it would
         // be skipped regardless of .gitignore.
@@ -495,11 +503,18 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir should be created");
 
         // Initialize a git repo so .gitignore is meaningful.
-        std::process::Command::new("git")
+        let git_init_output = std::process::Command::new("git")
             .args(["init"])
             .current_dir(dir.path())
             .output()
-            .expect("git init should succeed");
+            .expect("git init command should run");
+        assert!(
+            git_init_output.status.success(),
+            "git init failed: {:?} stdout={:?} stderr={:?}",
+            git_init_output.status,
+            String::from_utf8_lossy(&git_init_output.stdout),
+            String::from_utf8_lossy(&git_init_output.stderr),
+        );
 
         std::fs::write(dir.path().join(".gitignore"), "ignored.rs\n")
             .expect("write .gitignore should succeed");

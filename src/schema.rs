@@ -145,6 +145,7 @@ pub async fn ensure_schema(connection: &Connection) -> Result<()> {
 }
 
 #[cfg(test)]
+// Acceptable in tests: .expect() produces immediate, clear failures.
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
@@ -194,31 +195,37 @@ mod tests {
     async fn ensure_schema_idempotent() {
         let (_db, conn) = crate::test_helpers::test_db().await;
 
-        // test_db already called ensure_schema once; call it again.
+        // Record the table count after the first ensure_schema (called by test_db).
+        let count_query = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'";
+        let rows_before = crate::db::query_all(&conn, count_query, ())
+            .await
+            .expect("table count query before second call should succeed");
+        let count_before: i64 = rows_before[0]
+            .get(0)
+            .expect("COUNT(*) column 0 should be readable as i64");
+        let expected_table_count =
+            i64::try_from(EXPECTED_TABLES.len()).expect("table count fits in i64");
+        assert!(
+            count_before >= expected_table_count,
+            "at least {} core tables should exist before second call, got {count_before}",
+            EXPECTED_TABLES.len()
+        );
+
+        // Call ensure_schema a second time — must not add tables.
         ensure_schema(&conn)
             .await
             .expect("second ensure_schema call should succeed (idempotent)");
 
-        let rows = crate::db::query_all(
-            &conn,
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'",
-            (),
-        )
-        .await
-        .expect("table count query should succeed");
-        let count: i64 = rows[0]
+        let rows_after = crate::db::query_all(&conn, count_query, ())
+            .await
+            .expect("table count query after second call should succeed");
+        let count_after: i64 = rows_after[0]
             .get(0)
             .expect("COUNT(*) column 0 should be readable as i64");
 
-        // Table count must be at least the 6 core tables and must not have changed.
-        assert!(
-            count >= 6,
-            "at least 6 core tables should exist, got {count}"
-        );
         assert_eq!(
-            usize::try_from(count).expect("table count should fit in usize"),
-            EXPECTED_TABLES.len(),
-            "table count should match expected after idempotent call"
+            count_before, count_after,
+            "ensure_schema must not add or remove tables on second call"
         );
     }
 }

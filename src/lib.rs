@@ -3,8 +3,10 @@
 //! Re-exports modules so integration tests can access palace, MCP,
 //! knowledge-graph, and normalization APIs. Not a public library API.
 
-// Library target exists only for integration test access — these doc-quality
-// lints don't apply since the public API is the CLI binary, not this crate.
+// Library target exists only for integration test access — doc-quality lints
+// and `must_use_candidate` don't apply since the public API is the CLI binary,
+// not this crate, and callers are integration tests that discard return values
+// intentionally.
 #![allow(
     clippy::missing_errors_doc,
     clippy::missing_panics_doc,

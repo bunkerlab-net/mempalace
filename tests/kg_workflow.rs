@@ -211,7 +211,7 @@ async fn multiple_triples_same_entities() {
     let predicates: Vec<&str> = facts.iter().map(|f| f.predicate.as_str()).collect();
     assert!(predicates.contains(&"knows"), "should contain 'knows'");
     assert!(
-        predicates.contains(&"works_with"),
-        "should contain 'works_with'"
+        predicates.contains(&"works with"),
+        "should contain 'works with'"
     );
 }

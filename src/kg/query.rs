@@ -276,6 +276,7 @@ pub async fn stats(connection: &Connection) -> Result<KgStats> {
 }
 
 #[cfg(test)]
+// Acceptable in tests: .expect() produces immediate, clear failures.
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
