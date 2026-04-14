@@ -8,8 +8,10 @@
 pub mod protocol;
 pub mod tools;
 
+use futures_util::StreamExt;
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::AsyncWriteExt;
+use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 use turso::Connection;
 
 use crate::error::Result;
@@ -26,29 +28,32 @@ const MAX_REQUEST_BYTES: usize = 1024 * 1024; // 1 MiB
 pub async fn run(connection: &Connection) -> Result<()> {
     let stdin = tokio::io::stdin();
     let mut stdout = tokio::io::stdout();
-    let mut reader = BufReader::new(stdin);
-    let mut line = String::new();
+    // LinesCodec rejects frames at the framing layer — overlong bytes are never
+    // buffered beyond MAX_REQUEST_BYTES before the error is returned, preventing
+    // memory exhaustion from a client-controlled line. The codec automatically
+    // drains to the next newline after an oversize frame so the stream resyncs.
+    let mut framed = FramedRead::new(stdin, LinesCodec::new_with_max_length(MAX_REQUEST_BYTES));
 
-    // Intentional server loop: runs until stdin closes (bytes_read == 0 signals EOF).
+    // Intentional server loop: runs until stdin closes (None signals EOF).
     loop {
-        line.clear();
-        let bytes_read = reader.read_line(&mut line).await?;
-        if bytes_read == 0 {
-            break; // EOF — client disconnected.
-        }
-
-        if line.len() > MAX_REQUEST_BYTES {
-            let err_response = json!({
-                "jsonrpc": "2.0",
-                "id": null,
-                "error": {"code": -32700, "message": "Request exceeds maximum frame size"}
-            });
-            let out = serde_json::to_string(&err_response).unwrap_or_default();
-            stdout.write_all(out.as_bytes()).await?;
-            stdout.write_all(b"\n").await?;
-            stdout.flush().await?;
-            continue;
-        }
+        let item = framed.next().await;
+        let line = match item {
+            None => break, // EOF — client disconnected.
+            Some(Err(LinesCodecError::MaxLineLengthExceeded)) => {
+                let err_response = json!({
+                    "jsonrpc": "2.0",
+                    "id": null,
+                    "error": {"code": -32700, "message": "Request exceeds maximum frame size"}
+                });
+                let out = serde_json::to_string(&err_response).unwrap_or_default();
+                stdout.write_all(out.as_bytes()).await?;
+                stdout.write_all(b"\n").await?;
+                stdout.flush().await?;
+                continue;
+            }
+            Some(Err(LinesCodecError::Io(e))) => return Err(e.into()),
+            Some(Ok(line)) => line,
+        };
 
         let trimmed = line.trim();
         if trimmed.is_empty() {

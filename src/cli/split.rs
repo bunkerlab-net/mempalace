@@ -300,14 +300,22 @@ pub fn run(
     let mut total_written = 0usize;
 
     for (path, _n_sessions) in &mega_files {
-        let out_dir = output_dir.unwrap_or_else(|| path.parent().unwrap_or(directory));
-        if !out_dir.is_dir() {
-            return Err(crate::error::Error::Other(format!(
-                "split: output directory not found or not a directory: {}",
-                out_dir.display()
-            )));
-        }
-        total_written += split_file(path, out_dir, dry_run)?;
+        // When output_dir was provided it is already validated above; skip the
+        // redundant is_dir call.  When falling back to the file's parent we must
+        // validate per-iteration because different files can have different parents.
+        let output_directory = if let Some(explicit_output_directory) = output_dir {
+            explicit_output_directory
+        } else {
+            let file_directory = path.parent().unwrap_or(directory);
+            if !file_directory.is_dir() {
+                return Err(crate::error::Error::Other(format!(
+                    "split: output directory not found or not a directory: {}",
+                    file_directory.display()
+                )));
+            }
+            file_directory
+        };
+        total_written += split_file(path, output_directory, dry_run)?;
     }
 
     println!();

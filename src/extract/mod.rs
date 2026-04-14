@@ -42,11 +42,13 @@ pub fn extract_memories(text: &str, min_confidence: f64) -> Vec<Memory> {
         }
 
         let prose = extract_prose(para);
+        // Lowercase once here so score_markers can skip the allocation on each of its 5 calls.
+        let prose_lower = prose.to_lowercase();
 
         // Score against all types
         let mut scores: Vec<(&str, f64)> = Vec::new();
         for &(mem_type, markers) in all_markers {
-            let score = score_markers(&prose, markers);
+            let score = score_markers(&prose_lower, markers);
             if score > 0.0 {
                 scores.push((mem_type, score));
             }
@@ -100,12 +102,13 @@ pub fn extract_memories(text: &str, min_confidence: f64) -> Vec<Memory> {
     memories
 }
 
-/// Score text against pre-compiled regex markers.
+/// Score pre-lowercased text against pre-compiled regex markers.
+///
+/// Callers must pass an already-lowercased string; this function does not lowercase internally.
 fn score_markers(text: &str, markers: &[Regex]) -> f64 {
-    let text_lower = text.to_lowercase();
     let mut score = 0.0;
     for re in markers {
-        let count = re.find_iter(&text_lower).count();
+        let count = re.find_iter(text).count();
         // Regex match count; always small enough for exact f64 representation
         #[allow(clippy::cast_precision_loss)]
         {

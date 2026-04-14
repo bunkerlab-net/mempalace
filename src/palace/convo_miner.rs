@@ -426,7 +426,20 @@ pub async fn mine_convos(
         .to_string_lossy()
         .to_lowercase()
         .replace([' ', '-'], "_");
-    let wing = opts.wing.as_deref().unwrap_or(&dir_name);
+    // file_name() returns None for filesystem roots (e.g. `/`), producing an empty
+    // dir_name. An empty wing triggers the assert in drawer::add_drawer, so surface
+    // a clear error here instead.
+    let wing = if let Some(wing_name) = opts.wing.as_deref() {
+        wing_name
+    } else if dir_name.is_empty() {
+        return Err(crate::error::Error::Other(
+            "mine convos: cannot determine wing name — directory is a filesystem root; \
+             pass --wing to specify one explicitly"
+                .to_string(),
+        ));
+    } else {
+        &dir_name
+    };
 
     let mut all_files = scan_convos(&directory);
     // Sort for deterministic ordering before applying any limit.

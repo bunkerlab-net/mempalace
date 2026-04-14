@@ -22,6 +22,7 @@ unwrap_used = "deny"
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 ignore = "0.4"
 regex = "1"
 serde = { version = "1", features = ["derive"] }
@@ -35,6 +36,7 @@ tokio = { version = "1", features = [
   "io-std",
   "io-util",
 ] }
+tokio-util = { version = "0.7", features = ["codec"] }
 turso = "0.5.3"
 uuid = { version = "1", features = ["v4"] }
 
