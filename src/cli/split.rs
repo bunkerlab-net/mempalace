@@ -49,6 +49,8 @@ static MULTI_UNDERSCORE_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 const MAX_SPLIT_FILE_SIZE: u64 = 500 * 1024 * 1024; // 500 MB safety limit
+/// POSIX filename byte limit; used to compute the subject byte budget in `split_file`.
+const FILENAME_BYTE_LIMIT: usize = 255;
 
 /// Find lines where true new sessions begin (Claude Code v header not followed by context restore).
 ///
@@ -118,10 +120,7 @@ fn extract_subject(lines: &[&str]) -> String {
             if prompt.len() > 5 && !SKIP_RE.is_match(prompt) {
                 let subject = CLEAN_RE.replace_all(prompt, "");
                 let subject = SPACE_RE.replace_all(subject.trim(), "-");
-                // Collect at most 60 Unicode scalar values — byte slicing would panic on
-                // multibyte characters that happen to straddle the 60-byte boundary.
-                let truncated: String = subject.chars().take(60).collect();
-                return truncated;
+                return subject.into_owned();
             }
         }
     }
@@ -191,6 +190,37 @@ fn split_file(path: &Path, output_dir: &Path, dry_run: bool) -> Result<usize> {
 
         let ts_part = extract_timestamp(&chunk).unwrap_or_else(|| format!("part{:02}", i + 1));
         let subject = extract_subject(&chunk);
+
+        // Truncate subject to keep the assembled filename within the POSIX byte limit.
+        // src_stem and ts_part are always ASCII after sanitization, so their byte
+        // lengths equal their char counts. Overhead: "__" (2) + "_" (1) + ".txt" (4).
+        let subject_byte_cap = FILENAME_BYTE_LIMIT
+            .saturating_sub(src_stem.len())
+            .saturating_sub(ts_part.len())
+            .saturating_sub(7);
+        assert!(
+            subject_byte_cap > 0,
+            "split_file: src_stem + ts_part overhead already exceeds filesystem limit"
+        );
+        let subject: String = if subject.len() <= subject_byte_cap {
+            subject
+        } else {
+            // Accumulate chars only while the byte budget allows, preserving UTF-8
+            // boundaries that byte-slicing would straddle.
+            let mut byte_count = 0usize;
+            subject
+                .chars()
+                .take_while(|&character| {
+                    byte_count += character.len_utf8();
+                    byte_count <= subject_byte_cap
+                })
+                .collect()
+        };
+        debug_assert!(
+            subject.len() <= subject_byte_cap,
+            "subject byte length {len} exceeds cap {subject_byte_cap}",
+            len = subject.len()
+        );
 
         let name = format!("{src_stem}__{ts_part}_{subject}.txt");
         let name = SANITIZE_RE.replace_all(&name, "_");

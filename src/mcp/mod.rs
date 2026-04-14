@@ -167,10 +167,36 @@ async fn handle_request_tools_call(
     params: &Value,
     req_id: Value,
 ) -> Value {
-    let tool_name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
-    let tool_args = params
-        .get("arguments")
-        .filter(|v| !v.is_null())
+    // Validate params shape before dispatch — reject non-object params, a
+    // missing or non-string name, and non-object arguments with Invalid Params
+    // (-32602) rather than letting malformed input reach tools::dispatch.
+    if !params.is_object() {
+        return json!({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "error": {"code": -32602, "message": "Invalid params: expected object"}
+        });
+    }
+    let Some(tool_name) = params
+        .get("name")
+        .and_then(|name_value| name_value.as_str())
+    else {
+        return json!({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "error": {"code": -32602, "message": "Invalid params: missing or non-string 'name'"}
+        });
+    };
+    let arguments_value = params.get("arguments");
+    if arguments_value.is_some_and(|arguments| !arguments.is_null() && !arguments.is_object()) {
+        return json!({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "error": {"code": -32602, "message": "Invalid params: 'arguments' must be an object or null"}
+        });
+    }
+    let tool_args = arguments_value
+        .filter(|arguments| !arguments.is_null())
         .cloned()
         .unwrap_or(json!({}));
 
