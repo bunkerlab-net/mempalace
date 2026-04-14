@@ -130,13 +130,18 @@ fn chunk_exchanges(content: &str) -> Vec<Chunk> {
         .filter(|l| l.trim_start().starts_with('>'))
         .count();
 
-    // Route to chunk_by_exchange whenever at least one user turn (>) is present,
-    // including single-exchange transcripts.  The previous threshold of 3 caused
-    // single-exchange blocks to fall through to chunk_by_paragraph, which never
-    // splits on CHUNK_SIZE, silently discarding content beyond the first paragraph.
-    // chunk_by_exchange handles sparse-quote input gracefully: lines without a
-    // leading '>' are skipped by the inner else branch, so no data is lost.
-    if quote_count >= 1 {
+    // Route to chunk_by_exchange only when the first non-empty line is a user
+    // turn marker ('>').  A previous version routed whenever quote_count >= 1,
+    // but chunk_by_exchange silently drops every non-'>' line via its else-skip
+    // branch.  Content that starts with unquoted preamble (leading text before
+    // the first '>') would therefore be discarded; chunk_by_paragraph preserves
+    // it instead.  The quote_count >= 1 guard still rejects fully unquoted files.
+    let first_nonempty_is_quote = lines
+        .iter()
+        .find(|l| !l.trim().is_empty())
+        .is_some_and(|l| l.trim_start().starts_with('>'));
+
+    if quote_count >= 1 && first_nonempty_is_quote {
         chunk_by_exchange(&lines)
     } else {
         chunk_by_paragraph(content)
@@ -749,5 +754,38 @@ mod tests {
             input.as_bytes(),
             "reconstructed content must match original bytes exactly"
         );
+    }
+
+    #[test]
+    fn chunk_exchanges_single_exchange_regression() {
+        // Regression: chunk_exchanges must route single-exchange transcripts
+        // through chunk_by_exchange, preserving all AI lines.  An earlier
+        // threshold of quote_count >= 3 caused single-exchange blocks to fall
+        // through to chunk_by_paragraph, silently dropping lines beyond the
+        // first paragraph boundary.  This test calls the public dispatcher
+        // (chunk_exchanges) rather than chunk_by_exchange directly so any future
+        // regression in the routing logic is caught here.
+        let lines: Vec<String> = std::iter::once("> user question".to_string())
+            .chain((1..=9).map(|n| format!("ai line {n}")))
+            .collect();
+        let input = lines.join("\n");
+        let chunks = chunk_exchanges(&input);
+        assert!(!chunks.is_empty(), "must produce at least one chunk");
+        let all_text = chunks
+            .iter()
+            .map(|c| c.content.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            all_text.contains("ai line 9"),
+            "all AI lines must be preserved via chunk_exchanges dispatcher"
+        );
+        // Chunk indices must be contiguous and 0-based.
+        for (expected, chunk) in chunks.iter().enumerate() {
+            assert_eq!(
+                chunk.chunk_index, expected,
+                "chunk indices must be 0-based and contiguous"
+            );
+        }
     }
 }
