@@ -213,9 +213,16 @@ fn chunk_by_exchange(lines: &[&str]) -> Vec<Chunk> {
                 let mut remainder = &content[first_end..];
                 while !remainder.is_empty() {
                     let end = chunk_by_exchange_floor_char_boundary(remainder, CHUNK_SIZE);
-                    // floor_char_boundary returns at least 1 for non-empty input
-                    // when CHUNK_SIZE > 0, preventing an infinite loop.
-                    let end = end.max(1);
+                    // If floor_char_boundary returned 0 (edge case for corrupted input),
+                    // advance by the first character's UTF-8 byte length to maintain
+                    // boundary safety and prevent infinite loops.
+                    let end = if end == 0 {
+                        // Invariant: remainder is non-empty (guarded by while condition),
+                        // so chars().next() always returns Some.
+                        remainder.chars().next().map_or(1, char::len_utf8)
+                    } else {
+                        end
+                    };
                     let part = &remainder[..end];
                     remainder = &remainder[end..];
                     chunks.push(Chunk {
@@ -698,5 +705,39 @@ mod tests {
         let s = "aé"; // bytes: [0x61, 0xC3, 0xA9]
         assert_eq!(chunk_by_exchange_floor_char_boundary(s, 2), 1); // step back to 'a' boundary
         assert_eq!(chunk_by_exchange_floor_char_boundary(s, 3), 3); // end of 'é' is fine
+    }
+
+    #[test]
+    fn chunk_by_exchange_small_tail_regression() {
+        // Regression test: when content is CHUNK_SIZE + (MIN_CHUNK_SIZE - 1) bytes,
+        // the split produces a full first chunk and a small tail; verify both are
+        // preserved and chunk indices are contiguous.
+        let ai_body = "x".repeat(CHUNK_SIZE + (MIN_CHUNK_SIZE - 1)); // 829 bytes
+        let input = format!("> user\n{ai_body}");
+        let lines: Vec<&str> = input.lines().collect();
+
+        let chunks = chunk_by_exchange(&lines);
+
+        // Must produce exactly two chunks: one full (800) and one small (29+).
+        assert_eq!(chunks.len(), 2, "must produce exactly two chunks");
+
+        // Chunk indices must be contiguous and 0-based.
+        for (expected, chunk) in chunks.iter().enumerate() {
+            assert_eq!(
+                chunk.chunk_index, expected,
+                "chunk indices must be 0-based and contiguous"
+            );
+        }
+
+        // Full byte reconstruction: concatenate all chunk bodies.
+        let reconstructed = chunks
+            .iter()
+            .map(|c| c.content.as_str())
+            .collect::<String>();
+        assert_eq!(
+            reconstructed.as_bytes(),
+            input.as_bytes(),
+            "reconstructed content must match original bytes exactly"
+        );
     }
 }
