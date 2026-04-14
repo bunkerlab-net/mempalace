@@ -23,6 +23,10 @@ const MAX_EXACT_INT_F64: f64 = 9_007_199_254_740_991.0;
 /// index rows.  255 characters is generous for a short descriptive label.
 const MAX_LABEL_LEN: usize = 255;
 
+/// Exact character length of a tunnel ID.  Tunnel IDs are the first 16 hex
+/// characters of a SHA256 digest (see `canonical_tunnel_id` in graph.rs).
+const TUNNEL_ID_LEN: usize = 16;
+
 /// Dispatch a tool call by name and return the JSON result.
 pub async fn dispatch(connection: &Connection, name: &str, args: &Value) -> Value {
     // Empty name and non-object args can arrive from untrusted MCP clients;
@@ -1147,14 +1151,16 @@ async fn tool_create_tunnel(connection: &Connection, args: &Value) -> Value {
         }
         v
     };
-    let source_drawer_id = {
-        let v = str_arg(args, "source_drawer_id");
-        if v.is_empty() { None } else { Some(v) }
-    };
-    let target_drawer_id = {
-        let v = str_arg(args, "target_drawer_id");
-        if v.is_empty() { None } else { Some(v) }
-    };
+    let source_drawer_id =
+        match sanitize_opt_name(str_arg(args, "source_drawer_id"), "source_drawer_id") {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+    let target_drawer_id =
+        match sanitize_opt_name(str_arg(args, "target_drawer_id"), "target_drawer_id") {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
 
     match graph::create_tunnel(
         connection,
@@ -1164,8 +1170,8 @@ async fn tool_create_tunnel(connection: &Connection, args: &Value) -> Value {
             target_wing: &target_wing,
             target_room: &target_room,
             label,
-            source_drawer_id,
-            target_drawer_id,
+            source_drawer_id: source_drawer_id.as_deref(),
+            target_drawer_id: target_drawer_id.as_deref(),
         },
     )
     .await
@@ -1188,9 +1194,15 @@ async fn tool_list_tunnels(connection: &Connection, args: &Value) -> Value {
 }
 
 async fn tool_delete_tunnel(connection: &Connection, args: &Value) -> Value {
-    let tunnel_id = str_arg(args, "tunnel_id");
+    // Trim before validation to avoid spurious failures from surrounding whitespace.
+    let tunnel_id = str_arg(args, "tunnel_id").trim();
     if tunnel_id.is_empty() {
         return json!({"error": "tunnel_id is required", "public": true});
+    }
+    // Tunnel IDs are the first 16 hex characters of a SHA256 digest — validate
+    // the exact format so arbitrary strings are never passed to the database.
+    if tunnel_id.len() != TUNNEL_ID_LEN || !tunnel_id.chars().all(|c| c.is_ascii_hexdigit()) {
+        return json!({"error": "tunnel_id must be a 16-character hex string", "public": true});
     }
 
     match graph::delete_tunnel(connection, tunnel_id).await {

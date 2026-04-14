@@ -12,8 +12,11 @@ use crate::palace::room_detect::is_skip_dir;
 
 const CONVO_EXTENSIONS: &[&str] = &["txt", "md", "json", "jsonl"];
 const MIN_CHUNK_SIZE: usize = 30;
-/// Chars per drawer — large exchanges are split at this boundary so the full
-/// AI response is stored without truncation.  Mirrors miner.py's `CHUNK_SIZE`.
+/// Bytes per drawer — large exchanges are split at this boundary (rounded down
+/// to a UTF-8 char boundary) so the full AI response is stored without
+/// truncation.  Mirrors miner.py's `CHUNK_SIZE`.  Uses `content.len()` (bytes),
+/// not `content.chars().count()`, so chunks may be slightly shorter for
+/// multi-byte characters.
 const CHUNK_SIZE: usize = 800;
 /// Files larger than this are skipped — prevents OOM on huge files.
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
@@ -153,9 +156,10 @@ fn chunk_by_exchange_floor_char_boundary(s: &str, index: usize) -> usize {
 
 /// One user turn (>) + the full AI response that follows = one or more chunks.
 ///
-/// The full AI response is preserved verbatim. When the combined user-turn +
-/// response exceeds `CHUNK_SIZE`, the response is split across consecutive
-/// drawers so nothing is silently discarded (fixes the prior 8-line cap).
+/// Each line is whitespace-trimmed and empty lines are dropped; the remaining
+/// lines are joined with a single space.  When the combined content exceeds
+/// `CHUNK_SIZE` bytes, it is split across consecutive drawers so nothing is
+/// silently discarded (fixes the prior 8-line cap).
 fn chunk_by_exchange(lines: &[&str]) -> Vec<Chunk> {
     let mut chunks = Vec::new();
     let mut i = 0;
