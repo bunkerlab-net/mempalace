@@ -31,8 +31,33 @@ fn default_collection_name() -> String {
     "mempalace_drawers".to_string()
 }
 
-/// Returns ~/.mempalace/
+// Override for the config directory. Set once by `test_helpers::test_db()`
+// before any tool writes, redirecting WAL and config writes away from the real
+// `~/.mempalace` during test runs. The `OnceLock` makes this safe for parallel
+// test execution: whichever test sets it first wins, and all subsequent calls
+// to `config_dir()` see the same override.
+static CONFIG_DIR_OVERRIDE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Override the config directory returned by `config_dir`.
+///
+/// Intended for test setup only. Must be called before any code that uses
+/// `config_dir()`. Subsequent calls are silently ignored (`OnceLock` semantics).
+// Called from test_helpers::redirect_config_dir() in the library target.
+// The binary compiles test_helpers only under #[cfg(test)], so the binary
+// linker sees this as unused — suppress rather than remove it.
+#[allow(dead_code)]
+pub fn set_config_dir_override(path: PathBuf) {
+    let _ = CONFIG_DIR_OVERRIDE.set(path);
+}
+
+/// Returns the mempalace config directory (`~/.mempalace` by default).
+///
+/// If `set_config_dir_override` has been called (e.g. by test setup), that
+/// path is returned instead.
 pub fn config_dir() -> PathBuf {
+    if let Some(path) = CONFIG_DIR_OVERRIDE.get() {
+        return path.clone();
+    }
     dirs_fallback().join(".mempalace")
 }
 
@@ -155,7 +180,9 @@ mod tests {
 
     #[test]
     fn config_dir_ends_with_mempalace() {
-        let directory = config_dir();
+        // Test the path formula directly rather than the public `config_dir()`,
+        // which may return an override path set by test infrastructure.
+        let directory = dirs_fallback().join(".mempalace");
         assert!(directory.to_string_lossy().ends_with(".mempalace"));
     }
 
