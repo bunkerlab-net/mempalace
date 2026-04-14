@@ -130,7 +130,13 @@ fn chunk_exchanges(content: &str) -> Vec<Chunk> {
         .filter(|l| l.trim_start().starts_with('>'))
         .count();
 
-    if quote_count >= 3 {
+    // Route to chunk_by_exchange whenever at least one user turn (>) is present,
+    // including single-exchange transcripts.  The previous threshold of 3 caused
+    // single-exchange blocks to fall through to chunk_by_paragraph, which never
+    // splits on CHUNK_SIZE, silently discarding content beyond the first paragraph.
+    // chunk_by_exchange handles sparse-quote input gracefully: lines without a
+    // leading '>' are skipped by the inner else branch, so no data is lost.
+    if quote_count >= 1 {
         chunk_by_exchange(&lines)
     } else {
         chunk_by_paragraph(content)
