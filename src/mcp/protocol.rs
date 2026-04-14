@@ -72,8 +72,8 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Short search query ONLY — keywords or a question. Do NOT include system prompts or conversation context. Max 200 chars recommended.",
-                        "maxLength": 500
+                        "description": "Short search query ONLY — keywords or a question. Max 250 chars.",
+                        "maxLength": 250
                     },
                     "limit": {"type": "integer", "description": "Max results (default 5)"},
                     "wing": {"type": "string", "description": "Filter by wing (optional)"},
@@ -278,6 +278,56 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
                     "last_n": {"type": "integer", "description": "Number of recent entries to read (default: 10)"}
                 },
                 "required": ["agent_name"]
+            }
+        },
+        {
+            "name": "mempalace_create_tunnel",
+            "description": "Create an explicit cross-wing tunnel between two palace locations. Use when content in one project relates to another — e.g., an API design in project_api connects to a database schema in project_database.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source_wing": {"type": "string", "description": "Wing of the source location"},
+                    "source_room": {"type": "string", "description": "Room in the source wing"},
+                    "target_wing": {"type": "string", "description": "Wing of the target location"},
+                    "target_room": {"type": "string", "description": "Room in the target wing"},
+                    "label": {"type": "string", "description": "Description of the connection (optional)"},
+                    "source_drawer_id": {"type": "string", "description": "Optional specific source drawer ID"},
+                    "target_drawer_id": {"type": "string", "description": "Optional specific target drawer ID"}
+                },
+                "required": ["source_wing", "source_room", "target_wing", "target_room"]
+            }
+        },
+        {
+            "name": "mempalace_list_tunnels",
+            "description": "List all explicit cross-wing tunnels. Optionally filter by wing.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "wing": {"type": "string", "description": "Filter to tunnels involving this wing (optional)"}
+                }
+            }
+        },
+        {
+            "name": "mempalace_delete_tunnel",
+            "description": "Delete an explicit tunnel by its ID.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tunnel_id": {"type": "string", "description": "Tunnel ID to delete"}
+                },
+                "required": ["tunnel_id"]
+            }
+        },
+        {
+            "name": "mempalace_follow_tunnels",
+            "description": "Follow explicit tunnels from a room to see what it connects to in other wings.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "wing": {"type": "string", "description": "Wing to start from"},
+                    "room": {"type": "string", "description": "Room to follow tunnels from"}
+                },
+                "required": ["wing", "room"]
             }
         }
     ]).as_array()

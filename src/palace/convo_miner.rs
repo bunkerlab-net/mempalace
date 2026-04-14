@@ -12,6 +12,9 @@ use crate::palace::room_detect::is_skip_dir;
 
 const CONVO_EXTENSIONS: &[&str] = &["txt", "md", "json", "jsonl"];
 const MIN_CHUNK_SIZE: usize = 30;
+/// Chars per drawer — large exchanges are split at this boundary so the full
+/// AI response is stored without truncation.  Mirrors miner.py's `CHUNK_SIZE`.
+const CHUNK_SIZE: usize = 800;
 /// Files larger than this are skipped — prevents OOM on huge files.
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
 
@@ -128,6 +131,11 @@ fn chunk_exchanges(content: &str) -> Vec<Chunk> {
     }
 }
 
+/// One user turn (>) + the full AI response that follows = one or more chunks.
+///
+/// The full AI response is preserved verbatim. When the combined user-turn +
+/// response exceeds `CHUNK_SIZE`, the response is split across consecutive
+/// drawers so nothing is silently discarded (fixes the prior 8-line cap).
 fn chunk_by_exchange(lines: &[&str]) -> Vec<Chunk> {
     let mut chunks = Vec::new();
     let mut i = 0;
@@ -154,14 +162,37 @@ fn chunk_by_exchange(lines: &[&str]) -> Vec<Chunk> {
                 i += 1;
             }
 
-            let ai_response = ai_lines[..ai_lines.len().min(8)].join(" ");
+            // Full response — no truncation.
+            let ai_response = ai_lines.join(" ");
             let content = if ai_response.is_empty() {
                 user_turn.to_string()
             } else {
                 format!("{user_turn}\n{ai_response}")
             };
 
-            if content.trim().len() > MIN_CHUNK_SIZE {
+            if content.len() > CHUNK_SIZE {
+                // First chunk: user turn + as much response as fits.
+                let first = &content[..CHUNK_SIZE];
+                if first.trim().len() > MIN_CHUNK_SIZE {
+                    chunks.push(Chunk {
+                        content: first.to_string(),
+                        chunk_index: chunks.len(),
+                    });
+                }
+                // Remaining response in CHUNK_SIZE continuation drawers.
+                let mut remainder = &content[CHUNK_SIZE..];
+                while !remainder.is_empty() {
+                    let end = CHUNK_SIZE.min(remainder.len());
+                    let part = &remainder[..end];
+                    remainder = &remainder[end..];
+                    if part.trim().len() > MIN_CHUNK_SIZE {
+                        chunks.push(Chunk {
+                            content: part.to_string(),
+                            chunk_index: chunks.len(),
+                        });
+                    }
+                }
+            } else if content.trim().len() > MIN_CHUNK_SIZE {
                 chunks.push(Chunk {
                     content,
                     chunk_index: chunks.len(),
@@ -544,5 +575,53 @@ mod tests {
     fn detect_convo_room_handles_utf8_without_panicking() {
         let content = "🚀 Planejamento técnico com decisão sobre API e arquitetura. ".repeat(200);
         assert_eq!(detect_convo_room(&content), "technical");
+    }
+
+    #[test]
+    fn chunk_by_exchange_stores_full_ai_response() {
+        // Before the fix the AI response was truncated to 8 lines; this test
+        // verifies the 9th line is now preserved.
+        let lines: Vec<String> = std::iter::once("> user question".to_string())
+            .chain((1..=9).map(|n| format!("ai line {n}")))
+            .collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let chunks = chunk_by_exchange(&refs);
+        assert!(!chunks.is_empty(), "must produce at least one chunk");
+        let all_text = chunks
+            .iter()
+            .map(|c| c.content.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            all_text.contains("ai line 9"),
+            "9th AI line must be preserved"
+        );
+    }
+
+    #[test]
+    fn chunk_by_exchange_splits_large_exchange() {
+        // A long AI response (> CHUNK_SIZE) must be split into multiple drawers.
+        let ai_body = "x ".repeat(500); // ~1000 chars > CHUNK_SIZE=800
+        let input = format!("> user turn\n{ai_body}");
+        let lines: Vec<&str> = input.lines().collect();
+        let chunks = chunk_by_exchange(&lines);
+        assert!(chunks.len() >= 2, "large exchange must produce 2+ chunks");
+        // Chunk indices must be contiguous and 0-based.
+        for (expected, chunk) in chunks.iter().enumerate() {
+            assert_eq!(chunk.chunk_index, expected, "chunk indices must be 0-based");
+        }
+    }
+
+    #[test]
+    fn chunk_by_exchange_small_exchange_single_chunk() {
+        // Content is > MIN_CHUNK_SIZE (30) so it must produce exactly one chunk.
+        let input = "> user asks a question here\nthe assistant replies with an answer";
+        let lines: Vec<&str> = input.lines().collect();
+        let chunks = chunk_by_exchange(&lines);
+        assert_eq!(chunks.len(), 1, "small exchange fits in one chunk");
+        assert!(
+            chunks[0].content.contains("assistant replies"),
+            "answer preserved"
+        );
     }
 }

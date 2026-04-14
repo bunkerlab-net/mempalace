@@ -1,3 +1,4 @@
 [submodule "mempalace-py"]
 	path = mempalace-py
 	url = https://github.com/MemPalace/mempalace.git
+	branch = main

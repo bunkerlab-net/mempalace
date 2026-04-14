@@ -48,7 +48,7 @@ cp target/release/mempalace ~/.local/bin/mempalace
 claude mcp add mempalace -- /path/to/mempalace mcp
 ```
 
-The MCP server runs as a JSON-RPC 2.0 process over stdio. All 22 tools are available immediately
+The MCP server runs as a JSON-RPC 2.0 process over stdio. All 26 tools are available immediately
 after the server starts.
 
 On first use, call `mempalace_status` — it returns the full memory protocol and AAAK dialect spec
@@ -304,7 +304,7 @@ Traits: direct, memory-first, no summaries.
 
 ---
 
-## MCP Tools (22)
+## MCP Tools (26)
 
 All tools communicate over JSON-RPC 2.0. Invoke them from the AI side via the MCP protocol.
 
@@ -351,8 +351,20 @@ Invalidation preserves the old fact with a `valid_to` date rather than deleting 
 | `mempalace_find_tunnels` | `wing_a?`, `wing_b?`      | Rooms that bridge two wings                  |
 | `mempalace_graph_stats`  | —                         | Total rooms, tunnel count, edges             |
 
-Tunnels are rooms that appear in more than one wing — they are automatic cross-wing connections,
-no configuration needed.
+Auto-tunnels are rooms that appear in more than one wing — discovered automatically, no configuration needed.
+
+### Explicit Tunnels
+
+| Tool                       | Parameters                                                                                                     | What it does                                           |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| `mempalace_create_tunnel`  | `source_wing`, `source_room`, `target_wing`, `target_room`, `label?`, `source_drawer_id?`, `target_drawer_id?` | Create a named cross-wing link between two rooms       |
+| `mempalace_list_tunnels`   | `wing?`                                                                                                        | List all explicit tunnels, optionally filtered by wing |
+| `mempalace_delete_tunnel`  | `tunnel_id`                                                                                                    | Delete an explicit tunnel by its ID                    |
+| `mempalace_follow_tunnels` | `wing`, `room`                                                                                                 | See what a room connects to via explicit tunnels       |
+
+Explicit tunnels are agent-created cross-wing links stored in the database. Use them when content in
+one project relates to another (e.g. an API design in `project_api` connects to a schema in
+`project_database`). Tunnels are symmetric — A→B and B→A share the same ID.
 
 ### Agent Diary
 
@@ -369,13 +381,14 @@ Diary entries live in `wing_{agent_name}/diary`. Use AAAK format for compact ent
 
 Single SQLite file at `~/.mempalace/palace.db`:
 
-| Table          | Purpose                                                                                        |
-| -------------- | ---------------------------------------------------------------------------------------------- |
-| `drawers`      | Content chunks: wing, room, content, source_file, chunk_index, added_by, ingest_mode, filed_at |
-| `drawer_words` | Inverted index: word → drawer_id → count                                                       |
-| `entities`     | Knowledge graph nodes: name, type, properties (JSON)                                           |
-| `triples`      | Knowledge graph edges: subject, predicate, object, valid_from, valid_to, confidence            |
-| `compressed`   | AAAK-compressed drawer versions                                                                |
+| Table              | Purpose                                                                                        |
+| ------------------ | ---------------------------------------------------------------------------------------------- |
+| `drawers`          | Content chunks: wing, room, content, source_file, chunk_index, added_by, ingest_mode, filed_at |
+| `drawer_words`     | Inverted index: word → drawer_id → count                                                       |
+| `entities`         | Knowledge graph nodes: name, type, properties (JSON)                                           |
+| `triples`          | Knowledge graph edges: subject, predicate, object, valid_from, valid_to, confidence            |
+| `compressed`       | AAAK-compressed drawer versions                                                                |
+| `explicit_tunnels` | Agent-created cross-wing links: source/target wing+room, label, canonical SHA256 tunnel_id     |
 
 ---
 
@@ -385,7 +398,7 @@ Single SQLite file at `~/.mempalace/palace.db`:
 src/
   main.rs              Entry point: clap dispatch → open_palace() → handler
   db.rs                open_db(), query_all() helpers over turso::Connection
-  schema.rs            DDL: 5 tables + indexes, ensure_schema()
+  schema.rs            DDL: 6 tables + indexes, ensure_schema()
   config.rs            MempalaceConfig (~/.mempalace/config.json) + ProjectConfig (mempalace.yaml)
   error.rs             thiserror Error enum
 
@@ -408,14 +421,14 @@ src/
     query_sanitizer.rs 4-step sanitizer: strip system-prompt contamination from search queries
     entity_detect.rs   Person vs project heuristic classifier
     layers.rs          L0 identity + L1 essential story assembly
-    graph.rs           BFS traversal, tunnel detection
+    graph.rs           BFS traversal, auto-tunnel detection, explicit tunnel CRUD
 
   kg/
     mod.rs             Entity + triple CRUD
     query.rs           query_entity(), kg_timeline()
 
   normalize/           Chat export parsers → canonical transcript text
-    claude_code.rs     JSONL (Claude Code); accepts both "human" and "user" types
+    claude_code.rs     JSONL (Claude Code); strip_noise() removes UI chrome / system-reminder tags
     claude_ai.rs       JSON array (Claude.ai) + privacy export format
     codex.rs           JSONL (OpenAI Codex CLI)
     chatgpt.rs         ChatGPT export JSON
@@ -432,8 +445,8 @@ src/
 
   mcp/
     mod.rs             Async stdio JSON-RPC 2.0 event loop
-    protocol.rs        PALACE_PROTOCOL, AAAK_SPEC, 22 tool schemas
-    tools.rs           Tool dispatch + all 22 handler implementations
+    protocol.rs        PALACE_PROTOCOL, AAAK_SPEC, 26 tool schemas
+    tools.rs           Tool dispatch + all 26 handler implementations
 ```
 
 ---

@@ -50,6 +50,10 @@ pub async fn dispatch(connection: &Connection, name: &str, args: &Value) -> Valu
         "mempalace_traverse" => tool_traverse(connection, args).await,
         "mempalace_find_tunnels" => tool_find_tunnels(connection, args).await,
         "mempalace_graph_stats" => tool_graph_stats(connection).await,
+        "mempalace_create_tunnel" => tool_create_tunnel(connection, args).await,
+        "mempalace_list_tunnels" => tool_list_tunnels(connection, args).await,
+        "mempalace_delete_tunnel" => tool_delete_tunnel(connection, args).await,
+        "mempalace_follow_tunnels" => tool_follow_tunnels(connection, args).await,
         "mempalace_diary_write" => tool_diary_write(connection, args).await,
         "mempalace_diary_read" => tool_diary_read(connection, args).await,
         _ => json!({"error": format!("Unknown tool: {name}"), "public": true}),
@@ -1110,6 +1114,92 @@ async fn tool_find_tunnels(connection: &Connection, args: &Value) -> Value {
 async fn tool_graph_stats(connection: &Connection) -> Value {
     match graph::graph_stats(connection).await {
         Ok(stats) => json!(stats),
+        Err(e) => json!({"error": e.to_string()}),
+    }
+}
+
+async fn tool_create_tunnel(connection: &Connection, args: &Value) -> Value {
+    let source_wing = match sanitize_name(str_arg(args, "source_wing"), "source_wing") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let source_room = match sanitize_name(str_arg(args, "source_room"), "source_room") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let target_wing = match sanitize_name(str_arg(args, "target_wing"), "target_wing") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let target_room = match sanitize_name(str_arg(args, "target_room"), "target_room") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let label = str_arg(args, "label");
+    let source_drawer_id = {
+        let v = str_arg(args, "source_drawer_id");
+        if v.is_empty() { None } else { Some(v) }
+    };
+    let target_drawer_id = {
+        let v = str_arg(args, "target_drawer_id");
+        if v.is_empty() { None } else { Some(v) }
+    };
+
+    match graph::create_tunnel(
+        connection,
+        &graph::CreateTunnelParams {
+            source_wing: &source_wing,
+            source_room: &source_room,
+            target_wing: &target_wing,
+            target_room: &target_room,
+            label,
+            source_drawer_id,
+            target_drawer_id,
+        },
+    )
+    .await
+    {
+        Ok(tunnel) => json!(tunnel),
+        Err(e) => json!({"error": e.to_string()}),
+    }
+}
+
+async fn tool_list_tunnels(connection: &Connection, args: &Value) -> Value {
+    let wing = match sanitize_opt_name(str_arg(args, "wing"), "wing") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+
+    match graph::list_tunnels(connection, wing.as_deref()).await {
+        Ok(tunnels) => json!({"tunnels": tunnels, "count": tunnels.len()}),
+        Err(e) => json!({"error": e.to_string()}),
+    }
+}
+
+async fn tool_delete_tunnel(connection: &Connection, args: &Value) -> Value {
+    let tunnel_id = str_arg(args, "tunnel_id");
+    if tunnel_id.is_empty() {
+        return json!({"error": "tunnel_id is required", "public": true});
+    }
+
+    match graph::delete_tunnel(connection, tunnel_id).await {
+        Ok(deleted) => json!({"deleted": deleted, "tunnel_id": tunnel_id}),
+        Err(e) => json!({"error": e.to_string()}),
+    }
+}
+
+async fn tool_follow_tunnels(connection: &Connection, args: &Value) -> Value {
+    let wing = match sanitize_name(str_arg(args, "wing"), "wing") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let room = match sanitize_name(str_arg(args, "room"), "room") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+
+    match graph::follow_tunnels(connection, &wing, &room).await {
+        Ok(connections) => json!({"wing": wing, "room": room, "connections": connections}),
         Err(e) => json!({"error": e.to_string()}),
     }
 }

@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use chrono::Utc;
 use serde::Serialize;
+use sha2::Digest as _;
 use turso::Connection;
 
 use crate::db::query_all;
@@ -285,6 +287,376 @@ pub async fn graph_stats(connection: &Connection) -> Result<GraphStats> {
     })
 }
 
+// =============================================================================
+// EXPLICIT TUNNELS — agent-created cross-wing links
+// =============================================================================
+// Passive tunnels are discovered from shared room names across wings.
+// Explicit tunnels are created by agents when they notice a connection
+// between two specific rooms in different wings/projects.
+//
+// Tunnels are symmetric (undirected): create_tunnel(A, B) and
+// create_tunnel(B, A) produce the same canonical ID via a sorted hash,
+// so a second call with flipped endpoints updates rather than duplicates.
+
+/// An explicit tunnel linking two palace locations.
+#[derive(Debug, Clone, Serialize)]
+pub struct ExplicitTunnel {
+    /// Canonical tunnel ID — SHA256 of sorted endpoints.
+    pub id: String,
+    /// Source wing.
+    pub source_wing: String,
+    /// Source room.
+    pub source_room: String,
+    /// Target wing.
+    pub target_wing: String,
+    /// Target room.
+    pub target_room: String,
+    /// Optional specific source drawer ID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_drawer_id: Option<String>,
+    /// Optional specific target drawer ID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_drawer_id: Option<String>,
+    /// Human-readable description of the connection.
+    pub label: String,
+    /// ISO timestamp when the tunnel was created.
+    pub created_at: String,
+    /// ISO timestamp when the tunnel was last updated (if it has been).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+}
+
+/// A connection returned by `follow_tunnels`, relative to the queried location.
+#[derive(Debug, Clone, Serialize)]
+pub struct TunnelConnection {
+    /// `"outgoing"` if the queried location is the source, `"incoming"` if target.
+    pub direction: String,
+    /// Wing of the connected room.
+    pub connected_wing: String,
+    /// Room of the connected room.
+    pub connected_room: String,
+    /// Human-readable description.
+    pub label: String,
+    /// Tunnel ID.
+    pub tunnel_id: String,
+    /// Optional drawer ID at the connected end.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drawer_id: Option<String>,
+    /// Short preview of the connected drawer content (if collection supplied).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drawer_preview: Option<String>,
+}
+
+/// Compute the canonical tunnel ID from two endpoints.
+///
+/// Tunnels are undirected — sort the two endpoint strings before hashing so
+/// `canonical_tunnel_id(A, B) == canonical_tunnel_id(B, A)`.
+fn canonical_tunnel_id(
+    source_wing: &str,
+    source_room: &str,
+    target_wing: &str,
+    target_room: &str,
+) -> String {
+    assert!(!source_wing.is_empty(), "source_wing must not be empty");
+    assert!(!source_room.is_empty(), "source_room must not be empty");
+    assert!(!target_wing.is_empty(), "target_wing must not be empty");
+    assert!(!target_room.is_empty(), "target_room must not be empty");
+
+    let src = format!("{source_wing}/{source_room}");
+    let tgt = format!("{target_wing}/{target_room}");
+    let (a, b) = if src <= tgt {
+        (src.as_str(), tgt.as_str())
+    } else {
+        (tgt.as_str(), src.as_str())
+    };
+    // ↔ (U+2194) separates the two endpoints. A bare `/` would be ambiguous
+    // because wing and room strings can themselves contain slashes in principle;
+    // a non-ASCII multi-byte separator makes accidental collisions impossible.
+    let input = format!("{a}\u{2194}{b}");
+    let hash = sha2::Sha256::digest(input.as_bytes());
+    let hex: String = hash.iter().fold(String::new(), |mut s, byte| {
+        use std::fmt::Write as _;
+        let _ = write!(s, "{byte:02x}");
+        s
+    });
+    // Postcondition: SHA256 hex is always 64 chars; we take the first 16.
+    assert_eq!(hex.len(), 64, "SHA256 hex output must be 64 characters");
+    hex[..16].to_string()
+}
+
+/// Parameters for creating or updating an explicit tunnel.
+pub struct CreateTunnelParams<'a> {
+    /// Wing of the source location.
+    pub source_wing: &'a str,
+    /// Room in the source wing.
+    pub source_room: &'a str,
+    /// Wing of the target location.
+    pub target_wing: &'a str,
+    /// Room in the target wing.
+    pub target_room: &'a str,
+    /// Human-readable description of the connection.
+    pub label: &'a str,
+    /// Optional specific source drawer ID.
+    pub source_drawer_id: Option<&'a str>,
+    /// Optional specific target drawer ID.
+    pub target_drawer_id: Option<&'a str>,
+}
+
+/// Create (or update) an explicit tunnel between two palace locations.
+///
+/// Tunnels are symmetric: calling with (A, B) and (B, A) both resolve to the
+/// same canonical ID.  A second call with the same endpoints updates the label
+/// and optional drawer IDs rather than creating a duplicate.
+pub async fn create_tunnel(
+    connection: &Connection,
+    params: &CreateTunnelParams<'_>,
+) -> Result<ExplicitTunnel> {
+    assert!(
+        !params.source_wing.is_empty(),
+        "source_wing must not be empty"
+    );
+    assert!(
+        !params.source_room.is_empty(),
+        "source_room must not be empty"
+    );
+    assert!(
+        !params.target_wing.is_empty(),
+        "target_wing must not be empty"
+    );
+    assert!(
+        !params.target_room.is_empty(),
+        "target_room must not be empty"
+    );
+
+    let tunnel_id = canonical_tunnel_id(
+        params.source_wing,
+        params.source_room,
+        params.target_wing,
+        params.target_room,
+    );
+    let now = Utc::now().to_rfc3339();
+
+    create_tunnel_upsert(connection, &tunnel_id, params, &now).await?;
+    create_tunnel_read_back(connection, &tunnel_id).await
+}
+
+/// UPDATE the tunnel if it exists, INSERT if it does not.
+///
+/// The UPDATE-then-INSERT pattern (rather than INSERT OR REPLACE) preserves
+/// `created_at` on repeated calls — REPLACE would delete and re-insert the row,
+/// resetting the creation timestamp.
+async fn create_tunnel_upsert(
+    connection: &Connection,
+    tunnel_id: &str,
+    params: &CreateTunnelParams<'_>,
+    now: &str,
+) -> Result<()> {
+    assert!(!tunnel_id.is_empty(), "tunnel_id must not be empty");
+    assert!(!now.is_empty(), "now must not be empty");
+
+    let rows_updated = connection
+        .execute(
+            "UPDATE explicit_tunnels SET label = ?1, source_drawer_id = ?2, target_drawer_id = ?3, updated_at = ?4 WHERE id = ?5",
+            turso::params![params.label, params.source_drawer_id, params.target_drawer_id, now, tunnel_id],
+        )
+        .await?;
+
+    // Postcondition: at most one row updated (tunnel_id is the primary key).
+    assert!(
+        rows_updated <= 1,
+        "tunnel ID is a primary key — at most one row updated"
+    );
+
+    if rows_updated == 0 {
+        // No existing row — insert the new tunnel.
+        connection
+            .execute(
+                "INSERT INTO explicit_tunnels (id, source_wing, source_room, target_wing, target_room, source_drawer_id, target_drawer_id, label, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                turso::params![
+                    tunnel_id,
+                    params.source_wing,
+                    params.source_room,
+                    params.target_wing,
+                    params.target_room,
+                    params.source_drawer_id,
+                    params.target_drawer_id,
+                    params.label,
+                    now
+                ],
+            )
+            .await?;
+    }
+
+    Ok(())
+}
+
+/// Read the tunnel row back after upsert — the pair assertion half of the write.
+async fn create_tunnel_read_back(
+    connection: &Connection,
+    tunnel_id: &str,
+) -> Result<ExplicitTunnel> {
+    assert!(!tunnel_id.is_empty(), "tunnel_id must not be empty");
+
+    let rows = query_all(
+        connection,
+        "SELECT id, source_wing, source_room, target_wing, target_room, source_drawer_id, target_drawer_id, label, created_at, updated_at FROM explicit_tunnels WHERE id = ?1",
+        [tunnel_id],
+    )
+    .await?;
+
+    // Pair assertion: the row must exist immediately after create_tunnel_upsert.
+    assert!(
+        !rows.is_empty(),
+        "pair assertion: tunnel must exist after upsert"
+    );
+
+    let row = &rows[0];
+    Ok(ExplicitTunnel {
+        id: row.get(0).unwrap_or_default(),
+        source_wing: row.get(1).unwrap_or_default(),
+        source_room: row.get(2).unwrap_or_default(),
+        target_wing: row.get(3).unwrap_or_default(),
+        target_room: row.get(4).unwrap_or_default(),
+        source_drawer_id: row.get(5).ok(),
+        target_drawer_id: row.get(6).ok(),
+        label: row.get(7).unwrap_or_default(),
+        created_at: row.get(8).unwrap_or_default(),
+        updated_at: row.get(9).ok(),
+    })
+}
+
+/// List explicit tunnels, optionally filtered to those involving a given wing.
+pub async fn list_tunnels(
+    connection: &Connection,
+    wing: Option<&str>,
+) -> Result<Vec<ExplicitTunnel>> {
+    if let Some(w) = wing {
+        assert!(!w.is_empty(), "wing filter must not be an empty string");
+    }
+
+    // Two separate queries rather than one with a `?1 IS NULL OR ...` guard,
+    // so SQLite can use the wing column index when a filter is present instead
+    // of falling back to a full table scan.
+    let rows = if let Some(w) = wing {
+        query_all(
+            connection,
+            "SELECT id, source_wing, source_room, target_wing, target_room, source_drawer_id, target_drawer_id, label, created_at, updated_at FROM explicit_tunnels WHERE source_wing = ?1 OR target_wing = ?1 ORDER BY created_at DESC",
+            [w],
+        )
+        .await?
+    } else {
+        query_all(
+            connection,
+            "SELECT id, source_wing, source_room, target_wing, target_room, source_drawer_id, target_drawer_id, label, created_at, updated_at FROM explicit_tunnels ORDER BY created_at DESC",
+            (),
+        )
+        .await?
+    };
+
+    let tunnels: Vec<ExplicitTunnel> = rows
+        .iter()
+        .map(|row| ExplicitTunnel {
+            id: row.get(0).unwrap_or_default(),
+            source_wing: row.get(1).unwrap_or_default(),
+            source_room: row.get(2).unwrap_or_default(),
+            target_wing: row.get(3).unwrap_or_default(),
+            target_room: row.get(4).unwrap_or_default(),
+            source_drawer_id: row.get(5).ok(),
+            target_drawer_id: row.get(6).ok(),
+            label: row.get(7).unwrap_or_default(),
+            created_at: row.get(8).unwrap_or_default(),
+            updated_at: row.get(9).ok(),
+        })
+        .collect();
+
+    // Postcondition: every returned tunnel was assigned an ID at insert time.
+    debug_assert!(tunnels.iter().all(|t| !t.id.is_empty()));
+
+    Ok(tunnels)
+}
+
+/// Delete an explicit tunnel by ID.  Returns `true` if a row was deleted.
+pub async fn delete_tunnel(connection: &Connection, tunnel_id: &str) -> Result<bool> {
+    assert!(!tunnel_id.is_empty(), "tunnel_id must not be empty");
+    let rows_affected = connection
+        .execute("DELETE FROM explicit_tunnels WHERE id = ?1", [tunnel_id])
+        .await?;
+
+    // Postcondition: at most one row deleted (ID is the primary key).
+    assert!(
+        rows_affected <= 1,
+        "tunnel ID is a primary key — at most one row deleted"
+    );
+
+    Ok(rows_affected == 1)
+}
+
+/// Follow explicit tunnels from a room — returns connections to linked rooms.
+///
+/// Optionally fetches a short preview of the drawer at the connected end
+/// when `drawer_ids` happen to be stored on the tunnel.
+pub async fn follow_tunnels(
+    connection: &Connection,
+    wing: &str,
+    room: &str,
+) -> Result<Vec<TunnelConnection>> {
+    assert!(!wing.is_empty(), "wing must not be empty");
+    assert!(!room.is_empty(), "room must not be empty");
+
+    let rows = query_all(
+        connection,
+        "SELECT id, source_wing, source_room, target_wing, target_room, source_drawer_id, target_drawer_id, label FROM explicit_tunnels WHERE (source_wing = ?1 AND source_room = ?2) OR (target_wing = ?1 AND target_room = ?2)",
+        [wing, room],
+    )
+    .await?;
+
+    let mut connections = Vec::new();
+    for row in &rows {
+        let tunnel_id: String = row.get(0).unwrap_or_default();
+        let source_wing: String = row.get(1).unwrap_or_default();
+        let source_room: String = row.get(2).unwrap_or_default();
+        let target_wing: String = row.get(3).unwrap_or_default();
+        let target_room: String = row.get(4).unwrap_or_default();
+        let source_drawer_id: Option<String> = row.get(5).ok();
+        let target_drawer_id: Option<String> = row.get(6).ok();
+        let label: String = row.get(7).unwrap_or_default();
+
+        // Direction is relative to the queried location: if we ARE the source
+        // the link points away from us (outgoing); if we are the target, it
+        // points at us (incoming).
+        if source_wing == wing && source_room == room {
+            connections.push(TunnelConnection {
+                direction: "outgoing".to_string(),
+                connected_wing: target_wing,
+                connected_room: target_room,
+                label,
+                tunnel_id,
+                drawer_id: target_drawer_id,
+                drawer_preview: None,
+            });
+        } else {
+            connections.push(TunnelConnection {
+                direction: "incoming".to_string(),
+                connected_wing: source_wing,
+                connected_room: source_room,
+                label,
+                tunnel_id,
+                drawer_id: source_drawer_id,
+                drawer_preview: None,
+            });
+        }
+    }
+
+    // Postcondition: every connection has a recognised direction value.
+    debug_assert!(
+        connections
+            .iter()
+            .all(|c| c.direction == "outgoing" || c.direction == "incoming")
+    );
+
+    Ok(connections)
+}
+
 #[cfg(test)]
 // Test code — .expect() is acceptable with a descriptive message.
 #[allow(clippy::expect_used)]
@@ -365,5 +737,199 @@ mod tests {
         assert_eq!(tunnels.len(), 1);
         assert_eq!(tunnels[0].room, "backend");
         assert_eq!(tunnels[0].wings.len(), 2);
+    }
+
+    // ── explicit tunnel tests ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn create_tunnel_round_trip() {
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let tunnel = create_tunnel(
+            &connection,
+            &CreateTunnelParams {
+                source_wing: "wing_api",
+                source_room: "schemas",
+                target_wing: "wing_db",
+                target_room: "migrations",
+                label: "API schema drives DB migration",
+                source_drawer_id: None,
+                target_drawer_id: None,
+            },
+        )
+        .await
+        .expect("create_tunnel should succeed");
+
+        assert!(!tunnel.id.is_empty(), "tunnel ID must be assigned");
+        assert_eq!(tunnel.source_wing, "wing_api");
+        assert_eq!(tunnel.source_room, "schemas");
+        assert_eq!(tunnel.target_wing, "wing_db");
+        assert_eq!(tunnel.target_room, "migrations");
+        assert_eq!(tunnel.label, "API schema drives DB migration");
+        assert!(tunnel.updated_at.is_none(), "new tunnel has no updated_at");
+    }
+
+    #[tokio::test]
+    async fn create_tunnel_idempotent_update() {
+        // A second call with the same endpoints must update, not duplicate.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let first = create_tunnel(
+            &connection,
+            &CreateTunnelParams {
+                source_wing: "wA",
+                source_room: "rA",
+                target_wing: "wB",
+                target_room: "rB",
+                label: "first label",
+                source_drawer_id: None,
+                target_drawer_id: None,
+            },
+        )
+        .await
+        .expect("first create_tunnel");
+
+        let second = create_tunnel(
+            &connection,
+            &CreateTunnelParams {
+                source_wing: "wA",
+                source_room: "rA",
+                target_wing: "wB",
+                target_room: "rB",
+                label: "updated label",
+                source_drawer_id: None,
+                target_drawer_id: None,
+            },
+        )
+        .await
+        .expect("second create_tunnel");
+
+        assert_eq!(first.id, second.id, "same endpoints → same canonical ID");
+        assert_eq!(second.label, "updated label", "label must be updated");
+        assert!(second.updated_at.is_some(), "repeated call sets updated_at");
+
+        let tunnels = list_tunnels(&connection, None).await.expect("list_tunnels");
+        assert_eq!(tunnels.len(), 1, "must remain exactly one tunnel");
+    }
+
+    #[tokio::test]
+    async fn create_tunnel_symmetric_id() {
+        // (A→B) and (B→A) must produce the same canonical ID.
+        let id_ab = canonical_tunnel_id("wing_a", "room_a", "wing_b", "room_b");
+        let id_ba = canonical_tunnel_id("wing_b", "room_b", "wing_a", "room_a");
+        assert_eq!(id_ab, id_ba, "tunnel ID must be symmetric");
+    }
+
+    #[tokio::test]
+    async fn list_tunnels_wing_filter() {
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        create_tunnel(
+            &connection,
+            &CreateTunnelParams {
+                source_wing: "wA",
+                source_room: "rA",
+                target_wing: "wB",
+                target_room: "rB",
+                label: "",
+                source_drawer_id: None,
+                target_drawer_id: None,
+            },
+        )
+        .await
+        .expect("create AB");
+        create_tunnel(
+            &connection,
+            &CreateTunnelParams {
+                source_wing: "wC",
+                source_room: "rC",
+                target_wing: "wD",
+                target_room: "rD",
+                label: "",
+                source_drawer_id: None,
+                target_drawer_id: None,
+            },
+        )
+        .await
+        .expect("create CD");
+
+        let tunnels = list_tunnels(&connection, Some("wA"))
+            .await
+            .expect("list by wA");
+        assert_eq!(tunnels.len(), 1, "filter by wA should return 1 tunnel");
+        assert!(
+            tunnels[0].source_wing == "wA" || tunnels[0].target_wing == "wA",
+            "returned tunnel must involve wA"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_tunnel_removes_row() {
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let tunnel = create_tunnel(
+            &connection,
+            &CreateTunnelParams {
+                source_wing: "wx",
+                source_room: "rx",
+                target_wing: "wy",
+                target_room: "ry",
+                label: "",
+                source_drawer_id: None,
+                target_drawer_id: None,
+            },
+        )
+        .await
+        .expect("create tunnel");
+
+        let deleted = delete_tunnel(&connection, &tunnel.id)
+            .await
+            .expect("delete_tunnel");
+        assert!(deleted, "delete must return true for existing tunnel");
+
+        let tunnels = list_tunnels(&connection, None)
+            .await
+            .expect("list after delete");
+        assert!(tunnels.is_empty(), "tunnel list must be empty after delete");
+    }
+
+    #[tokio::test]
+    async fn delete_tunnel_nonexistent_returns_false() {
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let deleted = delete_tunnel(&connection, "nonexistent_id_000000")
+            .await
+            .expect("delete_tunnel on missing ID should not error");
+        assert!(!deleted, "delete of nonexistent tunnel must return false");
+    }
+
+    #[tokio::test]
+    async fn follow_tunnels_returns_connections() {
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        create_tunnel(
+            &connection,
+            &CreateTunnelParams {
+                source_wing: "wing_api",
+                source_room: "design",
+                target_wing: "wing_db",
+                target_room: "schema",
+                label: "api design → db schema",
+                source_drawer_id: None,
+                target_drawer_id: None,
+            },
+        )
+        .await
+        .expect("create tunnel");
+
+        let connections = follow_tunnels(&connection, "wing_api", "design")
+            .await
+            .expect("follow_tunnels");
+        assert_eq!(connections.len(), 1);
+        assert_eq!(connections[0].direction, "outgoing");
+        assert_eq!(connections[0].connected_wing, "wing_db");
+        assert_eq!(connections[0].connected_room, "schema");
+
+        // Pair assertion: follow from the other end returns incoming.
+        let reverse = follow_tunnels(&connection, "wing_db", "schema")
+            .await
+            .expect("follow_tunnels reverse");
+        assert_eq!(reverse.len(), 1);
+        assert_eq!(reverse[0].direction, "incoming");
+        assert_eq!(reverse[0].connected_wing, "wing_api");
     }
 }

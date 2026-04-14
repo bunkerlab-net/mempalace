@@ -68,6 +68,26 @@ CREATE TABLE IF NOT EXISTS compressed (
     room TEXT,
     filed_at TEXT DEFAULT (datetime('now'))
 );
+
+-- Explicit cross-wing tunnels created by agents when they notice a connection
+-- between two specific rooms in different wings/projects.  Stored in SQLite
+-- rather than a JSON file so they survive palace rebuilds only if the file
+-- is preserved — but the DB is always available without extra state.
+CREATE TABLE IF NOT EXISTS explicit_tunnels (
+    id TEXT PRIMARY KEY,
+    source_wing TEXT NOT NULL,
+    source_room TEXT NOT NULL,
+    target_wing TEXT NOT NULL,
+    target_room TEXT NOT NULL,
+    source_drawer_id TEXT,
+    target_drawer_id TEXT,
+    label TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_tunnels_source ON explicit_tunnels(source_wing, source_room);
+CREATE INDEX IF NOT EXISTS idx_tunnels_target ON explicit_tunnels(target_wing, target_room);
 ";
 
 /// Create all tables and indexes if they don't already exist.
@@ -85,7 +105,29 @@ pub async fn ensure_schema(connection: &Connection) -> Result<()> {
         .execute("ALTER TABLE drawers ADD COLUMN source_mtime REAL", ())
         .await;
 
-    // Pair assertion: verify all five core tables were created.
+    // Migration: add explicit_tunnels table and its indexes for existing databases.
+    // The CREATE TABLE IF NOT EXISTS in SCHEMA handles new databases; this migration
+    // covers databases created before tunnels were introduced.
+    let _ = connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS explicit_tunnels (
+                id TEXT PRIMARY KEY,
+                source_wing TEXT NOT NULL,
+                source_room TEXT NOT NULL,
+                target_wing TEXT NOT NULL,
+                target_room TEXT NOT NULL,
+                source_drawer_id TEXT,
+                target_drawer_id TEXT,
+                label TEXT DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_tunnels_source ON explicit_tunnels(source_wing, source_room);
+            CREATE INDEX IF NOT EXISTS idx_tunnels_target ON explicit_tunnels(target_wing, target_room);",
+        )
+        .await;
+
+    // Pair assertion: verify all six core tables were created.
     let rows = crate::db::query_all(
         connection,
         "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
@@ -115,6 +157,10 @@ pub async fn ensure_schema(connection: &Connection) -> Result<()> {
     assert!(
         table_names.contains(&"compressed".to_string()),
         "compressed table must exist"
+    );
+    assert!(
+        table_names.contains(&"explicit_tunnels".to_string()),
+        "explicit_tunnels table must exist"
     );
 
     Ok(())

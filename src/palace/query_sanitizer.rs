@@ -9,13 +9,13 @@
 //!   1. Short-query passthrough (≤ 200 chars) — no action needed.
 //!   2. Question extraction — find a sentence ending with `?`.
 //!   3. Tail sentence — take the last meaningful newline-delimited segment.
-//!   4. Tail truncation — fallback, take the last 500 chars.
+//!   4. Tail truncation — fallback, take the last 250 chars.
 
 use std::sync::LazyLock;
 
 use regex::Regex;
 
-const MAX_QUERY_LEN: usize = 500;
+const MAX_QUERY_LEN: usize = 250;
 const SAFE_QUERY_LEN: usize = 200;
 const MIN_QUESTION_SEGMENT_LEN: usize = 3;
 
