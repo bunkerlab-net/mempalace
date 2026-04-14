@@ -709,16 +709,17 @@ mod tests {
 
     #[test]
     fn chunk_by_exchange_small_tail_regression() {
-        // Regression test: when content is CHUNK_SIZE + (MIN_CHUNK_SIZE - 1) bytes,
-        // the split produces a full first chunk and a small tail; verify both are
-        // preserved and chunk indices are contiguous.
-        let ai_body = "x".repeat(CHUNK_SIZE + (MIN_CHUNK_SIZE - 1)); // 829 bytes
+        // Regression test: tail chunk smaller than MIN_CHUNK_SIZE is preserved.
+        // Total size = CHUNK_SIZE + (MIN_CHUNK_SIZE - 1) - prefix_len so remainder
+        // after first CHUNK_SIZE bytes is strictly < MIN_CHUNK_SIZE.
+        let prefix_len = "> user\n".len(); // 7 bytes
+        let ai_body = "x".repeat(CHUNK_SIZE + (MIN_CHUNK_SIZE - 1) - prefix_len); // 822 bytes
         let input = format!("> user\n{ai_body}");
         let lines: Vec<&str> = input.lines().collect();
 
         let chunks = chunk_by_exchange(&lines);
 
-        // Must produce exactly two chunks: one full (800) and one small (29+).
+        // Must produce exactly two chunks: one full (800) and one tail (< 30).
         assert_eq!(chunks.len(), 2, "must produce exactly two chunks");
 
         // Chunk indices must be contiguous and 0-based.
