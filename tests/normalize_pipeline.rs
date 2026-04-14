@@ -9,8 +9,8 @@ use mempalace::normalize::normalize;
 /// the output contains transcript markers ("> " for user messages).
 #[test]
 fn normalize_claude_code_jsonl() {
-    let dir = tempfile::tempdir().expect("tempdir should be created");
-    let path = dir.path().join("conversation.jsonl");
+    let directory = tempfile::tempdir().expect("tempdir should be created");
+    let path = directory.path().join("conversation.jsonl");
 
     // Two messages minimum required for Claude Code parser to produce output.
     let jsonl = r#"{"type":"human","message":{"content":"What is Rust?"}}
@@ -31,8 +31,8 @@ fn normalize_claude_code_jsonl() {
 /// Plain text files should pass through normalization with content preserved.
 #[test]
 fn normalize_plain_text_passthrough() {
-    let dir = tempfile::tempdir().expect("tempdir should be created");
-    let path = dir.path().join("notes.txt");
+    let directory = tempfile::tempdir().expect("tempdir should be created");
+    let path = directory.path().join("notes.txt");
 
     let content = "These are plain text notes about project architecture and design decisions.";
     fs::write(&path, content).expect("write plain text file should succeed");
@@ -51,8 +51,8 @@ fn normalize_plain_text_passthrough() {
 /// An empty file should normalize to an empty string without error.
 #[test]
 fn normalize_empty_file_returns_empty() {
-    let dir = tempfile::tempdir().expect("tempdir should be created");
-    let path = dir.path().join("empty.txt");
+    let directory = tempfile::tempdir().expect("tempdir should be created");
+    let path = directory.path().join("empty.txt");
 
     fs::write(&path, "").expect("write empty file should succeed");
 

@@ -9,17 +9,17 @@ use mempalace::test_helpers::test_db;
 /// outgoing and incoming relationships are correctly stored and returned.
 #[tokio::test]
 async fn entity_triple_query_lifecycle() {
-    let (_db, conn) = test_db().await;
+    let (_db, connection) = test_db().await;
 
-    add_entity(&conn, "Alice", "person", None)
+    add_entity(&connection, "Alice", "person", None)
         .await
         .expect("add_entity Alice should succeed");
-    add_entity(&conn, "Bob", "person", None)
+    add_entity(&connection, "Bob", "person", None)
         .await
         .expect("add_entity Bob should succeed");
 
     add_triple(
-        &conn,
+        &connection,
         &TripleParams {
             subject: "Alice",
             predicate: "knows",
@@ -35,14 +35,14 @@ async fn entity_triple_query_lifecycle() {
     .expect("add_triple Alice->knows->Bob should succeed");
 
     // Alice's outgoing facts should include "knows".
-    let outgoing = query_entity(&conn, "Alice", None, "outgoing")
+    let outgoing = query_entity(&connection, "Alice", None, "outgoing")
         .await
         .expect("query_entity outgoing should succeed");
     assert_eq!(outgoing.len(), 1, "Alice should have 1 outgoing fact");
     assert_eq!(outgoing[0].predicate, "knows");
 
     // Bob's incoming facts should include "knows".
-    let incoming = query_entity(&conn, "Bob", None, "incoming")
+    let incoming = query_entity(&connection, "Bob", None, "incoming")
         .await
         .expect("query_entity incoming should succeed");
     assert_eq!(incoming.len(), 1, "Bob should have 1 incoming fact");
@@ -53,10 +53,10 @@ async fn entity_triple_query_lifecycle() {
 /// then verify the timeline shows a `valid_to` date.
 #[tokio::test]
 async fn invalidate_updates_timeline() {
-    let (_db, conn) = test_db().await;
+    let (_db, connection) = test_db().await;
 
     add_triple(
-        &conn,
+        &connection,
         &TripleParams {
             subject: "Carol",
             predicate: "works at",
@@ -72,7 +72,7 @@ async fn invalidate_updates_timeline() {
     .expect("add_triple Carol->works_at->OldCo should succeed");
 
     // Before invalidation: timeline should show the fact as current.
-    let before = timeline(&conn, Some("Carol"))
+    let before = timeline(&connection, Some("Carol"))
         .await
         .expect("timeline should succeed before invalidation");
     assert_eq!(before.len(), 1, "should have 1 timeline entry");
@@ -82,12 +82,18 @@ async fn invalidate_updates_timeline() {
     );
 
     // Invalidate with explicit end date.
-    invalidate(&conn, "Carol", "works at", "OldCo", Some("2024-06-01"))
-        .await
-        .expect("invalidate should succeed");
+    invalidate(
+        &connection,
+        "Carol",
+        "works at",
+        "OldCo",
+        Some("2024-06-01"),
+    )
+    .await
+    .expect("invalidate should succeed");
 
     // After invalidation: timeline should show valid_to.
-    let after = timeline(&conn, Some("Carol"))
+    let after = timeline(&connection, Some("Carol"))
         .await
         .expect("timeline should succeed after invalidation");
     assert_eq!(after.len(), 1, "should still have 1 timeline entry");
@@ -101,24 +107,24 @@ async fn invalidate_updates_timeline() {
 /// Verify stats counters track entities, triples, and expired facts accurately.
 #[tokio::test]
 async fn stats_reflect_operations() {
-    let (_db, conn) = test_db().await;
+    let (_db, connection) = test_db().await;
 
     // Empty DB.
-    let s0 = stats(&conn)
+    let stats_empty = stats(&connection)
         .await
         .expect("stats on empty DB should succeed");
-    assert_eq!(s0.entities, 0, "fresh DB should have 0 entities");
-    assert_eq!(s0.triples, 0, "fresh DB should have 0 triples");
+    assert_eq!(stats_empty.entities, 0, "fresh DB should have 0 entities");
+    assert_eq!(stats_empty.triples, 0, "fresh DB should have 0 triples");
 
     // Add entities and a triple.
-    add_entity(&conn, "Dave", "person", None)
+    add_entity(&connection, "Dave", "person", None)
         .await
         .expect("add_entity Dave should succeed");
-    add_entity(&conn, "Eve", "person", None)
+    add_entity(&connection, "Eve", "person", None)
         .await
         .expect("add_entity Eve should succeed");
     add_triple(
-        &conn,
+        &connection,
         &TripleParams {
             subject: "Dave",
             predicate: "likes",
@@ -133,41 +139,55 @@ async fn stats_reflect_operations() {
     .await
     .expect("add_triple Dave->likes->Eve should succeed");
 
-    let s1 = stats(&conn).await.expect("stats after adds should succeed");
-    assert_eq!(s1.entities, 2, "should have 2 entities");
-    assert_eq!(s1.triples, 1, "should have 1 triple");
-    assert_eq!(s1.current_facts, 1, "1 current fact before invalidation");
+    let stats_after_add = stats(&connection)
+        .await
+        .expect("stats after adds should succeed");
+    assert_eq!(stats_after_add.entities, 2, "should have 2 entities");
+    assert_eq!(stats_after_add.triples, 1, "should have 1 triple");
+    assert_eq!(
+        stats_after_add.current_facts, 1,
+        "1 current fact before invalidation"
+    );
 
     // Invalidate the triple.
-    invalidate(&conn, "Dave", "likes", "Eve", Some("2025-01-01"))
+    invalidate(&connection, "Dave", "likes", "Eve", Some("2025-01-01"))
         .await
         .expect("invalidate should succeed");
 
-    let s2 = stats(&conn)
+    let stats_after_invalidate = stats(&connection)
         .await
         .expect("stats after invalidate should succeed");
-    assert_eq!(s2.triples, 1, "total triples unchanged after invalidation");
-    assert_eq!(s2.current_facts, 0, "no current facts after invalidation");
-    assert_eq!(s2.expired_facts, 1, "1 expired fact after invalidation");
+    assert_eq!(
+        stats_after_invalidate.triples, 1,
+        "total triples unchanged after invalidation"
+    );
+    assert_eq!(
+        stats_after_invalidate.current_facts, 0,
+        "no current facts after invalidation"
+    );
+    assert_eq!(
+        stats_after_invalidate.expired_facts, 1,
+        "1 expired fact after invalidation"
+    );
 }
 
 /// Create multiple triples between the same pair of entities and verify
 /// all are returned by `query_entity`.
 #[tokio::test]
 async fn multiple_triples_same_entities() {
-    let (_db, conn) = test_db().await;
+    let (_db, connection) = test_db().await;
 
-    add_entity(&conn, "Frank", "person", None)
+    add_entity(&connection, "Frank", "person", None)
         .await
         .expect("add_entity Frank should succeed");
-    add_entity(&conn, "Grace", "person", None)
+    add_entity(&connection, "Grace", "person", None)
         .await
         .expect("add_entity Grace should succeed");
 
     // Add three distinct relationships between the same pair.
     for predicate in &["knows", "works with", "mentors"] {
         add_triple(
-            &conn,
+            &connection,
             &TripleParams {
                 subject: "Frank",
                 predicate,
@@ -183,7 +203,7 @@ async fn multiple_triples_same_entities() {
         .expect("add_triple should succeed for each predicate");
     }
 
-    let facts = query_entity(&conn, "Frank", None, "outgoing")
+    let facts = query_entity(&connection, "Frank", None, "outgoing")
         .await
         .expect("query_entity outgoing should succeed");
     assert_eq!(facts.len(), 3, "Frank should have 3 outgoing facts");
