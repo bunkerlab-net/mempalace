@@ -210,8 +210,9 @@ async fn multiple_triples_same_entities() {
 
     let predicates: Vec<&str> = facts.iter().map(|f| f.predicate.as_str()).collect();
     assert!(predicates.contains(&"knows"), "should contain 'knows'");
+    // Predicates are normalized on write: spaces become underscores.
     assert!(
-        predicates.contains(&"works with"),
-        "should contain 'works with'"
+        predicates.contains(&"works_with"),
+        "should contain 'works_with' (normalized from 'works with')"
     );
 }
