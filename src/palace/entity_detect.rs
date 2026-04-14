@@ -1,8 +1,37 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
+use std::sync::LazyLock;
 
 use regex::Regex;
+
+// Regex statics are compile-time literals; .expect() cannot fail at runtime.
+#[allow(clippy::expect_used)]
+// Compiled once at first use rather than on every call to extract_candidates.
+// Match capitalized words of 2-20 chars. The lower bound (1 lowercase char
+// after the capital) avoids single-letter initials like "I" or "A". The
+// upper bound (19 lowercase chars) rejects long common nouns that happen
+// to be capitalized at sentence starts (e.g. "Congratulations").
+static SINGLE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b([A-Z][a-z]{1,19})\b").expect(
+        "single-word capitalized name regex is a compile-time literal and cannot fail to compile",
+    )
+});
+
+#[allow(clippy::expect_used)]
+// Matches two or more consecutive capitalized words (multi-word entity names).
+static MULTI_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b").expect(
+        "multi-word capitalized name regex is a compile-time literal and cannot fail to compile",
+    )
+});
+
+#[allow(clippy::expect_used)]
+// Matches gendered and plural pronouns to score person-like proximity.
+static PRONOUN_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(she|her|hers|he|him|his|they|them|their)\b")
+        .expect("pronoun regex is a compile-time literal and cannot fail to compile")
+});
 
 /// A detected entity with classification.
 pub struct DetectedEntity {
@@ -22,6 +51,7 @@ pub struct DetectionResult {
 
 /// Scan files and detect entity candidates.
 pub fn detect_entities(file_paths: &[&Path], max_files: usize) -> DetectionResult {
+    assert!(max_files > 0, "detect_entities: max_files must be positive");
     let mut all_text = String::new();
     let mut all_lines = Vec::new();
     let max_bytes_per_file = 5000;
@@ -85,6 +115,11 @@ pub fn detect_entities(file_paths: &[&Path], max_files: usize) -> DetectionResul
     projects.truncate(10);
     uncertain.truncate(8);
 
+    // Postcondition: result lists are bounded by their truncation limits.
+    debug_assert!(people.len() <= 15);
+    debug_assert!(projects.len() <= 10);
+    debug_assert!(uncertain.len() <= 8);
+
     DetectionResult {
         people,
         projects,
@@ -92,307 +127,71 @@ pub fn detect_entities(file_paths: &[&Path], max_files: usize) -> DetectionResul
     }
 }
 
+/// Build the stop word set for entity candidate extraction.
+///
+/// Entity detection needs a stricter filter than topic extraction: a word like
+/// `"model"` is a useful topic token but a terrible entity candidate because it
+/// matches thousands of unrelated drawers. This function starts from the
+/// canonical `dialect::topics::stop_words()` base list (which covers common
+/// English function words) and extends it with terms that are valid topics but
+/// poor entity candidates: programming keywords, UI verbs, macOS filesystem
+/// labels, and AI/ML domain terms that appear frequently but name no specific
+/// real-world entity.
+///
+/// It is separate from `drawer::is_stop_word` (used for FTS indexing) because
+/// the two filtering jobs have different precision/recall tradeoffs and must
+/// evolve independently as the two features are tuned.
 // Large static stopword list — line count reflects data volume, not code complexity.
-#[allow(clippy::too_many_lines)]
-fn stopwords() -> HashSet<&'static str> {
-    HashSet::from([
-        "the",
-        "a",
-        "an",
-        "and",
-        "or",
-        "but",
-        "in",
-        "on",
-        "at",
-        "to",
-        "for",
-        "of",
-        "with",
-        "by",
-        "from",
-        "as",
-        "is",
-        "was",
-        "are",
-        "were",
-        "be",
-        "been",
-        "being",
-        "have",
-        "has",
-        "had",
-        "do",
-        "does",
-        "did",
-        "will",
-        "would",
-        "could",
-        "should",
-        "may",
-        "might",
-        "must",
-        "shall",
-        "can",
-        "this",
-        "that",
-        "these",
-        "those",
-        "it",
-        "its",
-        "they",
-        "them",
-        "their",
-        "we",
-        "our",
-        "you",
-        "your",
-        "i",
-        "my",
-        "me",
-        "he",
-        "she",
-        "his",
-        "her",
-        "who",
-        "what",
-        "when",
-        "where",
-        "why",
-        "how",
-        "which",
-        "if",
-        "then",
-        "so",
-        "not",
-        "no",
-        "yes",
-        "ok",
-        "okay",
-        "just",
-        "very",
-        "really",
-        "also",
-        "already",
-        "still",
-        "even",
-        "only",
-        "here",
-        "there",
-        "now",
-        "too",
-        "up",
-        "out",
-        "about",
-        "like",
-        "use",
-        "get",
-        "got",
-        "make",
-        "made",
-        "take",
-        "put",
-        "come",
-        "go",
-        "see",
-        "know",
-        "think",
-        "true",
-        "false",
-        "none",
-        "null",
-        "new",
-        "old",
-        "all",
-        "any",
-        "some",
-        "return",
-        "print",
-        "def",
-        "class",
-        "import",
-        "step",
-        "usage",
-        "run",
-        "check",
-        "find",
-        "add",
-        "set",
-        "list",
-        "args",
-        "dict",
-        "str",
-        "int",
-        "bool",
-        "path",
-        "file",
-        "type",
-        "name",
-        "note",
-        "example",
-        "option",
-        "result",
-        "error",
-        "warning",
-        "info",
-        "every",
-        "each",
-        "more",
-        "less",
-        "next",
-        "last",
-        "first",
-        "second",
-        "stack",
-        "layer",
-        "mode",
-        "test",
-        "stop",
-        "start",
-        "copy",
-        "move",
-        "source",
-        "target",
-        "output",
-        "input",
-        "data",
-        "item",
-        "key",
-        "value",
-        "returns",
-        "raises",
-        "yields",
-        "self",
-        "cls",
-        "kwargs",
-        "world",
-        "well",
-        "want",
-        "topic",
-        "choose",
-        "social",
-        "human",
-        "humans",
-        "people",
-        "things",
-        "something",
-        "nothing",
-        "everything",
-        "anything",
-        "someone",
-        "everyone",
-        "anyone",
-        "way",
-        "time",
-        "day",
-        "life",
-        "place",
-        "thing",
-        "part",
-        "kind",
-        "sort",
-        "case",
-        "point",
-        "idea",
-        "fact",
-        "sense",
-        "question",
-        "answer",
-        "reason",
-        "number",
-        "version",
-        "system",
-        "hey",
-        "hi",
-        "hello",
-        "thanks",
-        "thank",
-        "right",
-        "let",
-        "click",
-        "hit",
-        "press",
-        "tap",
-        "drag",
-        "drop",
-        "open",
-        "close",
-        "save",
-        "load",
-        "launch",
-        "install",
-        "download",
-        "upload",
-        "scroll",
-        "select",
-        "enter",
-        "submit",
-        "cancel",
-        "confirm",
-        "delete",
-        "paste",
-        "write",
-        "read",
-        "search",
-        "show",
-        "hide",
-        "desktop",
-        "documents",
-        "downloads",
-        "users",
-        "home",
-        "library",
-        "applications",
-        "preferences",
-        "settings",
-        "terminal",
-        "actor",
-        "vector",
-        "remote",
-        "control",
-        "duration",
-        "fetch",
-        "agents",
-        "tools",
-        "others",
-        "guards",
-        "ethics",
-        "regulation",
-        "learning",
-        "thinking",
-        "memory",
-        "language",
-        "intelligence",
-        "technology",
-        "society",
-        "culture",
-        "future",
-        "history",
-        "science",
-        "model",
-        "models",
-        "network",
-        "networks",
-        "training",
-        "inference",
-    ])
+#[rustfmt::skip]
+fn extract_candidates_stop_words() -> HashSet<&'static str> {
+    let mut stops = crate::dialect::topics::stop_words();
+    stops.extend([
+        // Common words not in the base list.
+        "ok", "okay", "still", "even", "yes", "take", "put", "come", "go", "see", "know", "think", "true", "false",
+        "none", "null", "new", "old", "any", "less", "next", "last", "first", "second", "let", "right", "hey", "hi",
+        "hello", "thanks", "thank", "world",
+        // Programming keywords — prevent `Def`, `Return`, etc. from scoring as entities.
+        "return", "print", "def", "class", "import", "args", "dict", "str", "int", "bool", "self", "cls", "kwargs",
+        "returns", "raises", "yields",
+        // Generic technical nouns common in documentation but not specific enough to be entities.
+        "step", "usage", "run", "check", "find", "add", "set", "list", "path", "file", "type", "name", "note", "example",
+        "option", "result", "error", "warning", "info", "data", "item", "key", "value", "stack", "layer", "mode", "test",
+        "stop", "start", "copy", "move", "source", "target", "output", "input", "number", "version", "system",
+        // Generic nouns common in conversational text.
+        "topic", "choose", "social", "human", "humans", "people", "something", "nothing", "everything", "anything",
+        "someone", "everyone", "anyone", "day", "life", "place", "part", "kind", "sort", "case", "point", "idea", "fact",
+        "sense", "question", "answer", "reason",
+        // UI interaction verbs — prevent `Click`, `Save`, etc. from scoring as entities.
+        "click", "hit", "press", "tap", "drag", "drop", "open", "close", "save", "load", "launch", "install", "download",
+        "upload", "scroll", "select", "enter", "submit", "cancel", "confirm", "delete", "paste", "write", "read", "search",
+        "show", "hide",
+        // macOS filesystem labels — prevent `Library`, `Desktop`, etc. from scoring as entities.
+        "desktop", "documents", "downloads", "users", "home", "library", "applications", "preferences", "settings", "terminal",
+        // AI/ML domain terms — too generic to be named entities even when capitalised.
+        "actor", "vector", "remote", "control", "duration", "fetch", "agents", "tools", "others", "guards", "ethics",
+        "regulation", "learning", "thinking", "memory", "language", "intelligence", "technology", "society", "culture",
+        "future", "history", "science", "model", "models", "network", "networks", "training", "inference",
+    ]);
+    stops
 }
 
 fn extract_candidates(text: &str) -> HashMap<String, usize> {
-    let stops = stopwords();
-    let single_re = Regex::new(r"\b([A-Z][a-z]{1,19})\b").expect("valid regex");
-    let multi_re = Regex::new(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b").expect("valid regex");
+    assert!(
+        !text.is_empty(),
+        "extract_candidates: text must not be empty"
+    );
+    let stops = extract_candidates_stop_words();
 
     let mut counts: HashMap<String, usize> = HashMap::new();
 
-    for cap in single_re.captures_iter(text) {
+    for cap in SINGLE_RE.captures_iter(text) {
         let word = &cap[1];
         if word.len() > 1 && !stops.contains(word.to_lowercase().as_str()) {
             *counts.entry(word.to_string()).or_insert(0) += 1;
         }
     }
 
-    for cap in multi_re.captures_iter(text) {
+    for cap in MULTI_RE.captures_iter(text) {
         let phrase = &cap[1];
         if !phrase
             .split_whitespace()
@@ -402,8 +201,14 @@ fn extract_candidates(text: &str) -> HashMap<String, usize> {
         }
     }
 
-    // Filter: must appear at least 3 times
+    // Require at least 3 occurrences before treating a name as an entity.
+    // Once or twice is likely a passing reference; three times suggests the
+    // name is a recurring actor or concept worth storing.
     counts.retain(|_, v| *v >= 3);
+
+    // Postcondition: all surviving candidates have frequency >= 3.
+    debug_assert!(counts.values().all(|&v| v >= 3));
+
     counts
 }
 
@@ -414,14 +219,16 @@ struct EntityScores {
     project_signals: Vec<String>,
 }
 
-fn score_entity(name: &str, text: &str, lines: &[String]) -> EntityScores {
-    let escaped = regex::escape(name);
-    let mut person_score = 0i32;
-    let mut project_score = 0i32;
-    let mut person_signals = Vec::new();
-    let mut project_signals = Vec::new();
+/// Score person-related signals: verb patterns, dialogue markers, pronouns, direct address.
+fn score_entity_person(
+    name: &str,
+    escaped: &str,
+    text: &str,
+    lines: &[String],
+) -> (i32, Vec<String>) {
+    let mut score = 0i32;
+    let mut signals = Vec::new();
 
-    // Person verb patterns
     let person_verbs = [
         "said", "asked", "told", "replied", "laughed", "smiled", "cried", "felt", "thinks?",
         "wants?", "loves?", "hates?", "knows?", "decided", "pushed", "wrote",
@@ -430,13 +237,12 @@ fn score_entity(name: &str, text: &str, lines: &[String]) -> EntityScores {
         if let Ok(re) = Regex::new(&format!(r"(?i)\b{escaped}\s+{verb}\b")) {
             let count = re.find_iter(text).count();
             if count > 0 {
-                person_score += i32::try_from(count).unwrap_or(i32::MAX) * 2;
-                person_signals.push(format!("'{name} {verb}' ({count}x)"));
+                score += i32::try_from(count).unwrap_or(i32::MAX) * 2;
+                signals.push(format!("'{name} {verb}' ({count}x)"));
             }
         }
     }
 
-    // Dialogue patterns
     let dialogue_pats = [
         format!(r"(?im)^>\s*{escaped}[:\s]"),
         format!(r"(?im)^{escaped}:\s"),
@@ -446,45 +252,49 @@ fn score_entity(name: &str, text: &str, lines: &[String]) -> EntityScores {
         if let Ok(re) = Regex::new(pat) {
             let count = re.find_iter(text).count();
             if count > 0 {
-                person_score += i32::try_from(count).unwrap_or(i32::MAX) * 3;
-                person_signals.push(format!("dialogue marker ({count}x)"));
+                score += i32::try_from(count).unwrap_or(i32::MAX) * 3;
+                signals.push(format!("dialogue marker ({count}x)"));
             }
         }
     }
 
-    // Pronoun proximity
     let name_lower = name.to_lowercase();
-    let pronoun_re =
-        Regex::new(r"(?i)\b(she|her|hers|he|him|his|they|them|their)\b").expect("valid regex");
     let mut pronoun_hits = 0;
     for (i, line) in lines.iter().enumerate() {
         if line.to_lowercase().contains(&name_lower) {
             let start = i.saturating_sub(2);
             let end = (i + 3).min(lines.len());
             let window: String = lines[start..end].join(" ");
-            if pronoun_re.is_match(&window) {
+            if PRONOUN_RE.is_match(&window) {
                 pronoun_hits += 1;
             }
         }
     }
     if pronoun_hits > 0 {
-        person_score += pronoun_hits * 2;
-        person_signals.push(format!("pronoun nearby ({pronoun_hits}x)"));
+        score += pronoun_hits * 2;
+        signals.push(format!("pronoun nearby ({pronoun_hits}x)"));
     }
 
-    // Direct address
     if let Ok(re) = Regex::new(&format!(
         r"(?i)\bhey\s+{escaped}\b|\bthanks?\s+{escaped}\b|\bhi\s+{escaped}\b"
     )) {
         let count = re.find_iter(text).count();
         if count > 0 {
-            person_score += i32::try_from(count).unwrap_or(i32::MAX) * 4;
-            person_signals.push(format!("addressed directly ({count}x)"));
+            score += i32::try_from(count).unwrap_or(i32::MAX) * 4;
+            signals.push(format!("addressed directly ({count}x)"));
         }
     }
 
-    // Project verb patterns
-    let project_verbs = [
+    signals.truncate(3);
+    (score, signals)
+}
+
+/// Score project-related signals: build/deploy verbs, versioned references.
+fn score_entity_project(escaped: &str, text: &str) -> (i32, Vec<String>) {
+    let mut score = 0i32;
+    let mut signals = Vec::new();
+
+    let project_pats = [
         format!(r"(?i)\bbuilding\s+{escaped}\b"),
         format!(r"(?i)\bbuilt\s+{escaped}\b"),
         format!(r"(?i)\bship(?:ping|ped)?\s+{escaped}\b"),
@@ -496,27 +306,34 @@ fn score_entity(name: &str, text: &str, lines: &[String]) -> EntityScores {
         format!(r"(?i)\b{escaped}\.(py|js|ts|yaml|yml|json|sh)\b"),
         format!(r"(?i)\bimport\s+{escaped}\b"),
     ];
-    for pat in &project_verbs {
+    for pat in &project_pats {
         if let Ok(re) = Regex::new(pat) {
             let count = re.find_iter(text).count();
             if count > 0 {
-                project_score += i32::try_from(count).unwrap_or(i32::MAX) * 2;
-                project_signals.push(format!("project verb ({count}x)"));
+                score += i32::try_from(count).unwrap_or(i32::MAX) * 2;
+                signals.push(format!("project verb ({count}x)"));
             }
         }
     }
 
-    // Versioned/code reference
     if let Ok(re) = Regex::new(&format!(r"(?i)\b{escaped}[-v]\w+")) {
         let count = re.find_iter(text).count();
         if count > 0 {
-            project_score += i32::try_from(count).unwrap_or(i32::MAX) * 3;
-            project_signals.push(format!("versioned ({count}x)"));
+            score += i32::try_from(count).unwrap_or(i32::MAX) * 3;
+            signals.push(format!("versioned ({count}x)"));
         }
     }
 
-    person_signals.truncate(3);
-    project_signals.truncate(3);
+    signals.truncate(3);
+    (score, signals)
+}
+
+fn score_entity(name: &str, text: &str, lines: &[String]) -> EntityScores {
+    assert!(!name.is_empty(), "score_entity: name must not be empty");
+    let escaped = regex::escape(name);
+
+    let (person_score, person_signals) = score_entity_person(name, &escaped, text, lines);
+    let (project_score, project_signals) = score_entity_project(&escaped, text);
 
     EntityScores {
         person_score,
@@ -546,7 +363,8 @@ fn classify_entity(name: &str, frequency: usize, scores: &EntityScores) -> Detec
 
     let person_ratio = f64::from(ps) / f64::from(total);
 
-    // Count distinct signal categories
+    // Count distinct signal categories to distinguish corroborated person signals
+    // from pronoun-only matches, which are too weak for a confident classification.
     let mut signal_cats: HashSet<&str> = HashSet::new();
     for s in &scores.person_signals {
         if s.contains("dialogue") {
@@ -561,6 +379,18 @@ fn classify_entity(name: &str, frequency: usize, scores: &EntityScores) -> Detec
     }
     let has_two = signal_cats.len() >= 2;
 
+    classify_entity_build(name, frequency, scores, person_ratio, has_two, ps)
+}
+
+/// Build the `DetectedEntity` once `person_ratio` and `has_two` are known.
+fn classify_entity_build(
+    name: &str,
+    frequency: usize,
+    scores: &EntityScores,
+    person_ratio: f64,
+    has_two: bool,
+    ps: i32,
+) -> DetectedEntity {
     if person_ratio >= 0.7 && has_two && ps >= 5 {
         DetectedEntity {
             name: name.to_string(),

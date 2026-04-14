@@ -4,6 +4,7 @@
 pub mod markers;
 
 use std::collections::HashSet;
+use std::sync::LazyLock;
 
 use regex::Regex;
 
@@ -27,12 +28,12 @@ pub fn extract_memories(text: &str, min_confidence: f64) -> Vec<Memory> {
     let segments = split_into_segments(text);
     let mut memories = Vec::new();
 
-    let all_markers: &[(&str, &[&str])] = &[
-        ("decision", DECISION_MARKERS),
-        ("preference", PREFERENCE_MARKERS),
-        ("milestone", MILESTONE_MARKERS),
-        ("problem", PROBLEM_MARKERS),
-        ("emotional", EMOTION_MARKERS),
+    let all_markers: &[(&str, &[Regex])] = &[
+        ("decision", DECISION_REGEXES.as_slice()),
+        ("preference", PREFERENCE_REGEXES.as_slice()),
+        ("milestone", MILESTONE_REGEXES.as_slice()),
+        ("problem", PROBLEM_REGEXES.as_slice()),
+        ("emotional", EMOTION_REGEXES.as_slice()),
     ];
 
     for para in &segments {
@@ -41,11 +42,13 @@ pub fn extract_memories(text: &str, min_confidence: f64) -> Vec<Memory> {
         }
 
         let prose = extract_prose(para);
+        // Lowercase once here so score_markers can skip the allocation on each of its 5 calls.
+        let prose_lower = prose.to_lowercase();
 
         // Score against all types
         let mut scores: Vec<(&str, f64)> = Vec::new();
         for &(mem_type, markers) in all_markers {
-            let score = score_markers(&prose, markers);
+            let score = score_markers(&prose_lower, markers);
             if score > 0.0 {
                 scores.push((mem_type, score));
             }
@@ -64,10 +67,15 @@ pub fn extract_memories(text: &str, min_confidence: f64) -> Vec<Memory> {
             0.0
         };
 
-        let (max_type, max_score) = scores
+        // f64 scores come from integer match counts (count as f64); partial_cmp
+        // only returns None for NaN, which cannot arise here.
+        let Some(&(max_type, max_score)) = scores
             .iter()
-            .max_by(|a, b| a.1.partial_cmp(&b.1).expect("scores contain no NaN"))
-            .expect("scores is non-empty");
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        else {
+            // Unreachable: scores is non-empty (checked above at `if scores.is_empty()`).
+            continue;
+        };
         let max_score = max_score + length_bonus;
 
         // Disambiguate
@@ -87,23 +95,28 @@ pub fn extract_memories(text: &str, min_confidence: f64) -> Vec<Memory> {
         });
     }
 
+    // Postcondition: all memories have non-empty content and kind.
+    debug_assert!(memories.iter().all(|m| !m.content.is_empty()));
+    debug_assert!(memories.iter().all(|m| !m.kind.is_empty()));
+
     memories
 }
 
-/// Score text against regex markers.
-fn score_markers(text: &str, markers: &[&str]) -> f64 {
-    let text_lower = text.to_lowercase();
+/// Score pre-lowercased text against pre-compiled regex markers.
+///
+/// Callers must pass an already-lowercased string; this function does not lowercase internally.
+fn score_markers(text: &str, markers: &[Regex]) -> f64 {
     let mut score = 0.0;
-    for marker in markers {
-        if let Ok(re) = Regex::new(marker) {
-            let count = re.find_iter(&text_lower).count();
-            // Regex match count; always small enough for exact f64 representation
-            #[allow(clippy::cast_precision_loss)]
-            {
-                score += count as f64;
-            }
+    for re in markers {
+        let count = re.find_iter(text).count();
+        // Regex match count; always small enough for exact f64 representation
+        #[allow(clippy::cast_precision_loss)]
+        {
+            score += count as f64;
         }
     }
+    // Postcondition: score must be non-negative.
+    debug_assert!(score >= 0.0);
     score
 }
 
@@ -141,96 +154,54 @@ fn disambiguate<'a>(
     memory_type
 }
 
-fn get_sentiment(text: &str) -> &'static str {
-    let positive: HashSet<&str> = [
-        "pride",
-        "proud",
-        "joy",
-        "happy",
-        "love",
-        "loving",
-        "beautiful",
-        "amazing",
-        "wonderful",
-        "incredible",
-        "fantastic",
-        "brilliant",
-        "perfect",
-        "excited",
-        "thrilled",
-        "grateful",
-        "warm",
-        "breakthrough",
-        "success",
-        "works",
-        "working",
-        "solved",
-        "fixed",
-        "nailed",
-        "heart",
-        "hug",
-        "precious",
-        "adore",
-    ]
-    .into();
+/// Sentiment word lists — data, not logic.
+#[rustfmt::skip]
+const POSITIVE_WORDS: &[&str] = &[
+    "pride", "proud", "joy", "happy", "love", "loving", "beautiful", "amazing", "wonderful", "incredible", "fantastic",
+    "brilliant", "perfect", "excited", "thrilled", "grateful", "warm", "breakthrough", "success", "works", "working",
+    "solved", "fixed", "nailed", "heart", "hug", "precious", "adore",
+];
 
-    let negative: HashSet<&str> = [
-        "bug",
-        "error",
-        "crash",
-        "crashing",
-        "crashed",
-        "fail",
-        "failed",
-        "failing",
-        "failure",
-        "broken",
-        "broke",
-        "breaking",
-        "breaks",
-        "issue",
-        "problem",
-        "wrong",
-        "stuck",
-        "blocked",
-        "unable",
-        "impossible",
-        "missing",
-        "terrible",
-        "horrible",
-        "awful",
-        "worse",
-        "worst",
-        "panic",
-        "disaster",
-        "mess",
-    ]
-    .into();
+#[rustfmt::skip]
+const NEGATIVE_WORDS: &[&str] = &[
+    "bug", "error", "crash", "crashing", "crashed", "fail", "failed", "failing", "failure", "broken", "broke",
+    "breaking", "breaks", "issue", "problem", "wrong", "stuck", "blocked", "unable", "impossible", "missing",
+    "terrible", "horrible", "awful", "worse", "worst", "panic", "disaster", "mess",
+];
 
-    let words: HashSet<String> = text
-        .split(|c: char| !c.is_alphanumeric())
-        .map(str::to_lowercase)
-        .collect();
+// Built once at first use; POSITIVE_WORDS and NEGATIVE_WORDS are `'static` slices
+// so the sets never need to be rebuilt.
+static POSITIVE_SET: LazyLock<HashSet<&str>> =
+    LazyLock::new(|| POSITIVE_WORDS.iter().copied().collect());
+static NEGATIVE_SET: LazyLock<HashSet<&str>> =
+    LazyLock::new(|| NEGATIVE_WORDS.iter().copied().collect());
 
-    let pos = words
+// Compile a slice of pattern strings into Regexes, panicking on the first
+// invalid pattern. All callers pass compile-time literals; a panic here is a
+// startup invariant failure, not an operating error.
+#[allow(clippy::expect_used)]
+fn compile_regexes(patterns: &[&str]) -> Vec<Regex> {
+    patterns
         .iter()
-        .filter(|w| positive.contains(w.as_str()))
-        .count();
-    let neg = words
-        .iter()
-        .filter(|w| negative.contains(w.as_str()))
-        .count();
-
-    match pos.cmp(&neg) {
-        std::cmp::Ordering::Greater => "positive",
-        std::cmp::Ordering::Less => "negative",
-        std::cmp::Ordering::Equal => "neutral",
-    }
+        .map(|p| {
+            Regex::new(p)
+                .expect("regex pattern is a compile-time literal and cannot fail to compile")
+        })
+        .collect()
 }
 
-fn has_resolution(text: &str) -> bool {
-    let text_lower = text.to_lowercase();
-    let patterns = [
+// Marker patterns compiled once; each static serves the corresponding score_markers() call.
+static DECISION_REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| compile_regexes(DECISION_MARKERS));
+static PREFERENCE_REGEXES: LazyLock<Vec<Regex>> =
+    LazyLock::new(|| compile_regexes(PREFERENCE_MARKERS));
+static MILESTONE_REGEXES: LazyLock<Vec<Regex>> =
+    LazyLock::new(|| compile_regexes(MILESTONE_MARKERS));
+static PROBLEM_REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| compile_regexes(PROBLEM_MARKERS));
+static EMOTION_REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| compile_regexes(EMOTION_MARKERS));
+
+// Patterns compiled once; used by has_resolution().
+static RESOLUTION_REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    compile_regexes(&[
         r"\bfixed\b",
         r"\bsolved\b",
         r"\bresolved\b",
@@ -240,17 +211,14 @@ fn has_resolution(text: &str) -> bool {
         r"\bnailed it\b",
         r"\bfigured (it )?out\b",
         r"\bthe (fix|answer|solution)\b",
-    ];
-    patterns.iter().any(|p| {
-        Regex::new(p)
-            .map(|re| re.is_match(&text_lower))
-            .unwrap_or(false)
-    })
-}
+    ])
+});
 
-/// Extract only prose lines (skip code blocks and code-like lines).
-fn extract_prose(text: &str) -> String {
-    let code_patterns: Vec<Regex> = [
+// Patterns compiled once; used by extract_prose().
+// Note: `else\b:` matches `else:` correctly — `\b` asserts a word boundary
+// between the keyword and the following `:`, which is not a word character.
+static PROSE_CODE_REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    compile_regexes(&[
         r"^\s*[\$#]\s",
         r"^\s*(cd|source|echo|export|pip|npm|git|python|bash|curl|wget|mkdir|rm|cp|mv|ls|cat|grep|find|chmod|sudo|brew|docker)\s",
         r"^\s*```",
@@ -259,14 +227,58 @@ fn extract_prose(text: &str) -> String {
         r"^\s*\|",
         r"^\s*[-]{2,}",
         r"^\s*[\{\}\[\]]\s*$",
-        r"^\s*(if|for|while|try|except|elif|else:)\b",
+        r"^\s*(if|for|while|try|except|elif|else)\b:",
         r"^\s*\w+\.\w+\(",
         r"^\s*\w+ = \w+\.\w+",
-    ]
-    .iter()
-    .filter_map(|p| Regex::new(p).ok())
-    .collect();
+    ])
+});
 
+// Patterns compiled once; used by split_into_segments() and split_by_turns().
+static TURN_REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    compile_regexes(&[
+        r"^>\s",
+        r"(?i)^(Human|User|Q)\s*:",
+        r"(?i)^(Assistant|AI|A|Claude|ChatGPT)\s*:",
+    ])
+});
+
+fn get_sentiment(text: &str) -> &'static str {
+    let words: HashSet<String> = text
+        .split(|c: char| !c.is_alphanumeric())
+        .map(str::to_lowercase)
+        .collect();
+
+    let pos = words
+        .iter()
+        .filter(|w| POSITIVE_SET.contains(w.as_str()))
+        .count();
+    let neg = words
+        .iter()
+        .filter(|w| NEGATIVE_SET.contains(w.as_str()))
+        .count();
+
+    let result = match pos.cmp(&neg) {
+        std::cmp::Ordering::Greater => "positive",
+        std::cmp::Ordering::Less => "negative",
+        std::cmp::Ordering::Equal => "neutral",
+    };
+
+    // Postcondition: result is one of the three known sentiment values.
+    debug_assert!(
+        result == "positive" || result == "negative" || result == "neutral",
+        "get_sentiment returned unknown value: {result}"
+    );
+
+    result
+}
+
+fn has_resolution(text: &str) -> bool {
+    let text_lower = text.to_lowercase();
+    RESOLUTION_REGEXES.iter().any(|re| re.is_match(&text_lower))
+}
+
+/// Extract only prose lines (skip code blocks and code-like lines).
+fn extract_prose(text: &str) -> String {
     let mut prose = Vec::new();
     let mut in_code = false;
 
@@ -279,7 +291,7 @@ fn extract_prose(text: &str) -> String {
         if in_code {
             continue;
         }
-        if !stripped.is_empty() && !code_patterns.iter().any(|re| re.is_match(stripped)) {
+        if !stripped.is_empty() && !PROSE_CODE_REGEXES.iter().any(|re| re.is_match(stripped)) {
             prose.push(line);
         }
     }
@@ -296,26 +308,17 @@ fn extract_prose(text: &str) -> String {
 fn split_into_segments(text: &str) -> Vec<String> {
     let lines: Vec<&str> = text.lines().collect();
 
-    let turn_patterns: Vec<Regex> = [
-        r"^>\s",
-        r"(?i)^(Human|User|Q)\s*:",
-        r"(?i)^(Assistant|AI|A|Claude|ChatGPT)\s*:",
-    ]
-    .iter()
-    .filter_map(|p| Regex::new(p).ok())
-    .collect();
-
     let turn_count = lines
         .iter()
         .filter(|line| {
             let stripped = line.trim();
-            turn_patterns.iter().any(|re| re.is_match(stripped))
+            TURN_REGEXES.iter().any(|re| re.is_match(stripped))
         })
         .count();
 
     // If enough turn markers, split by turns
     if turn_count >= 3 {
-        return split_by_turns(&lines, &turn_patterns);
+        return split_by_turns(&lines, TURN_REGEXES.as_slice());
     }
 
     // Fallback: paragraph splitting

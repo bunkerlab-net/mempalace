@@ -19,30 +19,39 @@ use super::protocol::{AAAK_SPEC, PALACE_PROTOCOL};
 const MAX_EXACT_INT_F64: f64 = 9_007_199_254_740_991.0;
 
 /// Dispatch a tool call by name and return the JSON result.
-pub async fn dispatch(conn: &Connection, name: &str, args: &Value) -> Value {
+pub async fn dispatch(connection: &Connection, name: &str, args: &Value) -> Value {
+    // Empty name and non-object args can arrive from untrusted MCP clients;
+    // return a structured error rather than panicking.
+    if name.is_empty() {
+        return json!({"error": "tool name must not be empty", "public": true});
+    }
+    if !args.is_object() {
+        return json!({"error": "tool arguments must be a JSON object", "public": true});
+    }
+
     match name {
-        "mempalace_status" => tool_status(conn).await,
-        "mempalace_list_wings" => tool_list_wings(conn).await,
-        "mempalace_list_rooms" => tool_list_rooms(conn, args).await,
-        "mempalace_get_taxonomy" => tool_get_taxonomy(conn).await,
+        "mempalace_status" => tool_status(connection).await,
+        "mempalace_list_wings" => tool_list_wings(connection).await,
+        "mempalace_list_rooms" => tool_list_rooms(connection, args).await,
+        "mempalace_get_taxonomy" => tool_get_taxonomy(connection).await,
         "mempalace_get_aaak_spec" => json!({"aaak_spec": AAAK_SPEC}),
-        "mempalace_search" => tool_search(conn, args).await,
-        "mempalace_check_duplicate" => tool_check_duplicate(conn, args).await,
-        "mempalace_add_drawer" => tool_add_drawer(conn, args).await,
-        "mempalace_delete_drawer" => tool_delete_drawer(conn, args).await,
-        "mempalace_get_drawer" => tool_get_drawer(conn, args).await,
-        "mempalace_list_drawers" => tool_list_drawers(conn, args).await,
-        "mempalace_update_drawer" => tool_update_drawer(conn, args).await,
-        "mempalace_kg_query" => tool_kg_query(conn, args).await,
-        "mempalace_kg_add" => tool_kg_add(conn, args).await,
-        "mempalace_kg_invalidate" => tool_kg_invalidate(conn, args).await,
-        "mempalace_kg_timeline" => tool_kg_timeline(conn, args).await,
-        "mempalace_kg_stats" => tool_kg_stats(conn).await,
-        "mempalace_traverse" => tool_traverse(conn, args).await,
-        "mempalace_find_tunnels" => tool_find_tunnels(conn, args).await,
-        "mempalace_graph_stats" => tool_graph_stats(conn).await,
-        "mempalace_diary_write" => tool_diary_write(conn, args).await,
-        "mempalace_diary_read" => tool_diary_read(conn, args).await,
+        "mempalace_search" => tool_search(connection, args).await,
+        "mempalace_check_duplicate" => tool_check_duplicate(connection, args).await,
+        "mempalace_add_drawer" => tool_add_drawer(connection, args).await,
+        "mempalace_delete_drawer" => tool_delete_drawer(connection, args).await,
+        "mempalace_get_drawer" => tool_get_drawer(connection, args).await,
+        "mempalace_list_drawers" => tool_list_drawers(connection, args).await,
+        "mempalace_update_drawer" => tool_update_drawer(connection, args).await,
+        "mempalace_kg_query" => tool_kg_query(connection, args).await,
+        "mempalace_kg_add" => tool_kg_add(connection, args).await,
+        "mempalace_kg_invalidate" => tool_kg_invalidate(connection, args).await,
+        "mempalace_kg_timeline" => tool_kg_timeline(connection, args).await,
+        "mempalace_kg_stats" => tool_kg_stats(connection).await,
+        "mempalace_traverse" => tool_traverse(connection, args).await,
+        "mempalace_find_tunnels" => tool_find_tunnels(connection, args).await,
+        "mempalace_graph_stats" => tool_graph_stats(connection).await,
+        "mempalace_diary_write" => tool_diary_write(connection, args).await,
+        "mempalace_diary_read" => tool_diary_read(connection, args).await,
         _ => json!({"error": format!("Unknown tool: {name}"), "public": true}),
     }
 }
@@ -135,7 +144,17 @@ fn sanitize_name(value: &str, field_name: &str) -> Result<String, Value> {
             json!({"success": false, "error": format!("{field_name} contains invalid characters"), "public": true}),
         );
     }
-    Ok(v.to_string())
+    let result = v.to_string();
+
+    // Postconditions: result is non-empty, trimmed, and has no path-traversal chars.
+    debug_assert!(!result.is_empty());
+    debug_assert!(result == result.trim());
+    debug_assert!(!result.contains(".."));
+    debug_assert!(!result.contains('/'));
+    debug_assert!(!result.contains('\\'));
+    debug_assert!(!result.contains('\0'));
+
+    Ok(result)
 }
 
 /// Validate an optional name filter.
@@ -162,12 +181,19 @@ fn sanitize_content(value: &str) -> Result<String, Value> {
             json!({"success": false, "error": "content exceeds maximum length of 100,000 characters", "public": true}),
         );
     }
-    if trimmed.contains('\x00') {
+    if trimmed.contains('\0') {
         return Err(
             json!({"success": false, "error": "content contains null bytes", "public": true}),
         );
     }
-    Ok(trimmed.to_string())
+
+    let result = trimmed.to_string();
+
+    // Postconditions: result is non-empty and has no null bytes.
+    debug_assert!(!result.is_empty());
+    debug_assert!(!result.contains('\0'));
+
+    Ok(result)
 }
 
 /// Append a write-operation entry to `~/.mempalace/wal/write_log.jsonl`.
@@ -176,6 +202,13 @@ fn sanitize_content(value: &str) -> Result<String, Value> {
 /// the WAL directory is unwritable.  I/O is offloaded to `spawn_blocking` so
 /// the async worker thread is not stalled by filesystem calls.
 async fn wal_log(operation: &str, params: Value) {
+    // wal_log is best-effort and must never crash. An empty operation string is a
+    // programmer error caught in debug builds; in release builds we silently skip.
+    debug_assert!(!operation.is_empty(), "WAL operation must not be empty");
+    if operation.is_empty() {
+        return;
+    }
+
     let operation = operation.to_string();
     let _ = tokio::task::spawn_blocking(move || {
         let wal_dir = crate::config::config_dir().join("wal");
@@ -237,9 +270,9 @@ async fn wal_log(operation: &str, params: Value) {
     .await;
 }
 
-async fn tool_status(conn: &Connection) -> Value {
+async fn tool_status(connection: &Connection) -> Value {
     let rows = query_all(
-        conn,
+        connection,
         "SELECT wing, room, COUNT(*) as cnt FROM drawers GROUP BY wing, room",
         (),
     )
@@ -272,9 +305,9 @@ async fn tool_status(conn: &Connection) -> Value {
     })
 }
 
-async fn tool_list_wings(conn: &Connection) -> Value {
+async fn tool_list_wings(connection: &Connection) -> Value {
     let rows = query_all(
-        conn,
+        connection,
         "SELECT wing, COUNT(*) as cnt FROM drawers GROUP BY wing",
         (),
     )
@@ -294,7 +327,7 @@ async fn tool_list_wings(conn: &Connection) -> Value {
     }
 }
 
-async fn tool_list_rooms(conn: &Connection, args: &Value) -> Value {
+async fn tool_list_rooms(connection: &Connection, args: &Value) -> Value {
     let wing = match sanitize_opt_name(str_arg(args, "wing"), "wing") {
         Ok(v) => v,
         Err(e) => return e,
@@ -302,14 +335,14 @@ async fn tool_list_rooms(conn: &Connection, args: &Value) -> Value {
 
     let rows = if let Some(ref w) = wing {
         query_all(
-            conn,
+            connection,
             "SELECT room, COUNT(*) as cnt FROM drawers WHERE wing = ? GROUP BY room",
             [w.as_str()],
         )
         .await
     } else {
         query_all(
-            conn,
+            connection,
             "SELECT room, COUNT(*) as cnt FROM drawers GROUP BY room",
             (),
         )
@@ -330,9 +363,9 @@ async fn tool_list_rooms(conn: &Connection, args: &Value) -> Value {
     }
 }
 
-async fn tool_get_taxonomy(conn: &Connection) -> Value {
+async fn tool_get_taxonomy(connection: &Connection) -> Value {
     let rows = query_all(
-        conn,
+        connection,
         "SELECT wing, room, COUNT(*) as cnt FROM drawers GROUP BY wing, room",
         (),
     )
@@ -353,7 +386,7 @@ async fn tool_get_taxonomy(conn: &Connection) -> Value {
     }
 }
 
-async fn tool_search(conn: &Connection, args: &Value) -> Value {
+async fn tool_search(connection: &Connection, args: &Value) -> Value {
     let raw_query = str_arg(args, "query").trim();
     if raw_query.is_empty() {
         return json!({"error": "query must be a non-empty string", "public": true});
@@ -373,7 +406,7 @@ async fn tool_search(conn: &Connection, args: &Value) -> Value {
     let sanitized = query_sanitizer::sanitize_query(raw_query);
 
     match search::search_memories(
-        conn,
+        connection,
         &sanitized.clean_query,
         wing.as_deref(),
         room.as_deref(),
@@ -414,10 +447,10 @@ async fn tool_search(conn: &Connection, args: &Value) -> Value {
     }
 }
 
-async fn tool_check_duplicate(conn: &Connection, args: &Value) -> Value {
+async fn tool_check_duplicate(connection: &Connection, args: &Value) -> Value {
     let content = str_arg(args, "content");
     // Simple keyword overlap check since we don't have vector similarity
-    match search::search_memories(conn, content, None, None, 5).await {
+    match search::search_memories(connection, content, None, None, 5).await {
         Ok(results) => {
             let matches: Vec<Value> = results
                 .iter()
@@ -444,7 +477,7 @@ async fn tool_check_duplicate(conn: &Connection, args: &Value) -> Value {
     }
 }
 
-async fn tool_add_drawer(conn: &Connection, args: &Value) -> Value {
+async fn tool_add_drawer(connection: &Connection, args: &Value) -> Value {
     let wing = str_arg(args, "wing");
     let room = str_arg(args, "room");
     let content = str_arg(args, "content");
@@ -476,19 +509,25 @@ async fn tool_add_drawer(conn: &Connection, args: &Value) -> Value {
         s
     });
     let id = format!("drawer_{wing}_{room}_{}", &hex[..24]);
-    wal_log(
-        "add_drawer",
-        json!({
-            "drawer_id": id,
-            "wing": wing,
-            "room": room,
-            "added_by": added_by,
-            "content_length": content.len(),
-            "content_preview": format!("[REDACTED {} chars]", content.chars().count()),
-        }),
-    )
-    .await;
+    // Postcondition: deterministic ID follows naming convention.
+    assert!(
+        id.starts_with("drawer_"),
+        "drawer ID must start with drawer_"
+    );
 
+    tool_add_drawer_insert(connection, id, wing, room, content, source_file, added_by).await
+}
+
+/// Write the drawer row and log the WAL event on confirmed insert. Returns the MCP response JSON.
+async fn tool_add_drawer_insert(
+    connection: &Connection,
+    id: String,
+    wing: String,
+    room: String,
+    content: String,
+    source_file: &str,
+    added_by: &str,
+) -> Value {
     let params = drawer::DrawerParams {
         id: &id,
         wing: &wing,
@@ -507,8 +546,23 @@ async fn tool_add_drawer(conn: &Connection, args: &Value) -> Value {
 
     // Branch on add_drawer's bool rather than doing a separate SELECT first.
     // The INSERT OR IGNORE inside add_drawer is atomic, so this is race-free.
-    match drawer::add_drawer(conn, &params).await {
-        Ok(true) => json!({"success": true, "drawer_id": id, "wing": wing, "room": room}),
+    // WAL is only written on confirmed insert to avoid logging deduped/failed attempts.
+    match drawer::add_drawer(connection, &params).await {
+        Ok(true) => {
+            wal_log(
+                "add_drawer",
+                json!({
+                    "drawer_id": id,
+                    "wing": wing,
+                    "room": room,
+                    "added_by": added_by,
+                    "content_length": content.len(),
+                    "content_preview": format!("[REDACTED {} chars]", content.chars().count()),
+                }),
+            )
+            .await;
+            json!({"success": true, "drawer_id": id, "wing": wing, "room": room})
+        }
         Ok(false) => json!({
             "success": true,
             "reason": "already_exists",
@@ -520,7 +574,7 @@ async fn tool_add_drawer(conn: &Connection, args: &Value) -> Value {
     }
 }
 
-async fn tool_delete_drawer(conn: &Connection, args: &Value) -> Value {
+async fn tool_delete_drawer(connection: &Connection, args: &Value) -> Value {
     let drawer_id = match sanitize_name(str_arg(args, "drawer_id"), "drawer_id") {
         Ok(v) => v,
         Err(e) => return e,
@@ -531,13 +585,13 @@ async fn tool_delete_drawer(conn: &Connection, args: &Value) -> Value {
 
     wal_log("delete_drawer", json!({"drawer_id": drawer_id})).await;
 
-    match conn
+    match connection
         .execute("DELETE FROM drawers WHERE id = ?", [drawer_id.as_str()])
         .await
     {
         Ok(_) => {
             // Also clean up inverted index
-            let _ = conn
+            let _ = connection
                 .execute(
                     "DELETE FROM drawer_words WHERE drawer_id = ?",
                     [drawer_id.as_str()],
@@ -550,7 +604,7 @@ async fn tool_delete_drawer(conn: &Connection, args: &Value) -> Value {
 }
 
 /// Fetch a single drawer by ID, returning its full content and metadata.
-async fn tool_get_drawer(conn: &Connection, args: &Value) -> Value {
+async fn tool_get_drawer(connection: &Connection, args: &Value) -> Value {
     let drawer_id = match sanitize_name(str_arg(args, "drawer_id"), "drawer_id") {
         Ok(v) => v,
         Err(e) => return e,
@@ -560,7 +614,7 @@ async fn tool_get_drawer(conn: &Connection, args: &Value) -> Value {
     }
 
     let rows = query_all(
-        conn,
+        connection,
         "SELECT id, content, wing, room, source_file, filed_at FROM drawers WHERE id = ?",
         [drawer_id.as_str()],
     )
@@ -591,7 +645,7 @@ async fn tool_get_drawer(conn: &Connection, args: &Value) -> Value {
 }
 
 /// List drawers with optional wing/room filtering and cursor-style pagination.
-async fn tool_list_drawers(conn: &Connection, args: &Value) -> Value {
+async fn tool_list_drawers(connection: &Connection, args: &Value) -> Value {
     const MAX_LIMIT: i64 = 100;
     let limit = int_arg(args, "limit", 20).clamp(1, MAX_LIMIT);
     let offset = int_arg(args, "offset", 0).max(0);
@@ -604,45 +658,7 @@ async fn tool_list_drawers(conn: &Connection, args: &Value) -> Value {
         Err(e) => return e,
     };
 
-    // Exclude diary entries (ingest_mode = 'diary') — they use UUID IDs, not
-    // the drawer_ prefix scheme, and have their own mempalace_diary_read tool.
-    // Use id DESC as a tiebreaker so pages are stable when filed_at values collide.
-    let rows = match (&wing, &room) {
-        (Some(w), Some(r)) => {
-            query_all(
-                conn,
-                "SELECT id, content, wing, room FROM drawers WHERE wing = ?1 AND room = ?2 AND (ingest_mode IS NULL OR ingest_mode != 'diary') ORDER BY filed_at DESC, id DESC LIMIT ?3 OFFSET ?4",
-                (w.as_str(), r.as_str(), limit, offset),
-            )
-            .await
-        }
-        (Some(w), None) => {
-            query_all(
-                conn,
-                "SELECT id, content, wing, room FROM drawers WHERE wing = ?1 AND (ingest_mode IS NULL OR ingest_mode != 'diary') ORDER BY filed_at DESC, id DESC LIMIT ?2 OFFSET ?3",
-                (w.as_str(), limit, offset),
-            )
-            .await
-        }
-        (None, Some(r)) => {
-            query_all(
-                conn,
-                "SELECT id, content, wing, room FROM drawers WHERE room = ?1 AND (ingest_mode IS NULL OR ingest_mode != 'diary') ORDER BY filed_at DESC, id DESC LIMIT ?2 OFFSET ?3",
-                (r.as_str(), limit, offset),
-            )
-            .await
-        }
-        (None, None) => {
-            query_all(
-                conn,
-                "SELECT id, content, wing, room FROM drawers WHERE (ingest_mode IS NULL OR ingest_mode != 'diary') ORDER BY filed_at DESC, id DESC LIMIT ?1 OFFSET ?2",
-                (limit, offset),
-            )
-            .await
-        }
-    };
-
-    match rows {
+    match tool_list_drawers_query(connection, wing.as_ref(), room.as_ref(), limit, offset).await {
         Ok(rows) => {
             let drawers: Vec<Value> = rows
                 .iter()
@@ -676,6 +692,34 @@ async fn tool_list_drawers(conn: &Connection, args: &Value) -> Value {
     }
 }
 
+/// Run the parameterized drawer list query for the given wing/room filter combination.
+///
+/// Excludes diary entries — they use UUID IDs (not the `drawer_` prefix scheme) and
+/// have their own `mempalace_diary_read` tool. Uses `id DESC` as a tiebreaker so
+/// pages are stable when `filed_at` values collide.
+async fn tool_list_drawers_query(
+    connection: &Connection,
+    wing: Option<&String>,
+    room: Option<&String>,
+    limit: i64,
+    offset: i64,
+) -> crate::error::Result<Vec<turso::Row>> {
+    match (wing, room) {
+        (Some(w), Some(r)) => {
+            query_all(connection, "SELECT id, content, wing, room FROM drawers WHERE wing = ?1 AND room = ?2 AND (ingest_mode IS NULL OR ingest_mode != 'diary') ORDER BY filed_at DESC, id DESC LIMIT ?3 OFFSET ?4", (w.as_str(), r.as_str(), limit, offset)).await
+        }
+        (Some(w), None) => {
+            query_all(connection, "SELECT id, content, wing, room FROM drawers WHERE wing = ?1 AND (ingest_mode IS NULL OR ingest_mode != 'diary') ORDER BY filed_at DESC, id DESC LIMIT ?2 OFFSET ?3", (w.as_str(), limit, offset)).await
+        }
+        (None, Some(r)) => {
+            query_all(connection, "SELECT id, content, wing, room FROM drawers WHERE room = ?1 AND (ingest_mode IS NULL OR ingest_mode != 'diary') ORDER BY filed_at DESC, id DESC LIMIT ?2 OFFSET ?3", (r.as_str(), limit, offset)).await
+        }
+        (None, None) => {
+            query_all(connection, "SELECT id, content, wing, room FROM drawers WHERE (ingest_mode IS NULL OR ingest_mode != 'diary') ORDER BY filed_at DESC, id DESC LIMIT ?1 OFFSET ?2", (limit, offset)).await
+        }
+    }
+}
+
 /// Update an existing drawer's content and/or location (wing/room).
 ///
 /// Recomputes the deterministic SHA256 ID after any change to keep it
@@ -685,7 +729,7 @@ async fn tool_list_drawers(conn: &Connection, args: &Value) -> Value {
 // reindex, and error propagation — each a distinct correctness concern that
 // cannot be collapsed without obscuring the logic.
 #[allow(clippy::too_many_lines)]
-async fn tool_update_drawer(conn: &Connection, args: &Value) -> Value {
+async fn tool_update_drawer(connection: &Connection, args: &Value) -> Value {
     let drawer_id = match sanitize_name(str_arg(args, "drawer_id"), "drawer_id") {
         Ok(v) => v,
         Err(e) => return e,
@@ -722,7 +766,7 @@ async fn tool_update_drawer(conn: &Connection, args: &Value) -> Value {
 
     // Fetch existing drawer
     let rows = query_all(
-        conn,
+        connection,
         "SELECT wing, room, content FROM drawers WHERE id = ?",
         [drawer_id.as_str()],
     )
@@ -775,7 +819,7 @@ async fn tool_update_drawer(conn: &Connection, args: &Value) -> Value {
     // is a duplicate of another drawer — reject to prevent silent duplication.
     if new_id != drawer_id {
         let existing = query_all(
-            conn,
+            connection,
             "SELECT id FROM drawers WHERE id = ?",
             [new_id.as_str()],
         )
@@ -794,7 +838,13 @@ async fn tool_update_drawer(conn: &Connection, args: &Value) -> Value {
         }
     }
 
-    match conn
+    // Wrap the row update and index rebuild in a transaction so drawers and
+    // drawer_words cannot diverge if any step fails mid-flight.
+    if let Err(e) = connection.execute("BEGIN", ()).await {
+        return json!({"success": false, "error": e.to_string()});
+    }
+
+    if let Err(e) = connection
         .execute(
             "UPDATE drawers SET id = ?1, wing = ?2, room = ?3, content = ?4 WHERE id = ?5",
             turso::params![
@@ -807,43 +857,53 @@ async fn tool_update_drawer(conn: &Connection, args: &Value) -> Value {
         )
         .await
     {
-        Ok(_) => {
-            // Re-index words: always needed when the ID changes or content changes.
-            if let Err(e) = conn
-                .execute(
-                    "DELETE FROM drawer_words WHERE drawer_id = ?",
-                    [drawer_id.as_str()],
-                )
-                .await
-            {
-                return json!({"success": false, "error": e.to_string()});
-            }
-            if new_id != drawer_id {
-                // drawer_words rows for the old ID were deleted above; if the new
-                // ID already had entries (shouldn't happen — we checked above),
-                // clean those too.
-                let _ = conn
-                    .execute(
-                        "DELETE FROM drawer_words WHERE drawer_id = ?",
-                        [new_id.as_str()],
-                    )
-                    .await;
-            }
-            if let Err(e) = drawer::index_words(conn, &new_id, final_content).await {
-                return json!({"success": false, "error": e.to_string()});
-            }
-            json!({
-                "success": true,
-                "drawer_id": new_id,
-                "wing": final_wing,
-                "room": final_room,
-            })
-        }
-        Err(e) => json!({"success": false, "error": e.to_string()}),
+        let _ = connection.execute("ROLLBACK", ()).await;
+        return json!({"success": false, "error": e.to_string()});
     }
+
+    // Re-index words: always needed when the ID changes or content changes.
+    if let Err(e) = connection
+        .execute(
+            "DELETE FROM drawer_words WHERE drawer_id = ?",
+            [drawer_id.as_str()],
+        )
+        .await
+    {
+        let _ = connection.execute("ROLLBACK", ()).await;
+        return json!({"success": false, "error": e.to_string()});
+    }
+
+    if new_id != drawer_id {
+        // drawer_words rows for the old ID were deleted above; if the new
+        // ID already had entries (shouldn't happen — we checked above),
+        // clean those too.
+        let _ = connection
+            .execute(
+                "DELETE FROM drawer_words WHERE drawer_id = ?",
+                [new_id.as_str()],
+            )
+            .await;
+    }
+
+    if let Err(e) = drawer::index_words(connection, &new_id, final_content).await {
+        let _ = connection.execute("ROLLBACK", ()).await;
+        return json!({"success": false, "error": e.to_string()});
+    }
+
+    if let Err(e) = connection.execute("COMMIT", ()).await {
+        let _ = connection.execute("ROLLBACK", ()).await;
+        return json!({"success": false, "error": e.to_string()});
+    }
+
+    json!({
+        "success": true,
+        "drawer_id": new_id,
+        "wing": final_wing,
+        "room": final_room,
+    })
 }
 
-async fn tool_kg_query(conn: &Connection, args: &Value) -> Value {
+async fn tool_kg_query(connection: &Connection, args: &Value) -> Value {
     let entity = match sanitize_name(str_arg(args, "entity"), "entity") {
         Ok(v) => v,
         Err(e) => return e,
@@ -864,7 +924,7 @@ async fn tool_kg_query(conn: &Connection, args: &Value) -> Value {
         return json!({"error": "direction must be 'outgoing', 'incoming', or 'both'", "public": true});
     }
 
-    match kg::query::query_entity(conn, &entity, as_of.as_deref(), direction).await {
+    match kg::query::query_entity(connection, &entity, as_of.as_deref(), direction).await {
         Ok(facts) => {
             let count = facts.len();
             json!({"entity": entity, "as_of": as_of, "facts": facts, "count": count})
@@ -873,7 +933,7 @@ async fn tool_kg_query(conn: &Connection, args: &Value) -> Value {
     }
 }
 
-async fn tool_kg_add(conn: &Connection, args: &Value) -> Value {
+async fn tool_kg_add(connection: &Connection, args: &Value) -> Value {
     let subject = str_arg(args, "subject");
     let predicate = str_arg(args, "predicate");
     let object = str_arg(args, "object");
@@ -923,7 +983,7 @@ async fn tool_kg_add(conn: &Connection, args: &Value) -> Value {
     .await;
 
     match kg::add_triple(
-        conn,
+        connection,
         &kg::TripleParams {
             subject: &subject,
             predicate: &predicate,
@@ -946,7 +1006,7 @@ async fn tool_kg_add(conn: &Connection, args: &Value) -> Value {
     }
 }
 
-async fn tool_kg_invalidate(conn: &Connection, args: &Value) -> Value {
+async fn tool_kg_invalidate(connection: &Connection, args: &Value) -> Value {
     let subject = str_arg(args, "subject");
     let predicate = str_arg(args, "predicate");
     let object = str_arg(args, "object");
@@ -972,29 +1032,33 @@ async fn tool_kg_invalidate(conn: &Connection, args: &Value) -> Value {
         Err(e) => return e,
     };
 
-    wal_log(
-        "kg_invalidate",
-        json!({"subject": subject, "predicate": predicate, "object": object, "ended": ended}),
-    )
-    .await;
-
-    match kg::invalidate(conn, &subject, &predicate, &object, ended.as_deref()).await {
-        Ok(()) => json!({
-            "success": true,
-            "fact": format!("{subject} → {predicate} → {object}"),
-            "ended": ended.unwrap_or_else(|| "today".to_string()),
-        }),
+    // Perform the mutation first so the WAL records persisted_ended — the value
+    // actually written to the database — rather than the raw input (which may be None
+    // and would be normalized to today's date by kg::invalidate).
+    match kg::invalidate(connection, &subject, &predicate, &object, ended.as_deref()).await {
+        Ok(persisted_ended) => {
+            wal_log(
+                "kg_invalidate",
+                json!({"subject": subject, "predicate": predicate, "object": object, "ended": persisted_ended}),
+            )
+            .await;
+            json!({
+                "success": true,
+                "fact": format!("{subject} → {predicate} → {object}"),
+                "ended": persisted_ended,
+            })
+        }
         Err(e) => json!({"success": false, "error": e.to_string()}),
     }
 }
 
-async fn tool_kg_timeline(conn: &Connection, args: &Value) -> Value {
+async fn tool_kg_timeline(connection: &Connection, args: &Value) -> Value {
     let entity = match sanitize_opt_name(str_arg(args, "entity"), "entity") {
         Ok(v) => v,
         Err(e) => return e,
     };
 
-    match kg::query::timeline(conn, entity.as_deref()).await {
+    match kg::query::timeline(connection, entity.as_deref()).await {
         Ok(facts) => {
             let count = facts.len();
             json!({
@@ -1007,27 +1071,27 @@ async fn tool_kg_timeline(conn: &Connection, args: &Value) -> Value {
     }
 }
 
-async fn tool_kg_stats(conn: &Connection) -> Value {
-    match kg::query::stats(conn).await {
+async fn tool_kg_stats(connection: &Connection) -> Value {
+    match kg::query::stats(connection).await {
         Ok(stats) => json!(stats),
         Err(e) => json!({"error": e.to_string()}),
     }
 }
 
-async fn tool_traverse(conn: &Connection, args: &Value) -> Value {
+async fn tool_traverse(connection: &Connection, args: &Value) -> Value {
     let start_room = match sanitize_name(str_arg(args, "start_room"), "start_room") {
         Ok(v) => v,
         Err(e) => return e,
     };
     let max_hops = usize::try_from(int_arg(args, "max_hops", 2).clamp(1, 10)).unwrap_or(2);
 
-    match graph::traverse(conn, &start_room, max_hops).await {
-        Ok(results) => json!(results),
+    match graph::traverse(connection, &start_room, max_hops).await {
+        Ok((results, truncated)) => json!({"results": results, "truncated": truncated}),
         Err(e) => json!({"error": e.to_string()}),
     }
 }
 
-async fn tool_find_tunnels(conn: &Connection, args: &Value) -> Value {
+async fn tool_find_tunnels(connection: &Connection, args: &Value) -> Value {
     let wing_a = match sanitize_opt_name(str_arg(args, "wing_a"), "wing_a") {
         Ok(v) => v,
         Err(e) => return e,
@@ -1037,20 +1101,20 @@ async fn tool_find_tunnels(conn: &Connection, args: &Value) -> Value {
         Err(e) => return e,
     };
 
-    match graph::find_tunnels(conn, wing_a.as_deref(), wing_b.as_deref()).await {
-        Ok(tunnels) => json!(tunnels),
+    match graph::find_tunnels(connection, wing_a.as_deref(), wing_b.as_deref()).await {
+        Ok((tunnels, truncated)) => json!({"tunnels": tunnels, "truncated": truncated}),
         Err(e) => json!({"error": e.to_string()}),
     }
 }
 
-async fn tool_graph_stats(conn: &Connection) -> Value {
-    match graph::graph_stats(conn).await {
+async fn tool_graph_stats(connection: &Connection) -> Value {
+    match graph::graph_stats(connection).await {
         Ok(stats) => json!(stats),
         Err(e) => json!({"error": e.to_string()}),
     }
 }
 
-async fn tool_diary_write(conn: &Connection, args: &Value) -> Value {
+async fn tool_diary_write(connection: &Connection, args: &Value) -> Value {
     let agent_name = str_arg(args, "agent_name");
     let entry = str_arg(args, "entry");
     let topic = {
@@ -1090,7 +1154,7 @@ async fn tool_diary_write(conn: &Connection, args: &Value) -> Value {
     .await;
 
     // Use direct SQL to also set extract_mode (topic) which DrawerParams doesn't support
-    match conn
+    match connection
         .execute(
             "INSERT OR IGNORE INTO drawers (id, wing, room, content, source_file, chunk_index, added_by, ingest_mode, extract_mode) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             turso::params![id.as_str(), wing.as_str(), "diary", entry.as_str(), "", 0i32, agent_name.as_str(), "diary", topic.as_str()],
@@ -1098,7 +1162,7 @@ async fn tool_diary_write(conn: &Connection, args: &Value) -> Value {
         .await
     {
         Ok(_) => {
-            let _ = drawer::index_words(conn, &id, &entry).await;
+            let _ = drawer::index_words(connection, &id, &entry).await;
             json!({
                 "success": true,
                 "entry_id": id,
@@ -1111,7 +1175,7 @@ async fn tool_diary_write(conn: &Connection, args: &Value) -> Value {
     }
 }
 
-async fn tool_diary_read(conn: &Connection, args: &Value) -> Value {
+async fn tool_diary_read(connection: &Connection, args: &Value) -> Value {
     let agent_name = str_arg(args, "agent_name");
     let last_n = int_arg(args, "last_n", 10).clamp(1, 100);
 
@@ -1123,7 +1187,7 @@ async fn tool_diary_read(conn: &Connection, args: &Value) -> Value {
     let wing = format!("wing_{}", agent_name.to_lowercase().replace(' ', "_"));
 
     let rows = query_all(
-        conn,
+        connection,
         "SELECT id, content, extract_mode, filed_at FROM drawers WHERE wing = ? AND room = 'diary' ORDER BY filed_at DESC LIMIT ?",
         (wing.clone(), last_n),
     )
@@ -1159,6 +1223,8 @@ async fn tool_diary_read(conn: &Connection, args: &Value) -> Value {
 }
 
 #[cfg(test)]
+// Test code — .expect() is acceptable with a descriptive message.
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -1170,13 +1236,13 @@ mod tests {
 
     #[tokio::test]
     async fn add_drawer_inserts_and_returns_success() {
-        let (_db, conn) = test_conn().await;
+        let (_db, connection) = test_conn().await;
         let args = json!({
             "wing": "personal",
             "room": "notes",
             "content": "the quick brown fox jumps over the lazy dog",
         });
-        let result = tool_add_drawer(&conn, &args).await;
+        let result = tool_add_drawer(&connection, &args).await;
         assert_eq!(result["success"], true);
         assert!(
             result["drawer_id"]
@@ -1192,16 +1258,16 @@ mod tests {
 
     #[tokio::test]
     async fn add_drawer_idempotent_returns_already_exists() {
-        let (_db, conn) = test_conn().await;
+        let (_db, connection) = test_conn().await;
         let args = json!({
             "wing": "personal",
             "room": "notes",
             "content": "idempotent content for testing",
         });
-        let first = tool_add_drawer(&conn, &args).await;
+        let first = tool_add_drawer(&connection, &args).await;
         assert_eq!(first["success"], true);
 
-        let second = tool_add_drawer(&conn, &args).await;
+        let second = tool_add_drawer(&connection, &args).await;
         assert_eq!(second["success"], true);
         assert_eq!(second["reason"], "already_exists");
         // The same deterministic ID must be returned both times.
@@ -1210,7 +1276,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_drawer_deterministic_id_same_content() {
-        let (_db, conn) = test_conn().await;
+        let (_db, connection) = test_conn().await;
         // Verify the ID is derived from sha256(wing+room+content)[:24].
         let content = "fn main() { println!(\"hello\"); }";
         let args = json!({
@@ -1218,7 +1284,7 @@ mod tests {
             "room": "code",
             "content": content,
         });
-        let result = tool_add_drawer(&conn, &args).await;
+        let result = tool_add_drawer(&connection, &args).await;
         let id = result["drawer_id"]
             .as_str()
             .expect("drawer_id must be a string");
@@ -1235,14 +1301,14 @@ mod tests {
 
     #[tokio::test]
     async fn add_drawer_different_content_different_id() {
-        let (_db, conn) = test_conn().await;
+        let (_db, connection) = test_conn().await;
         let ra = tool_add_drawer(
-            &conn,
+            &connection,
             &json!({"wing": "w", "room": "r", "content": "first piece of content"}),
         )
         .await;
         let rb = tool_add_drawer(
-            &conn,
+            &connection,
             &json!({"wing": "w", "room": "r", "content": "second piece of content"}),
         )
         .await;
@@ -1251,15 +1317,15 @@ mod tests {
 
     #[tokio::test]
     async fn add_drawer_missing_required_fields_returns_error() {
-        let (_db, conn) = test_conn().await;
+        let (_db, connection) = test_conn().await;
 
         // Missing content
-        let r = tool_add_drawer(&conn, &json!({"wing": "w", "room": "r"})).await;
+        let r = tool_add_drawer(&connection, &json!({"wing": "w", "room": "r"})).await;
         assert_eq!(r["success"], false);
 
         // Missing wing
         let r = tool_add_drawer(
-            &conn,
+            &connection,
             &json!({"room": "r", "content": "some text here for testing"}),
         )
         .await;
@@ -1267,7 +1333,7 @@ mod tests {
 
         // Missing room
         let r = tool_add_drawer(
-            &conn,
+            &connection,
             &json!({"wing": "w", "content": "some text here for testing"}),
         )
         .await;

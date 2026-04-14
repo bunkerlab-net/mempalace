@@ -1,3 +1,7 @@
+// Integration test — .expect() is acceptable with a descriptive message.
+// Integration test functions are allowed to be long for narrative clarity.
+#![allow(clippy::expect_used, clippy::too_many_lines)]
+
 /// Verify full schema creation works.
 #[tokio::test]
 async fn test_schema_creation() {

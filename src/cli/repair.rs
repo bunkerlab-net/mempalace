@@ -9,10 +9,10 @@ use crate::error::Result;
 use crate::palace::drawer;
 
 /// Backup the palace database and rebuild the inverted word index.
-pub async fn run(conn: &Connection, palace_path: &Path) -> Result<()> {
+pub async fn run(connection: &Connection, palace_path: &Path) -> Result<()> {
     // Backup: checkpoint WAL to ensure backup is self-contained.
     // wal_checkpoint returns rows (busy, log, checkpointed) — must use query_all.
-    query_all(conn, "PRAGMA wal_checkpoint(TRUNCATE)", ()).await?;
+    query_all(connection, "PRAGMA wal_checkpoint(TRUNCATE)", ()).await?;
 
     let backup_path = palace_path.with_extension("db.bak");
     std::fs::copy(palace_path, &backup_path)?;
@@ -42,10 +42,10 @@ pub async fn run(conn: &Connection, palace_path: &Path) -> Result<()> {
     // Clear and rebuild within a transaction for atomicity.
     // BEGIN IMMEDIATE is taken before the SELECT so the snapshot is protected
     // by the same exclusive lock that performs the delete and rebuild.
-    conn.execute("BEGIN IMMEDIATE", ()).await?;
+    connection.execute("BEGIN IMMEDIATE", ()).await?;
 
     if let Err(e) = async {
-        let rows = query_all(conn, "SELECT id, content FROM drawers", ()).await?;
+        let rows = query_all(connection, "SELECT id, content FROM drawers", ()).await?;
         let total = rows.len();
         println!("Found {total} drawers to re-index");
 
@@ -60,12 +60,12 @@ pub async fn run(conn: &Connection, palace_path: &Path) -> Result<()> {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        conn.execute("DELETE FROM drawer_words", ()).await?;
+        connection.execute("DELETE FROM drawer_words", ()).await?;
         println!("Cleared existing index");
 
         // Rebuild
         for (i, (id, content)) in drawers.iter().enumerate() {
-            drawer::index_words(conn, id, content).await?;
+            drawer::index_words(connection, id, content).await?;
             if (i + 1) % 100 == 0 || i + 1 == total {
                 println!("  [{}/{}] re-indexed", i + 1, total);
             }
@@ -76,13 +76,13 @@ pub async fn run(conn: &Connection, palace_path: &Path) -> Result<()> {
     .await
     {
         // Attempt rollback and preserve the original error
-        if let Err(rollback_err) = conn.execute("ROLLBACK", ()).await {
+        if let Err(rollback_err) = connection.execute("ROLLBACK", ()).await {
             eprintln!("Rollback failed: {rollback_err}");
         }
         return Err(e);
     }
 
-    conn.execute("COMMIT", ()).await?;
+    connection.execute("COMMIT", ()).await?;
 
     Ok(())
 }

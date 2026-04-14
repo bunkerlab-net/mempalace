@@ -5,11 +5,26 @@ pub mod topics;
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::LazyLock;
 
 use regex::Regex;
 
 use emotions::{emotion_signals, flag_signals};
 use topics::{extract_topics, stop_words};
+
+#[allow(clippy::expect_used)]
+// Splits text into sentences on punctuation or newlines.
+static SENTENCE_SPLIT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"[.!?\n]+")
+        .expect("sentence-split regex is a compile-time literal and cannot fail to compile")
+});
+
+#[allow(clippy::expect_used)]
+// Strips non-alphabetic characters when extracting entity codes from words.
+static NON_ALPHA_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"[^a-zA-Z]")
+        .expect("non-alpha strip regex is a compile-time literal and cannot fail to compile")
+});
 
 /// AAAK Dialect encoder — compresses plain text into symbolic memory format.
 pub struct Dialect {
@@ -66,8 +81,7 @@ fn detect_flags(text: &str) -> Vec<String> {
 
 /// Extract the most important sentence fragment from text.
 fn extract_key_sentence(text: &str) -> String {
-    let re = Regex::new(r"[.!?\n]+").expect("valid regex");
-    let sentences: Vec<&str> = re
+    let sentences: Vec<&str> = SENTENCE_SPLIT_RE
         .split(text)
         .map(str::trim)
         .filter(|s| s.len() > 10)
@@ -156,7 +170,10 @@ impl Dialect {
     }
 
     /// Find known entities in text, or detect capitalized names.
+    // Regex literal is a compile-time constant that can never fail to compile.
+    #[allow(clippy::expect_used)]
     fn detect_entities(&self, text: &str) -> Vec<String> {
+        assert!(!text.is_empty(), "detect_entities: text must not be empty");
         let text_lower = text.to_lowercase();
         let mut found = Vec::new();
 
@@ -176,10 +193,8 @@ impl Dialect {
         // Fallback: capitalized words that look like names
         let stops = stop_words();
         let words: Vec<&str> = text.split_whitespace().collect();
-        let clean_re = Regex::new(r"[^a-zA-Z]").expect("valid regex");
-
         for (i, w) in words.iter().enumerate() {
-            let clean = clean_re.replace_all(w, "");
+            let clean = NON_ALPHA_RE.replace_all(w, "");
             if clean.len() >= 2
                 && clean.chars().next().is_some_and(char::is_uppercase)
                 && clean[1..].chars().all(char::is_lowercase)
@@ -200,6 +215,7 @@ impl Dialect {
 
     /// Compress plain text into AAAK Dialect format.
     pub fn compress(&self, text: &str, metadata: Option<&CompressMetadata>) -> String {
+        assert!(!text.is_empty(), "compress: text must not be empty");
         let entities = self.detect_entities(text);
         let entity_str = if entities.is_empty() {
             "???".to_string()
@@ -255,11 +271,18 @@ impl Dialect {
         }
         lines.push(parts.join("|"));
 
-        lines.join("\n")
+        let result = lines.join("\n");
+
+        // Postcondition: compressed output is never empty.
+        debug_assert!(!result.is_empty());
+
+        result
     }
 }
 
 #[cfg(test)]
+// Test code — .expect() is acceptable with a descriptive message.
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 

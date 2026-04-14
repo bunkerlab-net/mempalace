@@ -1,3 +1,6 @@
+// Integration test — .expect() is acceptable with a descriptive message.
+#![allow(clippy::expect_used)]
+
 /// Verify inverted index search works with turso (FTS5 is not supported).
 // Sequential setup → insert → query narrative; splitting into helpers would obscure the test flow.
 #[allow(clippy::too_many_lines)]

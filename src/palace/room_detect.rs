@@ -114,6 +114,10 @@ fn folder_map() -> HashMap<&'static str, &'static str> {
 
 /// Detect rooms from the folder structure of a project directory.
 pub fn detect_rooms_from_folders(project_dir: &Path) -> Vec<RoomConfig> {
+    assert!(
+        project_dir.is_dir(),
+        "detect_rooms_from_folders: project_dir must be a directory"
+    );
     let map = folder_map();
     let mut found: HashMap<String, String> = HashMap::new(); // room_name -> original_folder
 
@@ -173,6 +177,9 @@ pub fn detect_rooms_from_folders(project_dir: &Path) -> Vec<RoomConfig> {
         rooms.push(general_room());
     }
 
+    // Postcondition: result always contains a "general" room.
+    debug_assert!(rooms.iter().any(|r| r.name == "general"));
+
     rooms
 }
 
@@ -191,6 +198,7 @@ pub fn detect_room(
     rooms: &[RoomConfig],
     project_path: &Path,
 ) -> String {
+    assert!(!rooms.is_empty(), "detect_room: rooms must not be empty");
     let relative = filepath
         .strip_prefix(project_path)
         .unwrap_or(filepath)
@@ -255,6 +263,8 @@ pub fn is_skip_dir(name: &str) -> bool {
 }
 
 #[cfg(test)]
+// Test code — .expect() is acceptable with a descriptive message.
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
@@ -366,13 +376,13 @@ mod tests {
 
     #[test]
     fn detect_rooms_from_folders_creates_rooms() {
-        let dir = tempfile::tempdir().expect("create temp dir");
-        let dir_path = dir.path();
-        std::fs::create_dir_all(dir_path.join("frontend")).expect("create frontend");
-        std::fs::create_dir_all(dir_path.join("backend")).expect("create backend");
-        std::fs::create_dir_all(dir_path.join("docs")).expect("create docs");
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let temp_directory_path = temp_dir.path();
+        std::fs::create_dir_all(temp_directory_path.join("frontend")).expect("create frontend");
+        std::fs::create_dir_all(temp_directory_path.join("backend")).expect("create backend");
+        std::fs::create_dir_all(temp_directory_path.join("docs")).expect("create docs");
 
-        let rooms = detect_rooms_from_folders(dir_path);
+        let rooms = detect_rooms_from_folders(temp_directory_path);
         let names: Vec<&str> = rooms.iter().map(|r| r.name.as_str()).collect();
 
         assert!(names.contains(&"frontend"));

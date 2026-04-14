@@ -64,10 +64,13 @@ pub struct GraphStats {
 /// Build the palace graph from drawer metadata.
 /// Returns (nodes, edges) where nodes are rooms and edges are tunnels.
 pub async fn build_graph(
-    conn: &Connection,
+    connection: &Connection,
 ) -> Result<(HashMap<String, RoomNode>, Vec<TunnelEdge>)> {
+    // "general" is the catch-all room assigned when no specific room matches.
+    // It appears in every wing and would create spurious tunnel edges between
+    // all wings if included, making the graph useless for navigation.
     let rows = query_all(
-        conn,
+        connection,
         "SELECT room, wing, COUNT(*) as cnt FROM drawers WHERE room != 'general' AND room != '' GROUP BY room, wing",
         (),
     )
@@ -121,17 +124,27 @@ pub async fn build_graph(
     Ok((nodes, edges))
 }
 
+/// Maximum results returned by `traverse` and `find_tunnels` to keep MCP
+/// responses within a reasonable token budget.
+const GRAPH_RESULT_CAP: usize = 50;
+
 /// BFS traversal from a starting room. Find connected rooms through shared wings.
+///
+/// Returns `(results, truncated)` where `truncated` is `true` when the full
+/// result set exceeded `GRAPH_RESULT_CAP` and was capped.
 pub async fn traverse(
-    conn: &Connection,
+    connection: &Connection,
     start_room: &str,
     max_hops: usize,
-) -> Result<Vec<TraversalResult>> {
-    let (nodes, _) = build_graph(conn).await?;
+) -> Result<(Vec<TraversalResult>, bool)> {
+    assert!(max_hops > 0, "max_hops must be positive");
+    assert!(!start_room.is_empty(), "start_room must not be empty");
+
+    let (nodes, _) = build_graph(connection).await?;
 
     let start = match nodes.get(start_room) {
         Some(node) => node.clone(),
-        None => return Ok(Vec::new()),
+        None => return Ok((Vec::new(), false)),
     };
 
     let mut visited = HashSet::new();
@@ -148,7 +161,13 @@ pub async fn traverse(
     let mut frontier: VecDeque<(String, usize)> = VecDeque::new();
     frontier.push_back((start_room.to_string(), 0));
 
+    // Upper bound: each room enters `visited` before being pushed to `frontier`,
+    // so the frontier empties after at most nodes.len() iterations.
     while let Some((current_room, depth)) = frontier.pop_front() {
+        assert!(
+            visited.len() <= nodes.len(),
+            "visited set cannot exceed node count — frontier invariant is broken"
+        );
         if depth >= max_hops {
             continue;
         }
@@ -182,18 +201,28 @@ pub async fn traverse(
         }
     }
 
+    // Sort by hop first so callers see the closest rooms first; break ties by
+    // drawer count so the most active rooms surface before sparse ones.
     results.sort_by(|a, b| a.hop.cmp(&b.hop).then_with(|| b.count.cmp(&a.count)));
-    results.truncate(50);
-    Ok(results)
+    let truncated = results.len() > GRAPH_RESULT_CAP;
+    results.truncate(GRAPH_RESULT_CAP);
+
+    // Postcondition: result count bounded by hard limit.
+    debug_assert!(results.len() <= GRAPH_RESULT_CAP);
+
+    Ok((results, truncated))
 }
 
 /// Find rooms that connect two wings (tunnels).
+///
+/// Returns `(tunnels, truncated)` where `truncated` is `true` when the full
+/// result set exceeded `GRAPH_RESULT_CAP` and was capped.
 pub async fn find_tunnels(
-    conn: &Connection,
+    connection: &Connection,
     wing_a: Option<&str>,
     wing_b: Option<&str>,
-) -> Result<Vec<RoomNode>> {
-    let (nodes, _) = build_graph(conn).await?;
+) -> Result<(Vec<RoomNode>, bool)> {
+    let (nodes, _) = build_graph(connection).await?;
 
     let mut tunnels: Vec<RoomNode> = nodes
         .into_values()
@@ -215,14 +244,20 @@ pub async fn find_tunnels(
         })
         .collect();
 
+    // Surface the busiest shared rooms first — they are the most useful bridges.
     tunnels.sort_by(|a, b| b.count.cmp(&a.count));
-    tunnels.truncate(50);
-    Ok(tunnels)
+    let truncated = tunnels.len() > GRAPH_RESULT_CAP;
+    tunnels.truncate(GRAPH_RESULT_CAP);
+
+    // Postcondition: all returned nodes span at least 2 wings.
+    debug_assert!(tunnels.iter().all(|t| t.wings.len() >= 2));
+
+    Ok((tunnels, truncated))
 }
 
 /// Summary statistics about the palace graph.
-pub async fn graph_stats(conn: &Connection) -> Result<GraphStats> {
-    let (nodes, edges) = build_graph(conn).await?;
+pub async fn graph_stats(connection: &Connection) -> Result<GraphStats> {
+    let (nodes, edges) = build_graph(connection).await?;
 
     let tunnel_rooms = nodes.values().filter(|n| n.wings.len() >= 2).count();
 
@@ -251,10 +286,12 @@ pub async fn graph_stats(conn: &Connection) -> Result<GraphStats> {
 }
 
 #[cfg(test)]
+// Test code — .expect() is acceptable with a descriptive message.
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 
-    async fn seed_graph(conn: &Connection) {
+    async fn seed_graph(connection: &Connection) {
         // Create drawers across wings and rooms to build a graph
         for (id, wing, room) in [
             ("g1", "proj_a", "backend"),
@@ -262,20 +299,21 @@ mod tests {
             ("g3", "proj_b", "backend"), // "backend" spans both wings — tunnel
             ("g4", "proj_b", "database"),
         ] {
-            conn.execute(
-                "INSERT INTO drawers (id, wing, room, content) VALUES (?1, ?2, ?3, 'content')",
-                turso::params![id, wing, room],
-            )
-            .await
-            .expect("seed drawer");
+            connection
+                .execute(
+                    "INSERT INTO drawers (id, wing, room, content) VALUES (?1, ?2, ?3, 'content')",
+                    turso::params![id, wing, room],
+                )
+                .await
+                .expect("seed drawer");
         }
     }
 
     #[tokio::test]
     async fn build_graph_creates_nodes_and_edges() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        seed_graph(&conn).await;
-        let (nodes, edges) = build_graph(&conn).await.expect("build_graph");
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        seed_graph(&connection).await;
+        let (nodes, edges) = build_graph(&connection).await.expect("build_graph");
         // "backend" spans 2 wings, "frontend" in 1, "database" in 1
         assert!(nodes.contains_key("backend"));
         assert!(nodes.contains_key("frontend"));
@@ -287,9 +325,12 @@ mod tests {
 
     #[tokio::test]
     async fn traverse_reaches_connected_rooms() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        seed_graph(&conn).await;
-        let results = traverse(&conn, "frontend", 2).await.expect("traverse");
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        seed_graph(&connection).await;
+        let (results, truncated) = traverse(&connection, "frontend", 2)
+            .await
+            .expect("traverse");
+        assert!(!truncated);
         // frontend (hop 0) → backend (hop 1, shared proj_a) → database (hop 2, shared proj_b)
         assert!(!results.is_empty());
         assert_eq!(results[0].room, "frontend");
@@ -315,9 +356,12 @@ mod tests {
 
     #[tokio::test]
     async fn find_tunnels_returns_multi_wing_rooms() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        seed_graph(&conn).await;
-        let tunnels = find_tunnels(&conn, None, None).await.expect("find_tunnels");
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        seed_graph(&connection).await;
+        let (tunnels, truncated) = find_tunnels(&connection, None, None)
+            .await
+            .expect("find_tunnels");
+        assert!(!truncated);
         assert_eq!(tunnels.len(), 1);
         assert_eq!(tunnels[0].room, "backend");
         assert_eq!(tunnels[0].wings.len(), 2);

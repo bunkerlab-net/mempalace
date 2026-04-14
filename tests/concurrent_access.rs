@@ -1,3 +1,6 @@
+// Integration test — .expect() is acceptable with a descriptive message.
+#![allow(clippy::expect_used)]
+
 fn current_thread_runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()

@@ -15,6 +15,8 @@ const MIN_CHUNK_SIZE: usize = 30;
 /// Files larger than this are skipped — prevents OOM on huge files.
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
 
+use super::WALK_DEPTH_LIMIT;
+
 const TOPIC_KEYWORDS: &[(&str, &[&str])] = &[
     (
         "technical",
@@ -86,6 +88,10 @@ const TOPIC_KEYWORDS: &[(&str, &[&str])] = &[
 ];
 
 fn detect_convo_room(content: &str) -> String {
+    assert!(
+        !content.is_empty(),
+        "detect_convo_room: content must not be empty"
+    );
     let content_lower = content
         .chars()
         .take(3000)
@@ -105,6 +111,10 @@ fn detect_convo_room(content: &str) -> String {
 }
 
 fn chunk_exchanges(content: &str) -> Vec<Chunk> {
+    assert!(
+        !content.is_empty(),
+        "chunk_exchanges: content must not be empty"
+    );
     let lines: Vec<&str> = content.lines().collect();
     let quote_count = lines
         .iter()
@@ -123,6 +133,8 @@ fn chunk_by_exchange(lines: &[&str]) -> Vec<Chunk> {
     let mut i = 0;
 
     while i < lines.len() {
+        // Upper bound: i strictly increases each iteration, bounded by lines.len().
+        debug_assert!(i < lines.len());
         let line = lines[i].trim();
         if line.starts_with('>') {
             let user_turn = line;
@@ -130,6 +142,8 @@ fn chunk_by_exchange(lines: &[&str]) -> Vec<Chunk> {
 
             let mut ai_lines = Vec::new();
             while i < lines.len() {
+                // Upper bound: i strictly increases each inner iteration, bounded by lines.len().
+                debug_assert!(i < lines.len());
                 let next = lines[i].trim();
                 if next.starts_with('>') || next.starts_with("---") {
                     break;
@@ -198,136 +212,305 @@ fn chunk_by_paragraph(content: &str) -> Vec<Chunk> {
         .collect()
 }
 
-fn scan_convos(dir: &Path) -> Vec<PathBuf> {
+fn scan_convos(directory: &Path) -> Vec<PathBuf> {
+    assert!(
+        directory.is_dir(),
+        "scan_convos: directory must be a directory"
+    );
     let mut files = Vec::new();
-    walk_convos(dir, &mut files);
+    walk_convos(directory, &mut files);
     files
 }
 
-fn walk_convos(dir: &Path, files: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().to_string();
-        // Skip symlinks — prevents following links to /dev/urandom etc.
-        if path.is_symlink() {
+fn walk_convos(directory: &Path, files: &mut Vec<PathBuf>) {
+    // Iterative DFS with explicit depth tracking — no recursion.
+    let mut stack: Vec<(PathBuf, usize)> = vec![(directory.to_path_buf(), 0)];
+
+    while let Some((current_dir, depth)) = stack.pop() {
+        assert!(
+            depth <= WALK_DEPTH_LIMIT,
+            "walk_convos: depth {depth} exceeds WALK_DEPTH_LIMIT"
+        );
+        // depth > WALK_DEPTH_LIMIT is unreachable: subdirectory pushes are guarded
+        // below. This continue is a defensive safety net.
+        if depth > WALK_DEPTH_LIMIT {
             continue;
         }
-
-        if path.is_dir() {
-            // Skip global cache dirs plus Claude Code-specific output dirs that
-            // contain tool output and agent memory — not conversation transcripts.
-            if !is_skip_dir(&name) && name != "tool-results" && name != "memory" {
-                walk_convos(&path, files);
+        let Ok(entries) = std::fs::read_dir(&current_dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            // Skip symlinks — prevents following links to /dev/urandom etc.
+            if path.is_symlink() {
+                continue;
             }
-        } else if let Some(ext) = path.extension() {
-            let ext_lower = ext.to_string_lossy().to_lowercase();
-            // Skip .meta.json files — these are Claude Code session metadata,
-            // not conversation content.
-            if CONVO_EXTENSIONS.contains(&ext_lower.as_str()) && !name.ends_with(".meta.json") {
-                // Skip files exceeding size limit
-                if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_FILE_SIZE) {
-                    continue;
+            if path.is_dir() {
+                // Skip global cache dirs plus Claude Code-specific output dirs that
+                // contain tool output and agent memory — not conversation transcripts.
+                // Only descend if we haven't reached the depth limit yet.
+                if !is_skip_dir(&name)
+                    && name != "tool-results"
+                    && name != "memory"
+                    && depth < WALK_DEPTH_LIMIT
+                {
+                    stack.push((path, depth + 1));
                 }
-                files.push(path);
+            } else if let Some(extension) = path.extension() {
+                let extension_lower = extension.to_string_lossy().to_lowercase();
+                // Skip .meta.json files — these are Claude Code session metadata,
+                // not conversation content.
+                if CONVO_EXTENSIONS.contains(&extension_lower.as_str())
+                    && !name.ends_with(".meta.json")
+                {
+                    if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_FILE_SIZE) {
+                        continue;
+                    }
+                    files.push(path);
+                }
             }
         }
     }
 }
 
-// Single-pass conversation mining pipeline; dry_run and limit handling adds lines but splitting
-// would fragment shared state (counts, room_counts) across functions artificially.
-#[allow(clippy::too_many_lines)]
-pub async fn mine_convos(
-    conn: &Connection,
-    dir: &Path,
+fn mine_convos_print_header(
+    wing: &str,
+    directory: &Path,
+    file_count: usize,
     extract_mode: &str,
-    opts: &MineParams,
-) -> Result<()> {
-    let dir = dir.canonicalize().map_err(|e| {
-        crate::error::Error::Other(format!("directory not found: {}: {e}", dir.display()))
-    })?;
-
-    let dir_name = dir
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_lowercase()
-        .replace([' ', '-'], "_");
-    let wing = opts.wing.as_deref().unwrap_or(&dir_name);
-
-    let all_files = scan_convos(&dir);
-    let files: Vec<_> = if opts.limit == 0 {
-        all_files
-    } else {
-        all_files.into_iter().take(opts.limit).collect()
-    };
-
+    dry_run: bool,
+) {
     println!("\n=======================================================");
-    if opts.dry_run {
+    if dry_run {
         println!("  MemPalace Mine — Conversations [DRY RUN]");
     } else {
         println!("  MemPalace Mine — Conversations");
     }
     println!("=======================================================");
     println!("  Wing:    {wing}");
-    println!("  Source:  {}", dir.display());
-    println!("  Files:   {}", files.len());
+    println!("  Source:  {}", directory.display());
+    println!("  Files:   {file_count}");
     println!("  Mode:    {extract_mode}");
     println!("-------------------------------------------------------\n");
+}
+
+// Eight independent summary counters; a dedicated struct would be over-engineered for a single private call site.
+#[allow(clippy::too_many_arguments)]
+fn mine_convos_print_summary(
+    dry_run: bool,
+    file_count: usize,
+    files_skipped: usize,
+    files_unreadable: usize,
+    files_too_short: usize,
+    files_empty_chunks: usize,
+    total_drawers: usize,
+    room_counts: &HashMap<String, usize>,
+) {
+    let files_processed = file_count
+        .saturating_sub(files_skipped)
+        .saturating_sub(files_unreadable)
+        .saturating_sub(files_too_short)
+        .saturating_sub(files_empty_chunks);
+    println!("\n=======================================================");
+    if dry_run {
+        println!("  Dry run complete — nothing was written.");
+    } else {
+        println!("  Done.");
+    }
+    println!("  Files processed:                  {files_processed}");
+    println!("  Files skipped (already filed):    {files_skipped}");
+    if files_unreadable > 0 {
+        println!("  Files skipped (unreadable):       {files_unreadable}");
+    }
+    if files_too_short > 0 {
+        println!("  Files skipped (too short):        {files_too_short}");
+    }
+    if files_empty_chunks > 0 {
+        println!("  Files skipped (no chunks):        {files_empty_chunks}");
+    }
+    println!(
+        "  Drawers {}: {total_drawers}",
+        if dry_run { "would be filed" } else { "filed" }
+    );
+
+    let mut sorted_rooms: Vec<_> = room_counts.iter().collect();
+    // Break count ties by room name so output is deterministic across runs.
+    sorted_rooms.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+    if !sorted_rooms.is_empty() {
+        println!("\n  By room:");
+        for (room, count) in sorted_rooms {
+            println!("    {room:20} {count} files");
+        }
+    }
+    if !dry_run {
+        println!("\n  Next: mempalace search \"what you're looking for\"");
+    }
+    println!("=======================================================\n");
+}
+
+/// Write all chunks for one conversation file into the palace.
+async fn mine_convos_write_chunks(
+    connection: &Connection,
+    chunks: &[Chunk],
+    wing: &str,
+    room: &str,
+    source_file: &str,
+    source_mtime: f64,
+    opts: &MineParams,
+) -> Result<()> {
+    // Outer savepoint ensures a partial failure cannot leave file_already_mined()
+    // seeing a half-ingested file on the next run.
+    connection
+        .execute("SAVEPOINT sp_mine_convos_file", ())
+        .await?;
+
+    for chunk in chunks {
+        let id = format!(
+            "drawer_{wing}_{room}_{}",
+            &uuid::Uuid::new_v4().to_string().replace('-', "")[..16]
+        );
+        if let Err(e) = drawer::add_drawer(
+            connection,
+            &drawer::DrawerParams {
+                id: &id,
+                wing,
+                room,
+                content: &chunk.content,
+                source_file,
+                chunk_index: chunk.chunk_index,
+                added_by: &opts.agent,
+                ingest_mode: "convos",
+                source_mtime: Some(source_mtime),
+            },
+        )
+        .await
+        {
+            let _ = connection
+                .execute("ROLLBACK TO SAVEPOINT sp_mine_convos_file", ())
+                .await;
+            let _ = connection
+                .execute("RELEASE SAVEPOINT sp_mine_convos_file", ())
+                .await;
+            return Err(e);
+        }
+    }
+
+    connection
+        .execute("RELEASE SAVEPOINT sp_mine_convos_file", ())
+        .await?;
+    Ok(())
+}
+
+// Sequential file-scan loop with per-file counters mutated via continue/+=; no clean extraction boundary within 70 lines.
+#[allow(clippy::too_many_lines)]
+pub async fn mine_convos(
+    connection: &Connection,
+    directory: &Path,
+    extract_mode: &str,
+    opts: &MineParams,
+) -> Result<()> {
+    let directory = directory.canonicalize().map_err(|e| {
+        crate::error::Error::Other(format!("directory not found: {}: {e}", directory.display()))
+    })?;
+    if !directory.is_dir() {
+        return Err(crate::error::Error::Other(format!(
+            "not a directory: {}",
+            directory.display()
+        )));
+    }
+
+    let dir_name = directory
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_lowercase()
+        .replace([' ', '-'], "_");
+    // file_name() returns None for filesystem roots (e.g. `/`), producing an empty
+    // dir_name. An empty wing triggers the assert in drawer::add_drawer, so surface
+    // a clear error here instead.
+    let wing = if let Some(wing_name) = opts.wing.as_deref() {
+        wing_name
+    } else if dir_name.is_empty() {
+        return Err(crate::error::Error::Other(
+            "mine convos: cannot determine wing name — directory is a filesystem root; \
+             pass --wing to specify one explicitly"
+                .to_string(),
+        ));
+    } else {
+        &dir_name
+    };
+
+    let mut all_files = scan_convos(&directory);
+    // Sort for deterministic ordering before applying any limit.
+    all_files.sort_unstable();
+    let files: Vec<_> = if opts.limit == 0 {
+        all_files
+    } else {
+        all_files.into_iter().take(opts.limit).collect()
+    };
+
+    mine_convos_print_header(wing, &directory, files.len(), extract_mode, opts.dry_run);
 
     let mut total_drawers: usize = 0;
     let mut files_skipped: usize = 0;
+    let mut files_unreadable: usize = 0;
+    let mut files_too_short: usize = 0;
+    let mut files_empty_chunks: usize = 0;
     let mut room_counts: HashMap<String, usize> = HashMap::new();
 
     for (i, filepath) in files.iter().enumerate() {
         let source_file = filepath.to_string_lossy().to_string();
 
-        if !opts.dry_run && drawer::file_already_mined(conn, &source_file).await? {
+        // Always check for duplicates so dry runs report accurate skip counts.
+        // Only the write path below is gated on !opts.dry_run.
+        if drawer::file_already_mined(connection, &source_file).await? {
             files_skipped += 1;
             continue;
         }
 
         let Ok(content) = normalize::normalize(filepath) else {
+            files_unreadable += 1;
             continue;
         };
-
         if content.trim().len() < MIN_CHUNK_SIZE {
+            files_too_short += 1;
             continue;
         }
 
         let chunks = chunk_exchanges(&content);
         if chunks.is_empty() {
+            files_empty_chunks += 1;
             continue;
         }
 
         let room = detect_convo_room(&content);
         let drawers_added = chunks.len();
 
+        // Mtime is required: None conflates "no on-disk source" with
+        // "unreadable filesystem", causing file_already_mined() to miss
+        // duplicates on reruns and producing stale duplicate chunks.
+        let Some(source_mtime) = std::fs::metadata(filepath)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs_f64())
+        else {
+            files_unreadable += 1;
+            continue;
+        };
+
         if !opts.dry_run {
-            for chunk in &chunks {
-                let id = format!(
-                    "drawer_{wing}_{room}_{}",
-                    &uuid::Uuid::new_v4().to_string().replace('-', "")[..16]
-                );
-                drawer::add_drawer(
-                    conn,
-                    &drawer::DrawerParams {
-                        id: &id,
-                        wing,
-                        room: &room,
-                        content: &chunk.content,
-                        source_file: &source_file,
-                        chunk_index: chunk.chunk_index,
-                        added_by: &opts.agent,
-                        ingest_mode: "convos",
-                        source_mtime: None,
-                    },
-                )
-                .await?;
-            }
+            mine_convos_write_chunks(
+                connection,
+                &chunks,
+                wing,
+                &room,
+                &source_file,
+                source_mtime,
+                opts,
+            )
+            .await?;
         }
 
         total_drawers += drawers_added;
@@ -340,39 +523,16 @@ pub async fn mine_convos(
         );
     }
 
-    println!("\n=======================================================");
-    if opts.dry_run {
-        println!("  Dry run complete — nothing was written.");
-    } else {
-        println!("  Done.");
-    }
-    println!(
-        "  Files processed: {}",
-        files.len().saturating_sub(files_skipped)
+    mine_convos_print_summary(
+        opts.dry_run,
+        files.len(),
+        files_skipped,
+        files_unreadable,
+        files_too_short,
+        files_empty_chunks,
+        total_drawers,
+        &room_counts,
     );
-    println!("  Files skipped (already filed): {files_skipped}");
-    println!(
-        "  Drawers {}: {total_drawers}",
-        if opts.dry_run {
-            "would be filed"
-        } else {
-            "filed"
-        }
-    );
-
-    let mut sorted_rooms: Vec<_> = room_counts.iter().collect();
-    sorted_rooms.sort_by(|a, b| b.1.cmp(a.1));
-    if !sorted_rooms.is_empty() {
-        println!("\n  By room:");
-        for (room, count) in sorted_rooms {
-            println!("    {room:20} {count} files");
-        }
-    }
-    if !opts.dry_run {
-        println!("\n  Next: mempalace search \"what you're looking for\"");
-    }
-    println!("=======================================================\n");
-
     Ok(())
 }
 

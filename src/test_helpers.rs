@@ -1,3 +1,6 @@
+// Test infrastructure — .expect() is acceptable with a descriptive message.
+#![allow(clippy::expect_used)]
+
 use turso::Connection;
 
 /// Create an in-memory turso database with the full schema applied.
@@ -8,9 +11,9 @@ pub async fn test_db() -> (turso::Database, Connection) {
         .build()
         .await
         .expect("failed to create in-memory db");
-    let conn = db.connect().expect("failed to connect");
-    crate::schema::ensure_schema(&conn)
+    let connection = db.connect().expect("failed to connect");
+    crate::schema::ensure_schema(&connection)
         .await
         .expect("failed to apply schema");
-    (db, conn)
+    (db, connection)
 }

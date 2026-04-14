@@ -1,8 +1,16 @@
 //! Topic extraction for AAAK dialect compression.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
 
 use regex::Regex;
+
+#[allow(clippy::expect_used)]
+// Matches words of 3+ chars (letters, underscores, hyphens) for topic extraction.
+static WORD_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"[a-zA-Z][a-zA-Z_-]{2,}")
+        .expect("word-topic regex is a compile-time literal and cannot fail to compile")
+});
 
 /// Common stop words to exclude from topic extraction.
 pub fn stop_words() -> HashSet<&'static str> {
@@ -25,9 +33,7 @@ pub fn stop_words() -> HashSet<&'static str> {
 /// Extract key topic words from plain text by frequency + proper noun boost.
 pub fn extract_topics(text: &str, max_topics: usize) -> Vec<String> {
     let stops = stop_words();
-    let word_re = Regex::new(r"[a-zA-Z][a-zA-Z_-]{2,}").expect("valid regex");
-
-    let words: Vec<&str> = word_re.find_iter(text).map(|m| m.as_str()).collect();
+    let words: Vec<&str> = WORD_RE.find_iter(text).map(|m| m.as_str()).collect();
 
     // Count frequency, skip stop words
     let mut freq: HashMap<String, i32> = HashMap::new();

@@ -26,6 +26,8 @@ pub struct MineParams {
 /// Files larger than this are skipped — prevents OOM on huge files.
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
 
+use super::WALK_DEPTH_LIMIT;
+
 const READABLE_EXTENSIONS: &[&str] = &[
     "txt", "md", "py", "js", "ts", "jsx", "tsx", "json", "yaml", "yml", "html", "css", "java",
     "go", "rs", "rb", "sh", "csv", "sql", "toml", "c", "cpp", "h", "hpp", "swift", "kt", "scala",
@@ -53,21 +55,39 @@ pub fn scan_project(project_dir: &Path) -> Vec<PathBuf> {
 
 /// Scan with explicit gitignore control.
 pub fn scan_project_with_opts(project_dir: &Path, respect_gitignore: bool) -> Vec<PathBuf> {
-    if respect_gitignore {
+    assert!(
+        project_dir.is_dir(),
+        "project_dir must be a directory: {}",
+        project_dir.display()
+    );
+
+    let files = if respect_gitignore {
         walk_dir_gitignore(project_dir)
     } else {
         let mut files = Vec::new();
         walk_dir(project_dir, &mut files);
         files
-    }
+    };
+
+    // Postcondition: all returned paths are files, not directories.
+    debug_assert!(files.iter().all(|p| p.is_file()));
+
+    files
 }
 
 fn walk_dir_gitignore(project_dir: &Path) -> Vec<PathBuf> {
+    assert!(
+        project_dir.is_dir(),
+        "walk_dir_gitignore: path must be a directory"
+    );
+
     let walker = ignore::WalkBuilder::new(project_dir)
         .git_ignore(true)
         .git_global(true)
         .git_exclude(true)
         .hidden(false) // We handle skip dirs ourselves
+        // Cap depth to match walk_dir() so both scan paths respect the same limit.
+        .max_depth(Some(WALK_DEPTH_LIMIT))
         .build();
 
     let mut files = Vec::new();
@@ -95,12 +115,12 @@ fn walk_dir_gitignore(project_dir: &Path) -> Vec<PathBuf> {
             continue;
         }
 
-        let ext = path
+        let extension = path
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_lowercase();
-        if READABLE_EXTENSIONS.contains(&ext.as_str()) {
+        if READABLE_EXTENSIONS.contains(&extension.as_str()) {
             if entry.metadata().is_ok_and(|m| m.len() > MAX_FILE_SIZE) {
                 continue;
             }
@@ -110,65 +130,58 @@ fn walk_dir_gitignore(project_dir: &Path) -> Vec<PathBuf> {
     files
 }
 
-fn walk_dir(dir: &Path, files: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
+fn walk_dir(directory: &Path, files: &mut Vec<PathBuf>) {
+    // Iterative DFS with explicit depth tracking — no recursion.
+    let mut stack: Vec<(PathBuf, usize)> = vec![(directory.to_path_buf(), 0)];
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().to_string();
-
-        // Skip symlinks — prevents following links to /dev/urandom etc.
-        if path.is_symlink() {
+    while let Some((current_dir, depth)) = stack.pop() {
+        assert!(
+            depth <= WALK_DEPTH_LIMIT,
+            "walk_dir: depth {depth} exceeds WALK_DEPTH_LIMIT"
+        );
+        // depth > WALK_DEPTH_LIMIT is unreachable: subdirectory pushes are guarded
+        // below. This continue is a defensive safety net.
+        if depth > WALK_DEPTH_LIMIT {
             continue;
         }
-
-        if path.is_dir() {
-            if !is_skip_dir(&name) {
-                walk_dir(&path, files);
+        let Ok(entries) = std::fs::read_dir(&current_dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            // Skip symlinks — prevents following links to /dev/urandom etc.
+            if path.is_symlink() {
+                continue;
             }
-        } else if let Some(ext) = path.extension() {
-            let ext_lower = ext.to_string_lossy().to_lowercase();
-            if READABLE_EXTENSIONS.contains(&ext_lower.as_str())
-                && !SKIP_FILES.contains(&name.as_str())
-            {
-                // Skip files exceeding size limit
-                if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_FILE_SIZE) {
-                    continue;
+            if path.is_dir() {
+                // Only descend if we haven't reached the depth limit yet.
+                if !is_skip_dir(&name) && depth < WALK_DEPTH_LIMIT {
+                    stack.push((path, depth + 1));
                 }
-                files.push(path);
+            } else if let Some(extension) = path.extension() {
+                let extension_lower = extension.to_string_lossy().to_lowercase();
+                if READABLE_EXTENSIONS.contains(&extension_lower.as_str())
+                    && !SKIP_FILES.contains(&name.as_str())
+                {
+                    if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_FILE_SIZE) {
+                        continue;
+                    }
+                    files.push(path);
+                }
             }
         }
     }
 }
 
-/// Mine a project directory into the palace.
-// Single-pass file mining pipeline; dry_run and limit handling adds lines but splitting
-// would fragment shared state (counts, room_counts) across functions artificially.
-#[allow(clippy::too_many_lines)]
-pub async fn mine(conn: &Connection, project_dir: &Path, opts: &MineParams) -> Result<()> {
-    let project_dir = project_dir.canonicalize().map_err(|e| {
-        crate::error::Error::Other(format!(
-            "directory not found: {}: {e}",
-            project_dir.display()
-        ))
-    })?;
-
-    let config_path = project_dir.join("mempalace.yaml");
-    let config = ProjectConfig::load(&config_path)?;
-
-    let wing = opts.wing.as_deref().unwrap_or(&config.wing);
-    let rooms = &config.rooms;
-    let all_files = scan_project_with_opts(&project_dir, opts.respect_gitignore);
-    let files: Vec<_> = if opts.limit == 0 {
-        all_files
-    } else {
-        all_files.into_iter().take(opts.limit).collect()
-    };
-
+fn mine_print_header(
+    wing: &str,
+    rooms: &[crate::config::RoomConfig],
+    file_count: usize,
+    dry_run: bool,
+) {
     println!("\n=======================================================");
-    if opts.dry_run {
+    if dry_run {
         println!("  MemPalace Mine [DRY RUN]");
     } else {
         println!("  MemPalace Mine");
@@ -183,68 +196,150 @@ pub async fn mine(conn: &Connection, project_dir: &Path, opts: &MineParams) -> R
             .collect::<Vec<_>>()
             .join(", ")
     );
-    println!("  Files:   {}", files.len());
+    println!("  Files:   {file_count}");
     println!("-------------------------------------------------------\n");
+}
 
+fn mine_print_summary(
+    dry_run: bool,
+    file_count: usize,
+    files_skipped: usize,
+    files_unreadable_or_too_short: usize,
+    total_drawers: usize,
+    room_counts: &HashMap<String, usize>,
+) {
+    println!("\n=======================================================");
+    if dry_run {
+        println!("  Dry run complete — nothing was written.");
+    } else {
+        println!("  Done.");
+    }
+    let files_processed = file_count - files_skipped - files_unreadable_or_too_short;
+    println!("  Files processed: {files_processed}");
+    println!("  Files skipped (already filed): {files_skipped}");
+    if files_unreadable_or_too_short > 0 {
+        // mine_read_file() returns None for both unreadable files and files shorter than 50
+        // characters — both cases are captured under this counter.
+        println!("  Files skipped (empty/unreadable/too short): {files_unreadable_or_too_short}");
+    }
+    println!(
+        "  Drawers {}: {total_drawers}",
+        if dry_run { "would be filed" } else { "filed" }
+    );
+    println!("\n  By room:");
+
+    let mut sorted_rooms: Vec<_> = room_counts.iter().collect();
+    sorted_rooms.sort_by(|a, b| b.1.cmp(a.1));
+    for (room, count) in sorted_rooms {
+        println!("    {room:20} {count} files");
+    }
+    if !dry_run {
+        println!("\n  Next: mempalace search \"what you're looking for\"");
+    }
+    println!("=======================================================\n");
+}
+
+/// Write all chunks for one file into the palace.
+async fn mine_write_chunks(
+    connection: &Connection,
+    chunks: &[crate::palace::chunker::Chunk],
+    wing: &str,
+    room: &str,
+    source_file: &str,
+    source_mtime: Option<f64>,
+    opts: &MineParams,
+) -> Result<()> {
+    for chunk in chunks {
+        let id = format!(
+            "drawer_{wing}_{room}_{}",
+            &uuid::Uuid::new_v4().to_string().replace('-', "")[..16]
+        );
+        drawer::add_drawer(
+            connection,
+            &drawer::DrawerParams {
+                id: &id,
+                wing,
+                room,
+                content: &chunk.content,
+                source_file,
+                chunk_index: chunk.chunk_index,
+                added_by: &opts.agent,
+                ingest_mode: "projects",
+                source_mtime,
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Read a file's content, falling back to lossy UTF-8 on binary files.
+/// Returns `None` if the file is unreadable or too short to be useful.
+fn mine_read_file(filepath: &Path) -> Option<String> {
+    let raw = match std::fs::read_to_string(filepath) {
+        Ok(c) => c,
+        Err(_) => match std::fs::read(filepath) {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+            Err(_) => return None,
+        },
+    };
+    let content = raw.trim().to_string();
+    if content.len() < 50 {
+        return None;
+    }
+    Some(content)
+}
+
+/// Process all files in the mine loop. Returns `(total_drawers, files_skipped, files_unreadable_or_too_short, room_counts)`.
+async fn mine_process_files(
+    connection: &Connection,
+    files: &[PathBuf],
+    wing: &str,
+    rooms: &[crate::config::RoomConfig],
+    project_dir: &Path,
+    opts: &MineParams,
+) -> Result<(usize, usize, usize, HashMap<String, usize>)> {
     let mut total_drawers: usize = 0;
     let mut files_skipped: usize = 0;
+    let mut files_unreadable_or_too_short: usize = 0;
     let mut room_counts: HashMap<String, usize> = HashMap::new();
 
     for (i, filepath) in files.iter().enumerate() {
         let source_file = filepath.to_string_lossy().to_string();
 
-        if !opts.dry_run && drawer::file_already_mined(conn, &source_file).await? {
+        // Always check for duplicates so dry runs report accurate skip counts.
+        // Only the write path below is gated on !opts.dry_run.
+        if drawer::file_already_mined(connection, &source_file).await? {
             files_skipped += 1;
             continue;
         }
 
-        let content = match std::fs::read_to_string(filepath) {
-            Ok(c) => c,
-            Err(_) => match std::fs::read(filepath) {
-                Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
-                Err(_) => continue,
-            },
+        let Some(content) = mine_read_file(filepath) else {
+            files_unreadable_or_too_short += 1;
+            continue;
         };
 
-        let content = content.trim().to_string();
-        if content.len() < 50 {
-            continue;
-        }
-
-        let room = detect_room(filepath, &content, rooms, &project_dir);
+        let room = detect_room(filepath, &content, rooms, project_dir);
         let chunks = chunk_text(&content);
         let drawers_added = chunks.len();
 
         if !opts.dry_run {
-            // Capture mtime now so all chunks from the same file share the
-            // same recorded timestamp.
+            // Capture mtime now so all chunks from the same file share the same timestamp.
             let source_mtime: Option<f64> = std::fs::metadata(filepath)
                 .ok()
                 .and_then(|m| m.modified().ok())
                 .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
                 .map(|d| d.as_secs_f64());
-
-            for chunk in &chunks {
-                let id = format!(
-                    "drawer_{wing}_{room}_{}",
-                    &uuid::Uuid::new_v4().to_string().replace('-', "")[..16]
-                );
-                drawer::add_drawer(
-                    conn,
-                    &drawer::DrawerParams {
-                        id: &id,
-                        wing,
-                        room: &room,
-                        content: &chunk.content,
-                        source_file: &source_file,
-                        chunk_index: chunk.chunk_index,
-                        added_by: &opts.agent,
-                        ingest_mode: "projects",
-                        source_mtime,
-                    },
-                )
-                .await?;
-            }
+            mine_write_chunks(
+                connection,
+                &chunks,
+                wing,
+                &room,
+                &source_file,
+                source_mtime,
+                opts,
+            )
+            .await?;
         }
 
         total_drawers += drawers_added;
@@ -257,34 +352,63 @@ pub async fn mine(conn: &Connection, project_dir: &Path, opts: &MineParams) -> R
         );
     }
 
-    println!("\n=======================================================");
-    if opts.dry_run {
-        println!("  Dry run complete — nothing was written.");
+    Ok((
+        total_drawers,
+        files_skipped,
+        files_unreadable_or_too_short,
+        room_counts,
+    ))
+}
+
+/// Mine a project directory into the palace.
+pub async fn mine(connection: &Connection, project_dir: &Path, opts: &MineParams) -> Result<()> {
+    if !project_dir.is_dir() {
+        return Err(crate::error::Error::Other(format!(
+            "mine: directory not found or not a directory: {}",
+            project_dir.display()
+        )));
+    }
+
+    let project_dir = project_dir.canonicalize().map_err(|e| {
+        crate::error::Error::Other(format!(
+            "directory not found: {}: {e}",
+            project_dir.display()
+        ))
+    })?;
+
+    let config_path = project_dir.join("mempalace.yaml");
+    let config = ProjectConfig::load(&config_path)?;
+
+    let wing = opts.wing.as_deref().unwrap_or(&config.wing);
+    let mut rooms = config.rooms;
+    if rooms.is_empty() {
+        // Empty rooms list in mempalace.yaml would violate detect_room's precondition;
+        // fall back to a single general room so mining can proceed.
+        rooms.push(crate::config::RoomConfig {
+            name: "general".to_string(),
+            description: String::new(),
+            keywords: vec![],
+        });
+    }
+    let all_files = scan_project_with_opts(&project_dir, opts.respect_gitignore);
+    let files: Vec<_> = if opts.limit == 0 {
+        all_files
     } else {
-        println!("  Done.");
-    }
-    let files_processed = files.len() - files_skipped;
-    println!("  Files processed: {files_processed}");
-    println!("  Files skipped (already filed): {files_skipped}");
-    println!(
-        "  Drawers {}: {total_drawers}",
-        if opts.dry_run {
-            "would be filed"
-        } else {
-            "filed"
-        }
+        all_files.into_iter().take(opts.limit).collect()
+    };
+
+    mine_print_header(wing, &rooms, files.len(), opts.dry_run);
+
+    let (total_drawers, files_skipped, files_unreadable_or_too_short, room_counts) =
+        mine_process_files(connection, &files, wing, &rooms, &project_dir, opts).await?;
+
+    mine_print_summary(
+        opts.dry_run,
+        files.len(),
+        files_skipped,
+        files_unreadable_or_too_short,
+        total_drawers,
+        &room_counts,
     );
-    println!("\n  By room:");
-
-    let mut sorted_rooms: Vec<_> = room_counts.iter().collect();
-    sorted_rooms.sort_by(|a, b| b.1.cmp(a.1));
-    for (room, count) in sorted_rooms {
-        println!("    {room:20} {count} files");
-    }
-    if !opts.dry_run {
-        println!("\n  Next: mempalace search \"what you're looking for\"");
-    }
-    println!("=======================================================\n");
-
     Ok(())
 }

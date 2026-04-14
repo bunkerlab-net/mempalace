@@ -6,18 +6,28 @@ use crate::db;
 use crate::error::Result;
 
 /// Index the words in a drawer's content into the `drawer_words` table.
-pub async fn index_words(conn: &Connection, drawer_id: &str, content: &str) -> Result<()> {
+pub async fn index_words(connection: &Connection, drawer_id: &str, content: &str) -> Result<()> {
+    assert!(!drawer_id.is_empty(), "drawer_id must not be empty");
+    assert!(
+        !content.is_empty(),
+        "content must not be empty for indexing"
+    );
+
     let mut word_counts: HashMap<String, i32> = HashMap::new();
     for word in tokenize(content) {
         *word_counts.entry(word).or_insert(0) += 1;
     }
 
+    // Postcondition: all word counts must be positive.
+    debug_assert!(word_counts.values().all(|&c| c > 0));
+
     for (word, count) in &word_counts {
-        conn.execute(
-            "INSERT OR IGNORE INTO drawer_words (word, drawer_id, count) VALUES (?1, ?2, ?3)",
-            turso::params![word.as_str(), drawer_id, *count],
-        )
-        .await?;
+        connection
+            .execute(
+                "INSERT OR IGNORE INTO drawer_words (word, drawer_id, count) VALUES (?1, ?2, ?3)",
+                turso::params![word.as_str(), drawer_id, *count],
+            )
+            .await?;
     }
 
     Ok(())
@@ -25,92 +35,40 @@ pub async fn index_words(conn: &Connection, drawer_id: &str, content: &str) -> R
 
 /// Tokenize text into lowercase words, filtering stop words and short words.
 fn tokenize(text: &str) -> Vec<String> {
-    text.split(|c: char| !c.is_alphanumeric() && c != '_')
+    let words: Vec<String> = text
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
         .filter(|w| w.len() >= 3)
         .map(str::to_lowercase)
         .filter(|w| !is_stop_word(w))
-        .collect()
+        .collect();
+
+    // Postcondition: all tokens are >= 3 chars and are not stop words.
+    debug_assert!(words.iter().all(|w| w.len() >= 3));
+    debug_assert!(words.iter().all(|w| !is_stop_word(w)));
+
+    words
 }
 
-fn is_stop_word(word: &str) -> bool {
+/// Return `true` if `word` should be excluded from the search word index.
+///
+/// This list is intentionally separate from `dialect::topics::stop_words()`:
+/// that list is tuned for topic extraction (recall matters — include borderline
+/// words to avoid spurious topics), whereas this list is tuned for FTS
+/// relevance (precision matters — only omit words so common that they never
+/// help distinguish one drawer from another). The two lists have different
+/// owners and should evolve independently.
+// Large static stop-word list — line count reflects data volume, not logic.
+#[rustfmt::skip]
+pub(super) fn is_stop_word(word: &str) -> bool {
     matches!(
         word,
-        "the"
-            | "and"
-            | "for"
-            | "are"
-            | "but"
-            | "not"
-            | "you"
-            | "all"
-            | "can"
-            | "had"
-            | "her"
-            | "was"
-            | "one"
-            | "our"
-            | "out"
-            | "has"
-            | "have"
-            | "from"
-            | "they"
-            | "been"
-            | "said"
-            | "each"
-            | "which"
-            | "their"
-            | "will"
-            | "other"
-            | "about"
-            | "many"
-            | "then"
-            | "them"
-            | "these"
-            | "some"
-            | "would"
-            | "make"
-            | "like"
-            | "into"
-            | "time"
-            | "very"
-            | "when"
-            | "come"
-            | "could"
-            | "more"
-            | "than"
-            | "that"
-            | "this"
-            | "with"
-            | "what"
-            | "just"
-            | "also"
-            | "there"
-            | "where"
-            | "after"
-            | "back"
-            | "only"
-            | "most"
-            | "over"
-            | "such"
-            | "here"
-            | "should"
-            | "because"
-            | "does"
-            | "did"
-            | "get"
-            | "how"
-            | "its"
-            | "may"
-            | "let"
-            | "new"
-            | "now"
-            | "old"
-            | "see"
-            | "way"
-            | "who"
-            | "use"
-            | "being"
-            | "well"
+        "the" | "and" | "for" | "are" | "but" | "not" | "you" | "all" | "can" | "had" | "her" | "was" | "one" | "our"
+            | "out" | "has" | "have" | "from" | "they" | "been" | "said" | "each" | "which" | "their" | "will" | "other"
+            | "about" | "many" | "then" | "them" | "these" | "some" | "would" | "make" | "like" | "into" | "time" | "very"
+            | "when" | "come" | "could" | "more" | "than" | "that" | "this" | "with" | "what" | "just" | "also" | "there"
+            | "where" | "after" | "back" | "only" | "most" | "over" | "such" | "here" | "should" | "because" | "does"
+            | "did" | "get" | "how" | "its" | "may" | "let" | "new" | "now" | "old" | "see" | "way" | "who" | "use"
+            | "being" | "well"
     )
 }
 
@@ -121,9 +79,9 @@ fn is_stop_word(word: &str) -> bool {
 /// same mine pass share an identical mtime, so this function verifies that every
 /// row carries the same non-NULL value.  Any NULL or disagreement between rows
 /// signals that the data is inconsistent and the file should be re-mined.
-async fn stored_mtime(conn: &Connection, source_file: &str) -> Result<Option<f64>> {
+async fn stored_mtime(connection: &Connection, source_file: &str) -> Result<Option<f64>> {
     let rows = db::query_all(
-        conn,
+        connection,
         "SELECT source_mtime FROM drawers WHERE source_file = ?1",
         turso::params![source_file],
     )
@@ -139,6 +97,11 @@ async fn stored_mtime(conn: &Connection, source_file: &str) -> Result<Option<f64
         let Some(m): Option<f64> = row.get(0).ok() else {
             return Ok(None);
         };
+        // Negative mtime indicates data corruption; treat as stale so the file is re-mined.
+        if m < 0.0 {
+            return Ok(None);
+        }
+
         // mtime values come from the OS (no floating-point arithmetic), so
         // bitwise equality is safe for detecting inconsistency between rows.
         #[allow(clippy::float_cmp)]
@@ -172,8 +135,10 @@ fn file_mtime(path: &str) -> Option<f64> {
 /// - No drawer for the file exists.
 /// - The drawer was created before `source_mtime` tracking was added (NULL).
 /// - The file's current mtime differs from the stored mtime (file was modified).
-pub async fn file_already_mined(conn: &Connection, source_file: &str) -> Result<bool> {
-    let Some(stored) = stored_mtime(conn, source_file).await? else {
+pub async fn file_already_mined(connection: &Connection, source_file: &str) -> Result<bool> {
+    assert!(!source_file.is_empty(), "source_file must not be empty");
+
+    let Some(stored) = stored_mtime(connection, source_file).await? else {
         return Ok(false);
     };
 
@@ -214,6 +179,8 @@ pub struct DrawerParams<'a> {
 }
 
 #[cfg(test)]
+// Test code — .expect() is acceptable with a descriptive message.
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -263,12 +230,14 @@ mod tests {
 }
 
 #[cfg(test)]
+// Test code — .expect() is acceptable with a descriptive message.
+#[allow(clippy::expect_used)]
 mod async_tests {
     use super::*;
 
     #[tokio::test]
     async fn add_drawer_inserts_row() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
+        let (_db, connection) = crate::test_helpers::test_db().await;
         let p = DrawerParams {
             id: "d1",
             wing: "test_wing",
@@ -280,22 +249,24 @@ mod async_tests {
             ingest_mode: "projects",
             source_mtime: None,
         };
-        let inserted = add_drawer(&conn, &p).await.expect("add_drawer");
+        let inserted = add_drawer(&connection, &p)
+            .await
+            .expect("add_drawer should succeed for valid new drawer");
         assert!(inserted);
 
         let rows = crate::db::query_all(
-            &conn,
+            &connection,
             "SELECT content FROM drawers WHERE id = ?1",
             turso::params!["d1"],
         )
         .await
-        .expect("query");
+        .expect("SELECT FROM drawers should succeed after successful insert");
         assert_eq!(rows.len(), 1);
     }
 
     #[tokio::test]
     async fn add_drawer_duplicate_returns_false() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
+        let (_db, connection) = crate::test_helpers::test_db().await;
         let p = DrawerParams {
             id: "dup1",
             wing: "w",
@@ -307,15 +278,19 @@ mod async_tests {
             ingest_mode: "projects",
             source_mtime: None,
         };
-        let first = add_drawer(&conn, &p).await.expect("first insert");
+        let first = add_drawer(&connection, &p)
+            .await
+            .expect("first add_drawer should succeed for new drawer");
         assert!(first);
-        let second = add_drawer(&conn, &p).await.expect("second insert");
+        let second = add_drawer(&connection, &p)
+            .await
+            .expect("second add_drawer on same id should not error (INSERT OR IGNORE)");
         assert!(!second);
     }
 
     #[tokio::test]
     async fn add_drawer_stores_mtime() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
+        let (_db, connection) = crate::test_helpers::test_db().await;
         let p = DrawerParams {
             id: "mt1",
             wing: "w",
@@ -327,15 +302,17 @@ mod async_tests {
             ingest_mode: "projects",
             source_mtime: Some(1_700_000_000.5),
         };
-        add_drawer(&conn, &p).await.expect("add_drawer");
+        add_drawer(&connection, &p)
+            .await
+            .expect("add_drawer should succeed for valid new drawer with mtime");
 
         let rows = crate::db::query_all(
-            &conn,
+            &connection,
             "SELECT source_mtime FROM drawers WHERE id = ?1",
             turso::params!["mt1"],
         )
         .await
-        .expect("query");
+        .expect("SELECT source_mtime should succeed after add_drawer");
         assert_eq!(rows.len(), 1);
         let stored: Option<f64> = rows[0].get(0).ok();
         assert_eq!(stored, Some(1_700_000_000.5));
@@ -343,26 +320,27 @@ mod async_tests {
 
     #[tokio::test]
     async fn index_words_creates_entries() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
+        let (_db, connection) = crate::test_helpers::test_db().await;
         // Insert a drawer first
-        conn.execute(
-            "INSERT INTO drawers (id, wing, room, content) VALUES ('iw1', 'w', 'r', 'test')",
-            (),
-        )
-        .await
-        .expect("insert drawer");
-
-        index_words(&conn, "iw1", "rust rust programming")
+        connection
+            .execute(
+                "INSERT INTO drawers (id, wing, room, content) VALUES ('iw1', 'w', 'r', 'test')",
+                (),
+            )
             .await
-            .expect("index_words");
+            .expect("raw INSERT INTO drawers should succeed in test db");
+
+        index_words(&connection, "iw1", "rust rust programming")
+            .await
+            .expect("index_words should succeed for valid drawer_id and content");
 
         let rows = crate::db::query_all(
-            &conn,
+            &connection,
             "SELECT word, count FROM drawer_words WHERE drawer_id = ?1 ORDER BY word",
             turso::params!["iw1"],
         )
         .await
-        .expect("query");
+        .expect("SELECT drawer_words should succeed after index_words");
 
         // "rust" (count 2) and "programming" (count 1)
         assert_eq!(rows.len(), 2);
@@ -372,11 +350,11 @@ mod async_tests {
 
     #[tokio::test]
     async fn file_already_mined_no_row_returns_false() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
+        let (_db, connection) = crate::test_helpers::test_db().await;
         assert!(
-            !file_already_mined(&conn, "nonexistent.rs")
+            !file_already_mined(&connection, "nonexistent.rs")
                 .await
-                .expect("check")
+                .expect("file_already_mined should not error when no drawer exists for the file")
         );
     }
 
@@ -384,57 +362,75 @@ mod async_tests {
     /// They must be re-mined so the mtime gets recorded.
     #[tokio::test]
     async fn file_already_mined_null_mtime_returns_false() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        conn.execute(
-            "INSERT INTO drawers (id, wing, room, content, source_file) \
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        connection
+            .execute(
+                "INSERT INTO drawers (id, wing, room, content, source_file) \
              VALUES ('fm_null', 'w', 'r', 'c', 'exists.rs')",
-            (),
-        )
-        .await
-        .expect("insert");
+                (),
+            )
+            .await
+            .expect("INSERT INTO drawers with NULL source_mtime should succeed in test db");
 
         // NULL mtime → treat as not yet mined (forces re-mine to record mtime).
-        assert!(!file_already_mined(&conn, "exists.rs").await.expect("check"));
+        assert!(
+            !file_already_mined(&connection, "exists.rs")
+                .await
+                .expect("file_already_mined should not error for drawer with NULL mtime")
+        );
     }
 
     /// A drawer whose stored mtime matches the file's current mtime is skipped.
     #[tokio::test]
     async fn file_already_mined_matching_mtime_returns_true() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        let tmp = tempfile::NamedTempFile::new().expect("tmp file");
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let tmp = tempfile::NamedTempFile::new()
+            .expect("tempfile::NamedTempFile::new should succeed in test environment");
         let path = tmp.path().to_string_lossy().to_string();
-        let mtime = file_mtime(&path).expect("mtime");
+        let mtime =
+            file_mtime(&path).expect("file_mtime should succeed for existing temp file on disk");
 
-        conn.execute(
-            "INSERT INTO drawers (id, wing, room, content, source_file, source_mtime) \
+        connection
+            .execute(
+                "INSERT INTO drawers (id, wing, room, content, source_file, source_mtime) \
              VALUES ('fm_match', 'w', 'r', 'c', ?1, ?2)",
-            turso::params![path.as_str(), mtime],
-        )
-        .await
-        .expect("insert");
+                turso::params![path.as_str(), mtime],
+            )
+            .await
+            .expect("INSERT INTO drawers with matching source_mtime should succeed in test db");
 
-        assert!(file_already_mined(&conn, &path).await.expect("check"));
+        assert!(
+            file_already_mined(&connection, &path)
+                .await
+                .expect("file_already_mined should not error for drawer with matching mtime")
+        );
     }
 
     /// A drawer whose stored mtime differs from the file's current mtime must be
     /// re-mined (the file was modified after it was last filed).
     #[tokio::test]
     async fn file_already_mined_stale_mtime_returns_false() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        let tmp = tempfile::NamedTempFile::new().expect("tmp file");
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let tmp = tempfile::NamedTempFile::new()
+            .expect("tempfile::NamedTempFile::new should succeed in test environment");
         let path = tmp.path().to_string_lossy().to_string();
         // Store an obviously wrong mtime.
         let stale_mtime: f64 = 0.0;
 
-        conn.execute(
-            "INSERT INTO drawers (id, wing, room, content, source_file, source_mtime) \
+        connection
+            .execute(
+                "INSERT INTO drawers (id, wing, room, content, source_file, source_mtime) \
              VALUES ('fm_stale', 'w', 'r', 'c', ?1, ?2)",
-            turso::params![path.as_str(), stale_mtime],
-        )
-        .await
-        .expect("insert");
+                turso::params![path.as_str(), stale_mtime],
+            )
+            .await
+            .expect("INSERT INTO drawers with stale source_mtime 0.0 should succeed in test db");
 
-        assert!(!file_already_mined(&conn, &path).await.expect("check"));
+        assert!(
+            !file_already_mined(&connection, &path)
+                .await
+                .expect("file_already_mined should not error for drawer with stale mtime")
+        );
     }
 
     /// When two chunks of the same file disagree on their stored mtime, the
@@ -442,27 +438,32 @@ mod async_tests {
     /// practice but the guard ensures correctness).
     #[tokio::test]
     async fn file_already_mined_disagreeing_mtimes_returns_false() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        let tmp = tempfile::NamedTempFile::new().expect("tmp file");
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let tmp = tempfile::NamedTempFile::new()
+            .expect("tempfile::NamedTempFile::new should succeed in test environment");
         let path = tmp.path().to_string_lossy().to_string();
 
-        conn.execute(
-            "INSERT INTO drawers (id, wing, room, content, source_file, source_mtime) \
+        connection
+            .execute(
+                "INSERT INTO drawers (id, wing, room, content, source_file, source_mtime) \
              VALUES ('chunk0', 'w', 'r', 'c0', ?1, 1000.0)",
-            turso::params![path.as_str()],
-        )
-        .await
-        .expect("insert chunk0");
-        conn.execute(
-            "INSERT INTO drawers (id, wing, room, content, source_file, source_mtime) \
+                turso::params![path.as_str()],
+            )
+            .await
+            .expect("INSERT chunk0 with source_mtime 1000.0 should succeed in test db");
+        connection
+            .execute(
+                "INSERT INTO drawers (id, wing, room, content, source_file, source_mtime) \
              VALUES ('chunk1', 'w', 'r', 'c1', ?1, 2000.0)",
-            turso::params![path.as_str()],
-        )
-        .await
-        .expect("insert chunk1");
+                turso::params![path.as_str()],
+            )
+            .await
+            .expect("INSERT chunk1 with source_mtime 2000.0 should succeed in test db");
 
         assert!(
-            !file_already_mined(&conn, &path).await.expect("check"),
+            !file_already_mined(&connection, &path).await.expect(
+                "file_already_mined should not error for file with disagreeing chunk mtimes"
+            ),
             "disagreeing mtimes must trigger re-mine"
         );
     }
@@ -477,28 +478,37 @@ mod async_tests {
 /// `index_words` call rolls back the drawer too, leaving no unsearchable
 /// orphans.  Savepoints nest correctly if the caller is already inside a
 /// transaction.
-pub async fn add_drawer(conn: &Connection, p: &DrawerParams<'_>) -> Result<bool> {
+pub async fn add_drawer(connection: &Connection, params: &DrawerParams<'_>) -> Result<bool> {
+    // Preconditions: all required fields must be non-empty.
+    assert!(!params.id.is_empty(), "drawer id must not be empty");
+    assert!(!params.wing.is_empty(), "drawer wing must not be empty");
+    assert!(!params.room.is_empty(), "drawer room must not be empty");
+    assert!(
+        !params.content.is_empty(),
+        "drawer content must not be empty"
+    );
+
     // SQLite only has i64 integers, so we cast chunk_index (usize) to i32 at the SQL boundary.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let chunk_index_sql = p.chunk_index as i32;
+    let chunk_index_sql = params.chunk_index as i32;
 
-    conn.execute("SAVEPOINT add_drawer", ()).await?;
+    connection.execute("SAVEPOINT add_drawer", ()).await?;
 
-    let rows_affected = conn
+    let rows_affected = connection
         .execute(
             "INSERT OR IGNORE INTO drawers \
              (id, wing, room, content, source_file, chunk_index, added_by, ingest_mode, source_mtime) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             turso::params![
-                p.id,
-                p.wing,
-                p.room,
-                p.content,
-                p.source_file,
+                params.id,
+                params.wing,
+                params.room,
+                params.content,
+                params.source_file,
                 chunk_index_sql,
-                p.added_by,
-                p.ingest_mode,
-                p.source_mtime
+                params.added_by,
+                params.ingest_mode,
+                params.source_mtime
             ],
         )
         .await;
@@ -506,26 +516,40 @@ pub async fn add_drawer(conn: &Connection, p: &DrawerParams<'_>) -> Result<bool>
     let rows_affected = match rows_affected {
         Ok(n) => n,
         Err(e) => {
-            let _ = conn.execute("ROLLBACK TO SAVEPOINT add_drawer", ()).await;
-            let _ = conn.execute("RELEASE SAVEPOINT add_drawer", ()).await;
+            let _ = connection
+                .execute("ROLLBACK TO SAVEPOINT add_drawer", ())
+                .await;
+            let _ = connection.execute("RELEASE SAVEPOINT add_drawer", ()).await;
             return Err(e.into());
         }
     };
 
+    // Postcondition: INSERT OR IGNORE affects at most one row.
+    assert!(
+        rows_affected <= 1,
+        "INSERT OR IGNORE must affect 0 or 1 rows, got {rows_affected}"
+    );
+
     if rows_affected == 0 {
         // Already exists — nothing was written; release the savepoint and report.
-        conn.execute("RELEASE SAVEPOINT add_drawer", ()).await?;
+        connection
+            .execute("RELEASE SAVEPOINT add_drawer", ())
+            .await?;
         return Ok(false);
     }
 
-    match index_words(conn, p.id, p.content).await {
+    match index_words(connection, params.id, params.content).await {
         Ok(()) => {
-            conn.execute("RELEASE SAVEPOINT add_drawer", ()).await?;
+            connection
+                .execute("RELEASE SAVEPOINT add_drawer", ())
+                .await?;
             Ok(true)
         }
         Err(e) => {
-            let _ = conn.execute("ROLLBACK TO SAVEPOINT add_drawer", ()).await;
-            let _ = conn.execute("RELEASE SAVEPOINT add_drawer", ()).await;
+            let _ = connection
+                .execute("ROLLBACK TO SAVEPOINT add_drawer", ())
+                .await;
+            let _ = connection.execute("RELEASE SAVEPOINT add_drawer", ()).await;
             Err(e)
         }
     }

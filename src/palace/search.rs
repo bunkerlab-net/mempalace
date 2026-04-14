@@ -22,22 +22,27 @@ pub struct SearchResult {
 
 /// Search the palace using the inverted index (keyword matching with relevance scoring).
 pub async fn search_memories(
-    conn: &Connection,
+    connection: &Connection,
     query: &str,
     wing: Option<&str>,
     room: Option<&str>,
     n_results: usize,
 ) -> Result<Vec<SearchResult>> {
+    assert!(n_results > 0, "n_results must be positive");
+
     let words = tokenize_query(query);
     if words.is_empty() {
         return Ok(vec![]);
     }
 
-    // Build placeholders for IN clause
+    // turso does not support dynamic-length prepared statements, so the SQL
+    // is built at call time. The word list comes from tokenize_query, which
+    // only produces lowercase alphanumeric tokens, so no sanitization is needed.
     let placeholders: Vec<String> = (1..=words.len()).map(|i| format!("?{i}")).collect();
     let in_clause = placeholders.join(", ");
 
-    // Build optional wing/room filters
+    // Wing and room filters are appended after the word placeholders, so their
+    // parameter indices must be offset past the word count.
     let mut filters = String::new();
     let mut param_offset = words.len();
     if wing.is_some() {
@@ -71,13 +76,25 @@ pub async fn search_memories(
     if let Some(r) = room {
         params.push(turso::Value::from(r));
     }
+    // SQLite LIMIT expects a signed integer. Callers are unlikely to request
+    // more than i32::MAX results, but we saturate rather than panic.
     let n_results_i32 = i32::try_from(n_results).unwrap_or(i32::MAX);
     params.push(turso::Value::from(n_results_i32));
 
-    let rows = db::query_all(conn, &sql, turso::params_from_iter(params)).await?;
+    let rows = db::query_all(connection, &sql, turso::params_from_iter(params)).await?;
+    let results = search_memories_parse_rows(&rows);
 
+    // Postcondition: result count bounded by the SQL LIMIT.
+    debug_assert!(results.len() <= n_results);
+
+    Ok(results)
+}
+
+/// Map query result rows (columns: id, content, wing, room, `source_file`, relevance)
+/// into `SearchResult` values.
+fn search_memories_parse_rows(rows: &[turso::Row]) -> Vec<SearchResult> {
     let mut results = Vec::new();
-    for row in &rows {
+    for row in rows {
         let text = row
             .get_value(1)
             .ok()
@@ -119,21 +136,26 @@ pub async fn search_memories(
             relevance,
         });
     }
-
-    Ok(results)
+    results
 }
 
 /// Tokenize a query string into searchable words.
+///
+/// The minimum length of 3 matches the indexing threshold in `index_words`:
+/// shorter tokens (single letters, two-letter words) are almost always noise
+/// and would fan out to enormous result sets, hurting relevance.
 fn tokenize_query(query: &str) -> Vec<String> {
     query
         .split(|c: char| !c.is_alphanumeric() && c != '_')
         .filter(|w| w.len() >= 3)
         .map(str::to_lowercase)
-        .filter(|w| !is_stop_word(w))
+        .filter(|w| !crate::palace::drawer::is_stop_word(w))
         .collect()
 }
 
 #[cfg(test)]
+// Test code — .expect() is acceptable with a descriptive message.
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -169,13 +191,15 @@ mod tests {
 }
 
 #[cfg(test)]
+// Test code — .expect() is acceptable with a descriptive message.
+#[allow(clippy::expect_used)]
 mod async_tests {
     use super::*;
 
-    async fn seed_drawers(conn: &Connection) {
+    async fn seed_drawers(connection: &Connection) {
         // Insert two drawers with indexed words
         crate::palace::drawer::add_drawer(
-            conn,
+            connection,
             &crate::palace::drawer::DrawerParams {
                 id: "s1",
                 wing: "project_a",
@@ -189,10 +213,10 @@ mod async_tests {
             },
         )
         .await
-        .expect("seed s1");
+        .expect("add_drawer should succeed when seeding test drawer s1 (rust/project_a)");
 
         crate::palace::drawer::add_drawer(
-            conn,
+            connection,
             &crate::palace::drawer::DrawerParams {
                 id: "s2",
                 wing: "project_b",
@@ -206,16 +230,16 @@ mod async_tests {
             },
         )
         .await
-        .expect("seed s2");
+        .expect("add_drawer should succeed when seeding test drawer s2 (react/project_b)");
     }
 
     #[tokio::test]
     async fn search_single_word() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        seed_drawers(&conn).await;
-        let results = search_memories(&conn, "rust", None, None, 10)
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        seed_drawers(&connection).await;
+        let results = search_memories(&connection, "rust", None, None, 10)
             .await
-            .expect("search");
+            .expect("search_memories should not error when searching for 'rust'");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].wing, "project_a");
         assert_eq!(results[0].source_file, "main.rs");
@@ -224,12 +248,12 @@ mod async_tests {
 
     #[tokio::test]
     async fn search_multi_word_relevance() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        seed_drawers(&conn).await;
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        seed_drawers(&connection).await;
         // "programming" appears in both, but searching "rust programming" should rank s1 higher
-        let results = search_memories(&conn, "rust programming", None, None, 10)
+        let results = search_memories(&connection, "rust programming", None, None, 10)
             .await
-            .expect("search");
+            .expect("search_memories should not error when searching for 'rust programming'");
         assert!(!results.is_empty());
         assert_eq!(results[0].wing, "project_a");
         assert_eq!(results[0].source_file, "main.rs");
@@ -238,11 +262,11 @@ mod async_tests {
 
     #[tokio::test]
     async fn search_with_wing_filter() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        seed_drawers(&conn).await;
-        let results = search_memories(&conn, "programming", Some("project_b"), None, 10)
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        seed_drawers(&connection).await;
+        let results = search_memories(&connection, "programming", Some("project_b"), None, 10)
             .await
-            .expect("search");
+            .expect("search_memories should not error when filtering by wing 'project_b'");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].room, "frontend");
         assert_eq!(results[0].source_file, "app.tsx");
@@ -251,11 +275,11 @@ mod async_tests {
 
     #[tokio::test]
     async fn search_with_room_filter() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        seed_drawers(&conn).await;
-        let results = search_memories(&conn, "programming", None, Some("backend"), 10)
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        seed_drawers(&connection).await;
+        let results = search_memories(&connection, "programming", None, Some("backend"), 10)
             .await
-            .expect("search");
+            .expect("search_memories should not error when filtering by room 'backend'");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].wing, "project_a");
         assert_eq!(results[0].room, "backend");
@@ -265,93 +289,11 @@ mod async_tests {
 
     #[tokio::test]
     async fn search_no_results() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        seed_drawers(&conn).await;
-        let results = search_memories(&conn, "elephant", None, None, 10)
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        seed_drawers(&connection).await;
+        let results = search_memories(&connection, "elephant", None, None, 10)
             .await
-            .expect("search");
+            .expect("search_memories should not error when query matches no drawers");
         assert!(results.is_empty());
     }
-}
-
-fn is_stop_word(word: &str) -> bool {
-    matches!(
-        word,
-        "the"
-            | "and"
-            | "for"
-            | "are"
-            | "but"
-            | "not"
-            | "you"
-            | "all"
-            | "can"
-            | "had"
-            | "her"
-            | "was"
-            | "one"
-            | "our"
-            | "out"
-            | "has"
-            | "have"
-            | "from"
-            | "they"
-            | "been"
-            | "said"
-            | "each"
-            | "which"
-            | "their"
-            | "will"
-            | "other"
-            | "about"
-            | "many"
-            | "then"
-            | "them"
-            | "these"
-            | "some"
-            | "would"
-            | "make"
-            | "like"
-            | "into"
-            | "time"
-            | "very"
-            | "when"
-            | "come"
-            | "could"
-            | "more"
-            | "than"
-            | "that"
-            | "this"
-            | "with"
-            | "what"
-            | "just"
-            | "also"
-            | "there"
-            | "where"
-            | "after"
-            | "back"
-            | "only"
-            | "most"
-            | "over"
-            | "such"
-            | "here"
-            | "should"
-            | "because"
-            | "does"
-            | "did"
-            | "get"
-            | "how"
-            | "its"
-            | "may"
-            | "let"
-            | "new"
-            | "now"
-            | "old"
-            | "see"
-            | "way"
-            | "who"
-            | "use"
-            | "being"
-            | "well"
-    )
 }

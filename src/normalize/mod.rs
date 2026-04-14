@@ -14,6 +14,12 @@ use crate::error::Result;
 /// Detects format automatically and converts to `> user\nresponse\n\n` format.
 pub fn normalize(filepath: &Path) -> Result<String> {
     const MAX_SIZE: u64 = 500 * 1024 * 1024; // 500 MB safety limit
+    if !filepath.exists() {
+        return Err(crate::error::Error::Other(format!(
+            "normalize: file not found: {}",
+            filepath.display()
+        )));
+    }
     let file_size = std::fs::metadata(filepath)
         .map_err(|e| {
             crate::error::Error::Other(format!("could not read {}: {e}", filepath.display()))
@@ -35,7 +41,10 @@ pub fn normalize(filepath: &Path) -> Result<String> {
         return Ok(content);
     }
 
-    // Already has > markers — pass through
+    // If the file already contains ≥ 3 lines with `>` markers it is already
+    // in transcript format (or close enough). The threshold of 3 avoids
+    // misidentifying Markdown blockquotes (which commonly appear once or twice)
+    // as a transcript.
     let quote_count = content
         .lines()
         .filter(|l| l.trim_start().starts_with('>'))
@@ -44,13 +53,18 @@ pub fn normalize(filepath: &Path) -> Result<String> {
         return Ok(content);
     }
 
-    // Try JSON normalization
-    let ext = filepath
+    // JSONL formats (Claude Code, Codex) are tried before serde_json::from_str
+    // because they are not valid JSON — serde would reject them. Try them first
+    // so we never pass a multi-line JSONL file to the JSON parser.
+    let extension = filepath
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_lowercase();
-    if (ext == "json" || ext == "jsonl" || content.starts_with('{') || content.starts_with('['))
+    if (extension == "json"
+        || extension == "jsonl"
+        || content.starts_with('{')
+        || content.starts_with('['))
         && let Some(normalized) = try_normalize_json(&content)
     {
         return Ok(normalized);
@@ -85,10 +99,14 @@ fn try_normalize_json(content: &str) -> Option<String> {
 
 /// Convert [(role, text), ...] to transcript format with > markers.
 pub fn messages_to_transcript(messages: &[(&str, &str)]) -> String {
+    // Precondition: all roles are non-empty.
+    debug_assert!(messages.iter().all(|(role, _)| !role.is_empty()));
     let mut lines = Vec::new();
     let mut i = 0;
 
+    // Upper bound: i advances by at least 1 each iteration, bounded by messages.len().
     while i < messages.len() {
+        assert!(i < messages.len());
         let (role, text) = messages[i];
         if role == "user" {
             lines.push(format!("> {text}"));
@@ -109,6 +127,8 @@ pub fn messages_to_transcript(messages: &[(&str, &str)]) -> String {
 }
 
 #[cfg(test)]
+// Test code — .expect() is acceptable with a descriptive message.
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -137,8 +157,8 @@ mod tests {
     #[test]
     fn normalize_passthrough_with_markers() {
         // Text with >= 3 lines starting with > should pass through
-        let dir = tempfile::tempdir().expect("create temp dir");
-        let path = dir.path().join("test.txt");
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let path = temp_dir.path().join("test.txt");
         std::fs::write(
             &path,
             "> hello\nresponse\n\n> second\nreply\n\n> third\nanother",

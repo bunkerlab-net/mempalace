@@ -4,13 +4,13 @@ use crate::error::Result;
 use crate::palace::search::search_memories;
 
 pub async fn run(
-    conn: &Connection,
+    connection: &Connection,
     query: &str,
     wing: Option<&str>,
     room: Option<&str>,
     n_results: usize,
 ) -> Result<()> {
-    let results = search_memories(conn, query, wing, room, n_results).await?;
+    let results = search_memories(connection, query, wing, room, n_results).await?;
 
     if results.is_empty() {
         println!("\n  No results found for: \"{query}\"");

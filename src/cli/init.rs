@@ -5,22 +5,22 @@ use crate::config::ProjectConfig;
 use crate::error::Result;
 use crate::palace::room_detect::detect_rooms_from_folders;
 
-pub fn run(dir: &Path, yes: bool) -> Result<()> {
-    let dir = dir.canonicalize().map_err(|e| {
-        crate::error::Error::Other(format!("directory not found: {}: {e}", dir.display()))
+pub fn run(directory: &Path, yes: bool) -> Result<()> {
+    let directory = directory.canonicalize().map_err(|e| {
+        crate::error::Error::Other(format!("directory not found: {}: {e}", directory.display()))
     })?;
 
-    let project_name = dir
+    let project_name = directory
         .file_name()
         .unwrap_or_default()
         .to_string_lossy()
         .to_lowercase()
         .replace([' ', '-'], "_");
 
-    let rooms = detect_rooms_from_folders(&dir);
+    let rooms = detect_rooms_from_folders(&directory);
 
     // Count files for display
-    let file_count = crate::palace::miner::scan_project(&dir).len();
+    let file_count = crate::palace::miner::scan_project(&directory).len();
 
     println!("\n=======================================================");
     println!("  MemPalace Init");
@@ -52,13 +52,13 @@ pub fn run(dir: &Path, yes: bool) -> Result<()> {
         rooms,
     };
 
-    let config_path = dir.join("mempalace.yaml");
+    let config_path = directory.join("mempalace.yaml");
     let yaml = serde_yaml::to_string(&config).map_err(crate::error::Error::Yaml)?;
     std::fs::write(&config_path, &yaml)?;
 
     println!("\n  Config saved: {}", config_path.display());
     println!("\n  Next step:");
-    println!("    mempalace mine {}", dir.display());
+    println!("    mempalace mine {}", directory.display());
     println!("\n=======================================================\n");
 
     Ok(())
