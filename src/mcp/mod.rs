@@ -17,6 +17,11 @@ use crate::error::Result;
 const SUPPORTED_PROTOCOL_VERSIONS: &[&str] =
     &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
+/// Hard cap on a single newline-delimited request frame. A client-controlled
+/// line is buffered entirely before JSON parsing, so this bound prevents OOM
+/// before any validation runs. 1 MiB comfortably fits any real tool payload.
+const MAX_REQUEST_BYTES: usize = 1024 * 1024; // 1 MiB
+
 /// Run the MCP server: read JSON-RPC 2.0 requests from stdin, write responses to stdout.
 pub async fn run(connection: &Connection) -> Result<()> {
     let stdin = tokio::io::stdin();
@@ -30,6 +35,19 @@ pub async fn run(connection: &Connection) -> Result<()> {
         let bytes_read = reader.read_line(&mut line).await?;
         if bytes_read == 0 {
             break; // EOF — client disconnected.
+        }
+
+        if line.len() > MAX_REQUEST_BYTES {
+            let err_response = json!({
+                "jsonrpc": "2.0",
+                "id": null,
+                "error": {"code": -32700, "message": "Request exceeds maximum frame size"}
+            });
+            let out = serde_json::to_string(&err_response).unwrap_or_default();
+            stdout.write_all(out.as_bytes()).await?;
+            stdout.write_all(b"\n").await?;
+            stdout.flush().await?;
+            continue;
         }
 
         let trimmed = line.trim();
