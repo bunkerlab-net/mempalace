@@ -412,3 +412,183 @@ pub async fn mine(connection: &Connection, project_dir: &Path, opts: &MineParams
     );
     Ok(())
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scan_project_finds_text_files() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+
+        // Create files with readable extensions.
+        std::fs::write(dir.path().join("main.rs"), "fn main() {}")
+            .expect("write .rs should succeed");
+        std::fs::write(dir.path().join("notes.txt"), "hello world")
+            .expect("write .txt should succeed");
+
+        let files = scan_project(dir.path());
+        let names: Vec<String> = files
+            .iter()
+            .map(|p| {
+                p.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+
+        assert!(
+            names.contains(&"main.rs".to_string()),
+            "Should find .rs files"
+        );
+        assert!(
+            names.contains(&"notes.txt".to_string()),
+            "Should find .txt files"
+        );
+    }
+
+    #[test]
+    fn scan_project_respects_gitignore() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+
+        // Initialize a git repo so the ignore crate respects .gitignore.
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .expect("git init should succeed");
+
+        // Gitignore a .rs file — .log is not in READABLE_EXTENSIONS so it would
+        // be skipped regardless of .gitignore.
+        std::fs::write(dir.path().join(".gitignore"), "ignored.rs\n")
+            .expect("write .gitignore should succeed");
+        std::fs::write(dir.path().join("app.rs"), "fn main() {}")
+            .expect("write .rs should succeed");
+        std::fs::write(dir.path().join("ignored.rs"), "// ignored")
+            .expect("write ignored.rs should succeed");
+
+        let files = scan_project(dir.path());
+        let names: Vec<String> = files
+            .iter()
+            .map(|p| {
+                p.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+
+        assert!(
+            names.contains(&"app.rs".to_string()),
+            "Non-ignored .rs should be found"
+        );
+        assert!(
+            !names.contains(&"ignored.rs".to_string()),
+            "Gitignored file should be excluded"
+        );
+    }
+
+    #[test]
+    fn scan_project_with_opts_ignores_gitignore() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+
+        // Initialize a git repo so .gitignore is meaningful.
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .expect("git init should succeed");
+
+        std::fs::write(dir.path().join(".gitignore"), "ignored.rs\n")
+            .expect("write .gitignore should succeed");
+        std::fs::write(dir.path().join("app.rs"), "fn main() {}")
+            .expect("write .rs should succeed");
+        std::fs::write(dir.path().join("ignored.rs"), "// should appear")
+            .expect("write ignored.rs should succeed");
+
+        let files = scan_project_with_opts(dir.path(), false);
+        let names: Vec<String> = files
+            .iter()
+            .map(|p| {
+                p.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+
+        assert!(
+            names.contains(&"app.rs".to_string()),
+            "Non-ignored .rs should be found"
+        );
+        assert!(
+            names.contains(&"ignored.rs".to_string()),
+            "With respect_gitignore=false, gitignored file should be included"
+        );
+    }
+
+    #[test]
+    fn scan_project_skips_node_modules() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+
+        let nm = dir.path().join("node_modules");
+        std::fs::create_dir(&nm).expect("create node_modules should succeed");
+        std::fs::write(nm.join("foo.js"), "console.log('hi')")
+            .expect("write foo.js should succeed");
+        std::fs::write(dir.path().join("index.js"), "console.log('main')")
+            .expect("write index.js should succeed");
+
+        let files = scan_project(dir.path());
+        let names: Vec<String> = files
+            .iter()
+            .map(|p| {
+                p.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+
+        assert!(
+            names.contains(&"index.js".to_string()),
+            "Top-level .js should be found"
+        );
+        assert!(
+            !names.iter().any(|n| n == "foo.js"),
+            "Files inside node_modules should be skipped"
+        );
+    }
+
+    #[test]
+    fn scan_project_skips_binary_extensions() {
+        // Files with extensions not in READABLE_EXTENSIONS should be excluded.
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+
+        std::fs::write(dir.path().join("image.png"), [0x89, 0x50, 0x4E, 0x47])
+            .expect("write .png should succeed");
+        std::fs::write(dir.path().join("code.rs"), "fn main() {}")
+            .expect("write .rs should succeed");
+
+        let files = scan_project(dir.path());
+        let names: Vec<String> = files
+            .iter()
+            .map(|p| {
+                p.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+
+        assert!(
+            names.contains(&"code.rs".to_string()),
+            "Readable extension should be found"
+        );
+        assert!(
+            !names.contains(&"image.png".to_string()),
+            "Non-readable extension should be excluded"
+        );
+    }
+}

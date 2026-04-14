@@ -141,3 +141,127 @@ pub async fn wake_up(connection: &Connection, wing: Option<&str>) -> Result<Stri
     let tokens = text.len() / 4;
     Ok(format!("{text}\n\n(~{tokens} tokens)"))
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+    use crate::palace::drawer::{self, DrawerParams};
+
+    #[test]
+    fn layer0_returns_string() {
+        let result = layer0();
+        assert!(
+            !result.is_empty(),
+            "layer0 should return a non-empty string"
+        );
+        assert!(
+            result.contains("L0"),
+            "layer0 output should contain the L0 section header"
+        );
+    }
+
+    #[tokio::test]
+    async fn layer1_empty_palace() {
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let result = layer1(&connection, None)
+            .await
+            .expect("layer1 should succeed on empty DB");
+        assert!(
+            result.contains("No memories yet"),
+            "Empty palace should indicate no memories"
+        );
+        assert!(
+            result.contains("L1"),
+            "layer1 output should contain the L1 section header"
+        );
+    }
+
+    #[tokio::test]
+    async fn layer1_with_seeded_drawers() {
+        let (_db, connection) = crate::test_helpers::test_db().await;
+
+        // Seed two drawers in different rooms.
+        drawer::add_drawer(
+            &connection,
+            &DrawerParams {
+                id: "d_layer_1",
+                wing: "testwing",
+                room: "engineering",
+                content: "Rust compiler internals and borrow checker details for the project",
+                source_file: "notes.md",
+                chunk_index: 0,
+                added_by: "test",
+                ingest_mode: "projects",
+                source_mtime: None,
+            },
+        )
+        .await
+        .expect("first add_drawer should succeed");
+
+        drawer::add_drawer(
+            &connection,
+            &DrawerParams {
+                id: "d_layer_2",
+                wing: "testwing",
+                room: "design",
+                content: "UI mockups and wireframes for the dashboard redesign project",
+                source_file: "design.md",
+                chunk_index: 0,
+                added_by: "test",
+                ingest_mode: "projects",
+                source_mtime: None,
+            },
+        )
+        .await
+        .expect("second add_drawer should succeed");
+
+        let result = layer1(&connection, Some("testwing"))
+            .await
+            .expect("layer1 should succeed with seeded drawers");
+
+        assert!(
+            result.contains("ESSENTIAL STORY"),
+            "layer1 output should contain the essential story header"
+        );
+        assert!(
+            result.contains("Rust compiler") || result.contains("UI mockups"),
+            "layer1 output should contain content snippets from seeded drawers"
+        );
+    }
+
+    #[tokio::test]
+    async fn wake_up_includes_token_estimate() {
+        let (_db, connection) = crate::test_helpers::test_db().await;
+
+        drawer::add_drawer(
+            &connection,
+            &DrawerParams {
+                id: "d_wake_1",
+                wing: "testwing",
+                room: "general",
+                content: "Important context about the mempalace architecture and design decisions",
+                source_file: "arch.md",
+                chunk_index: 0,
+                added_by: "test",
+                ingest_mode: "projects",
+                source_mtime: None,
+            },
+        )
+        .await
+        .expect("add_drawer should succeed");
+
+        let result = wake_up(&connection, Some("testwing"))
+            .await
+            .expect("wake_up should succeed with seeded data");
+
+        assert!(
+            result.contains("token"),
+            "wake_up output should contain a token estimate"
+        );
+        assert!(
+            result.contains("L0") && result.contains("L1"),
+            "wake_up output should contain both L0 and L1 sections"
+        );
+    }
+}

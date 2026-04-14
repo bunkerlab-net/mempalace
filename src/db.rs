@@ -62,3 +62,67 @@ pub async fn query_all(
     }
     Ok(results)
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn open_db_creates_and_connects() {
+        let dir = tempfile::tempdir().expect("tempdir creation should succeed");
+        let db_path = dir.path().join("test.db");
+        let path_str = db_path
+            .to_str()
+            .expect("tempdir path should be valid UTF-8");
+
+        let (_db, conn) = open_db(path_str)
+            .await
+            .expect("open_db should succeed for a fresh file path");
+
+        // Verify the connection is usable by running a trivial query.
+        let rows = query_all(&conn, "SELECT 42 AS answer", ())
+            .await
+            .expect("trivial SELECT should succeed on newly opened connection");
+        assert_eq!(rows.len(), 1, "SELECT 42 should return exactly 1 row");
+        let val: i64 = rows[0].get(0).expect("column 0 should be readable as i64");
+        assert_eq!(val, 42);
+    }
+
+    #[tokio::test]
+    async fn query_all_returns_rows() {
+        let (_db, conn) = crate::test_helpers::test_db().await;
+
+        // Insert a row into the drawers table (schema is already applied).
+        conn.execute(
+            "INSERT INTO drawers (id, wing, room, content) VALUES ('d1', 'w', 'r', 'hello')",
+            (),
+        )
+        .await
+        .expect("INSERT into drawers should succeed");
+
+        let rows = query_all(&conn, "SELECT id, content FROM drawers WHERE id = 'd1'", ())
+            .await
+            .expect("SELECT from drawers should succeed after insert");
+        assert_eq!(rows.len(), 1, "should find exactly the inserted row");
+        let id: String = rows[0]
+            .get(0)
+            .expect("column 0 (id) should be readable as String");
+        assert_eq!(id, "d1");
+    }
+
+    #[tokio::test]
+    async fn query_all_empty_result() {
+        let (_db, conn) = crate::test_helpers::test_db().await;
+
+        let rows = query_all(
+            &conn,
+            "SELECT id FROM drawers WHERE wing = 'nonexistent'",
+            (),
+        )
+        .await
+        .expect("SELECT with no matching rows should still succeed");
+        assert!(rows.is_empty(), "no rows should match a nonexistent wing");
+        assert_eq!(rows.len(), 0);
+    }
+}

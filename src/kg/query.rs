@@ -274,3 +274,164 @@ pub async fn stats(connection: &Connection) -> Result<KgStats> {
         relationship_types,
     })
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+    use crate::kg::{TripleParams, add_entity, add_triple};
+
+    /// Seed a single "Alice knows Bob" triple for reuse across tests.
+    async fn seed_alice_knows_bob(connection: &turso::Connection) {
+        add_entity(connection, "Alice", "person", None)
+            .await
+            .expect("seed: add_entity Alice should succeed");
+        add_entity(connection, "Bob", "person", None)
+            .await
+            .expect("seed: add_entity Bob should succeed");
+        add_triple(
+            connection,
+            &TripleParams {
+                subject: "Alice",
+                predicate: "knows",
+                object: "Bob",
+                valid_from: Some("2024-01-01"),
+                valid_to: None,
+                confidence: 1.0,
+                source_closet: None,
+                source_file: None,
+            },
+        )
+        .await
+        .expect("seed: add_triple Alice->knows->Bob should succeed");
+    }
+
+    #[tokio::test]
+    async fn query_entity_outgoing() {
+        let (_db, conn) = crate::test_helpers::test_db().await;
+        seed_alice_knows_bob(&conn).await;
+
+        let facts = query_entity(&conn, "Alice", None, "outgoing")
+            .await
+            .expect("query_entity outgoing should succeed for seeded entity");
+        assert_eq!(facts.len(), 1, "Alice should have exactly 1 outgoing fact");
+        assert_eq!(facts[0].predicate, "knows");
+        assert_eq!(facts[0].direction, "outgoing");
+    }
+
+    #[tokio::test]
+    async fn query_entity_incoming() {
+        let (_db, conn) = crate::test_helpers::test_db().await;
+        seed_alice_knows_bob(&conn).await;
+
+        let facts = query_entity(&conn, "Bob", None, "incoming")
+            .await
+            .expect("query_entity incoming should succeed for seeded entity");
+        assert_eq!(facts.len(), 1, "Bob should have exactly 1 incoming fact");
+        assert_eq!(facts[0].predicate, "knows");
+        assert_eq!(facts[0].direction, "incoming");
+    }
+
+    #[tokio::test]
+    async fn query_entity_both_directions() {
+        let (_db, conn) = crate::test_helpers::test_db().await;
+        seed_alice_knows_bob(&conn).await;
+
+        // Alice has 1 outgoing, 0 incoming — "both" should still return 1
+        let facts = query_entity(&conn, "Alice", None, "both")
+            .await
+            .expect("query_entity both should succeed for seeded entity");
+        assert!(!facts.is_empty(), "both should return at least one fact");
+        assert_eq!(facts.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn query_entity_nonexistent() {
+        let (_db, conn) = crate::test_helpers::test_db().await;
+
+        let facts = query_entity(&conn, "NoSuchEntity", None, "both")
+            .await
+            .expect("query_entity should succeed even for unknown entity");
+        assert!(facts.is_empty(), "unknown entity should return no facts");
+        assert_eq!(facts.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn timeline_all_entities() {
+        let (_db, conn) = crate::test_helpers::test_db().await;
+        seed_alice_knows_bob(&conn).await;
+        add_triple(
+            &conn,
+            &TripleParams {
+                subject: "Bob",
+                predicate: "works_at",
+                object: "Acme",
+                valid_from: Some("2024-02-01"),
+                valid_to: None,
+                confidence: 1.0,
+                source_closet: None,
+                source_file: None,
+            },
+        )
+        .await
+        .expect("seed: add_triple Bob->works_at->Acme should succeed");
+
+        let facts = timeline(&conn, None)
+            .await
+            .expect("timeline(None) should succeed with seeded data");
+        assert!(facts.len() >= 2, "timeline should contain at least 2 facts");
+        // Timeline is ordered by valid_from ASC
+        assert_eq!(facts[0].valid_from.as_deref(), Some("2024-01-01"));
+    }
+
+    #[tokio::test]
+    async fn timeline_filtered_by_entity() {
+        let (_db, conn) = crate::test_helpers::test_db().await;
+        seed_alice_knows_bob(&conn).await;
+        add_triple(
+            &conn,
+            &TripleParams {
+                subject: "Carol",
+                predicate: "likes",
+                object: "Rust",
+                valid_from: Some("2024-03-01"),
+                valid_to: None,
+                confidence: 1.0,
+                source_closet: None,
+                source_file: None,
+            },
+        )
+        .await
+        .expect("seed: add_triple Carol->likes->Rust should succeed");
+
+        let facts = timeline(&conn, Some("Alice"))
+            .await
+            .expect("timeline(Some('Alice')) should succeed with seeded data");
+        assert_eq!(facts.len(), 1, "only Alice's triple should appear");
+        assert_eq!(facts[0].subject, "Alice");
+    }
+
+    #[tokio::test]
+    async fn stats_empty() {
+        let (_db, conn) = crate::test_helpers::test_db().await;
+
+        let s = stats(&conn)
+            .await
+            .expect("stats should succeed on empty database");
+        assert_eq!(s.entities, 0, "fresh DB should have 0 entities");
+        assert_eq!(s.triples, 0, "fresh DB should have 0 triples");
+    }
+
+    #[tokio::test]
+    async fn stats_with_data() {
+        let (_db, conn) = crate::test_helpers::test_db().await;
+        seed_alice_knows_bob(&conn).await;
+
+        let s = stats(&conn)
+            .await
+            .expect("stats should succeed after seeding data");
+        assert!(s.entities > 0, "seeded DB should have entities");
+        assert!(s.triples > 0, "seeded DB should have triples");
+        assert_eq!(s.current_facts, s.triples, "no expired facts yet");
+    }
+}

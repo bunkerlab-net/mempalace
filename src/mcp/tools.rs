@@ -1496,4 +1496,931 @@ mod tests {
         .await;
         assert_eq!(r["success"], false);
     }
+
+    // --- Helper: seed a drawer for tests that need pre-existing data ---
+
+    async fn seed_drawer(connection: &Connection, wing: &str, room: &str, content: &str) -> Value {
+        let args = json!({"wing": wing, "room": room, "content": content});
+        let result = tool_add_drawer(connection, &args).await;
+        assert_eq!(result["success"], true, "seed_drawer must succeed");
+        result
+    }
+
+    // --- tool_status ---
+
+    #[tokio::test]
+    async fn status_empty_db_returns_zero_totals() {
+        let (_db, connection) = test_conn().await;
+        let result = tool_status(&connection).await;
+        assert_eq!(result["total_drawers"], 0);
+        assert!(result["protocol"].is_string(), "protocol must be present");
+    }
+
+    #[tokio::test]
+    async fn status_with_drawers_counts_correctly() {
+        let (_db, connection) = test_conn().await;
+        seed_drawer(&connection, "alpha", "notes", "first drawer content here").await;
+        seed_drawer(&connection, "alpha", "code", "second drawer content here").await;
+        seed_drawer(&connection, "beta", "notes", "third drawer content here").await;
+
+        let result = tool_status(&connection).await;
+        assert_eq!(result["total_drawers"], 3);
+        assert_eq!(result["wings"]["alpha"], 2);
+        assert_eq!(result["wings"]["beta"], 1);
+    }
+
+    // --- tool_list_wings ---
+
+    #[tokio::test]
+    async fn list_wings_empty_db() {
+        let (_db, connection) = test_conn().await;
+        let result = tool_list_wings(&connection).await;
+        let wings = result["wings"].as_object().expect("wings must be object");
+        assert!(wings.is_empty(), "empty DB should have no wings");
+        assert!(result.get("error").is_none(), "must not return error");
+    }
+
+    #[tokio::test]
+    async fn list_wings_with_data() {
+        let (_db, connection) = test_conn().await;
+        seed_drawer(&connection, "personal", "notes", "my personal note content").await;
+        seed_drawer(&connection, "work", "tasks", "my work task content here").await;
+
+        let result = tool_list_wings(&connection).await;
+        let wings = result["wings"].as_object().expect("wings must be object");
+        assert_eq!(wings.len(), 2);
+        assert_eq!(result["wings"]["personal"], 1);
+    }
+
+    // --- tool_list_rooms ---
+
+    #[tokio::test]
+    async fn list_rooms_empty_db() {
+        let (_db, connection) = test_conn().await;
+        let result = tool_list_rooms(&connection, &json!({})).await;
+        let rooms = result["rooms"].as_object().expect("rooms must be object");
+        assert!(rooms.is_empty(), "empty DB should have no rooms");
+        assert_eq!(result["wing"], "all");
+    }
+
+    #[tokio::test]
+    async fn list_rooms_with_wing_filter() {
+        let (_db, connection) = test_conn().await;
+        seed_drawer(&connection, "proj", "code", "some code content here").await;
+        seed_drawer(&connection, "proj", "docs", "some docs content here").await;
+        seed_drawer(&connection, "other", "misc", "other misc content here").await;
+
+        let result = tool_list_rooms(&connection, &json!({"wing": "proj"})).await;
+        let rooms = result["rooms"].as_object().expect("rooms must be object");
+        assert_eq!(rooms.len(), 2);
+        assert_eq!(result["wing"], "proj");
+    }
+
+    // --- tool_get_taxonomy ---
+
+    #[tokio::test]
+    async fn get_taxonomy_empty_db() {
+        let (_db, connection) = test_conn().await;
+        let result = tool_get_taxonomy(&connection).await;
+        let taxonomy = result["taxonomy"]
+            .as_object()
+            .expect("taxonomy must be object");
+        assert!(taxonomy.is_empty(), "empty DB should have no taxonomy");
+        assert!(result.get("error").is_none(), "must not return error");
+    }
+
+    #[tokio::test]
+    async fn get_taxonomy_with_data() {
+        let (_db, connection) = test_conn().await;
+        seed_drawer(
+            &connection,
+            "proj",
+            "code",
+            "code content for taxonomy test",
+        )
+        .await;
+        seed_drawer(
+            &connection,
+            "proj",
+            "docs",
+            "docs content for taxonomy test",
+        )
+        .await;
+
+        let result = tool_get_taxonomy(&connection).await;
+        let taxonomy = result["taxonomy"]
+            .as_object()
+            .expect("taxonomy must be object");
+        assert!(taxonomy.contains_key("proj"), "must contain proj wing");
+        assert_eq!(result["taxonomy"]["proj"]["code"], 1);
+    }
+
+    // --- tool_search ---
+
+    #[tokio::test]
+    async fn search_empty_query_returns_error() {
+        let (_db, connection) = test_conn().await;
+        let result = tool_search(&connection, &json!({"query": ""})).await;
+        assert!(
+            result["error"].is_string(),
+            "must return error for empty query"
+        );
+        assert!(result.get("results").is_none(), "must not return results");
+    }
+
+    #[tokio::test]
+    async fn search_happy_path_returns_results() {
+        let (_db, connection) = test_conn().await;
+        seed_drawer(
+            &connection,
+            "tech",
+            "rust",
+            "rust programming language memory safety ownership borrowing",
+        )
+        .await;
+
+        let result = tool_search(&connection, &json!({"query": "rust programming"})).await;
+        assert!(result.get("error").is_none(), "search must not error");
+        assert!(result["count"].as_i64().expect("count must be int") >= 1);
+    }
+
+    #[tokio::test]
+    async fn search_with_wing_filter() {
+        let (_db, connection) = test_conn().await;
+        seed_drawer(
+            &connection,
+            "tech",
+            "notes",
+            "rust programming language systems",
+        )
+        .await;
+        seed_drawer(
+            &connection,
+            "personal",
+            "notes",
+            "rust belt vacation travel plans",
+        )
+        .await;
+
+        let result = tool_search(&connection, &json!({"query": "rust", "wing": "tech"})).await;
+        assert!(result.get("error").is_none(), "search must not error");
+        // All returned results should be from the "tech" wing
+        let results = result["results"].as_array().expect("results must be array");
+        for r in results {
+            assert_eq!(r["wing"], "tech");
+        }
+    }
+
+    // --- tool_check_duplicate ---
+
+    #[tokio::test]
+    async fn check_duplicate_no_match() {
+        let (_db, connection) = test_conn().await;
+        let result = tool_check_duplicate(
+            &connection,
+            &json!({"content": "completely unique content that has no match"}),
+        )
+        .await;
+        assert_eq!(result["is_duplicate"], false);
+        assert!(
+            result["matches"]
+                .as_array()
+                .expect("matches must be array")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn check_duplicate_with_matching_content() {
+        let (_db, connection) = test_conn().await;
+        seed_drawer(
+            &connection,
+            "tech",
+            "notes",
+            "rust programming language memory safety ownership borrowing lifetimes",
+        )
+        .await;
+
+        // Check with very similar content — duplicate detection uses word overlap
+        let result = tool_check_duplicate(
+            &connection,
+            &json!({"content": "rust programming language memory safety ownership borrowing lifetimes"}),
+        )
+        .await;
+        assert!(result.get("error").is_none(), "must not error");
+        // is_duplicate is present regardless
+        assert!(
+            result.get("is_duplicate").is_some(),
+            "is_duplicate key must exist"
+        );
+    }
+
+    // --- tool_delete_drawer ---
+
+    #[tokio::test]
+    async fn delete_drawer_success() {
+        let (_db, connection) = test_conn().await;
+        let seeded = seed_drawer(&connection, "temp", "notes", "content to be deleted").await;
+        let drawer_id = seeded["drawer_id"]
+            .as_str()
+            .expect("drawer_id must be string");
+
+        let result = tool_delete_drawer(&connection, &json!({"drawer_id": drawer_id})).await;
+        assert_eq!(result["success"], true);
+        assert_eq!(result["drawer_id"], drawer_id);
+    }
+
+    #[tokio::test]
+    async fn delete_drawer_invalid_format() {
+        let (_db, connection) = test_conn().await;
+        let result =
+            tool_delete_drawer(&connection, &json!({"drawer_id": "not_a_drawer_id"})).await;
+        assert_eq!(result["success"], false);
+        assert!(
+            result["error"]
+                .as_str()
+                .expect("error must be string")
+                .contains("invalid format")
+        );
+    }
+
+    // --- tool_get_drawer ---
+
+    #[tokio::test]
+    async fn get_drawer_success() {
+        let (_db, connection) = test_conn().await;
+        let seeded = seed_drawer(&connection, "proj", "code", "fn main for get test").await;
+        let drawer_id = seeded["drawer_id"]
+            .as_str()
+            .expect("drawer_id must be string");
+
+        let result = tool_get_drawer(&connection, &json!({"drawer_id": drawer_id})).await;
+        assert_eq!(result["drawer_id"], drawer_id);
+        assert_eq!(result["content"], "fn main for get test");
+        assert_eq!(result["wing"], "proj");
+    }
+
+    #[tokio::test]
+    async fn get_drawer_not_found() {
+        let (_db, connection) = test_conn().await;
+        let result = tool_get_drawer(
+            &connection,
+            &json!({"drawer_id": "drawer_x_y_aaaaaaaabbbbbbbbcccccccc"}),
+        )
+        .await;
+        assert!(result["error"].is_string(), "must return error");
+        assert!(
+            result["error"]
+                .as_str()
+                .expect("error string")
+                .contains("not found"),
+            "error must mention not found"
+        );
+    }
+
+    // --- tool_list_drawers ---
+
+    #[tokio::test]
+    async fn list_drawers_empty_db() {
+        let (_db, connection) = test_conn().await;
+        let result = tool_list_drawers(&connection, &json!({})).await;
+        assert_eq!(result["count"], 0);
+        assert!(
+            result["drawers"]
+                .as_array()
+                .expect("drawers must be array")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn list_drawers_with_pagination() {
+        let (_db, connection) = test_conn().await;
+        seed_drawer(&connection, "w", "r", "first content for pagination test").await;
+        seed_drawer(&connection, "w", "r", "second content for pagination test").await;
+        seed_drawer(&connection, "w", "r", "third content for pagination test").await;
+
+        // Limit to 2
+        let result = tool_list_drawers(&connection, &json!({"limit": 2})).await;
+        assert_eq!(result["count"], 2);
+        assert_eq!(result["limit"], 2);
+
+        // Offset to get the third
+        let result2 = tool_list_drawers(&connection, &json!({"limit": 2, "offset": 2})).await;
+        assert_eq!(result2["count"], 1);
+        assert_eq!(result2["offset"], 2);
+    }
+
+    #[tokio::test]
+    async fn list_drawers_wing_filter() {
+        let (_db, connection) = test_conn().await;
+        seed_drawer(
+            &connection,
+            "alpha",
+            "notes",
+            "alpha content for filter test",
+        )
+        .await;
+        seed_drawer(&connection, "beta", "notes", "beta content for filter test").await;
+
+        let result = tool_list_drawers(&connection, &json!({"wing": "alpha"})).await;
+        assert_eq!(result["count"], 1);
+        let d = &result["drawers"][0];
+        assert_eq!(d["wing"], "alpha");
+    }
+
+    // --- tool_update_drawer ---
+
+    #[tokio::test]
+    async fn update_drawer_content() {
+        let (_db, connection) = test_conn().await;
+        let seeded = seed_drawer(&connection, "proj", "code", "original content for update").await;
+        let old_id = seeded["drawer_id"]
+            .as_str()
+            .expect("drawer_id must be string");
+
+        let result = tool_update_drawer(
+            &connection,
+            &json!({"drawer_id": old_id, "content": "updated content after mutation"}),
+        )
+        .await;
+        assert_eq!(result["success"], true);
+        // ID changes because content changed (deterministic ID includes content)
+        assert_ne!(
+            result["drawer_id"].as_str().expect("new id"),
+            old_id,
+            "ID must change when content changes"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_drawer_not_found() {
+        let (_db, connection) = test_conn().await;
+        let result = tool_update_drawer(
+            &connection,
+            &json!({
+                "drawer_id": "drawer_x_y_aaaaaaaabbbbbbbbcccccccc",
+                "content": "new content for nonexistent drawer"
+            }),
+        )
+        .await;
+        assert_eq!(result["success"], false);
+        assert!(
+            result["error"]
+                .as_str()
+                .expect("error string")
+                .contains("not found"),
+            "error must mention not found"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_drawer_noop_when_nothing_changes() {
+        let (_db, connection) = test_conn().await;
+        let seeded = seed_drawer(&connection, "proj", "code", "stable content no change").await;
+        let drawer_id = seeded["drawer_id"]
+            .as_str()
+            .expect("drawer_id must be string");
+
+        // Send update with no actual changes
+        let result = tool_update_drawer(&connection, &json!({"drawer_id": drawer_id})).await;
+        assert_eq!(result["success"], true);
+        assert_eq!(result["noop"], true);
+    }
+
+    // --- tool_kg_add ---
+
+    #[tokio::test]
+    async fn kg_add_triple() {
+        let (_db, connection) = test_conn().await;
+        let result = tool_kg_add(
+            &connection,
+            &json!({
+                "subject": "Rust",
+                "predicate": "is",
+                "object": "fast",
+            }),
+        )
+        .await;
+        assert_eq!(result["success"], true);
+        assert!(
+            result["triple_id"].is_string(),
+            "triple_id must be a string"
+        );
+    }
+
+    #[tokio::test]
+    async fn kg_add_missing_field_returns_error() {
+        let (_db, connection) = test_conn().await;
+        // Missing object
+        let result = tool_kg_add(&connection, &json!({"subject": "Rust", "predicate": "is"})).await;
+        assert_eq!(result["success"], false);
+        assert!(result["error"].is_string(), "must return error message");
+    }
+
+    // --- tool_kg_query ---
+
+    #[tokio::test]
+    async fn kg_query_entity() {
+        let (_db, connection) = test_conn().await;
+        // Add a triple first
+        tool_kg_add(
+            &connection,
+            &json!({"subject": "Rust", "predicate": "compilesTo", "object": "binary"}),
+        )
+        .await;
+
+        let result = tool_kg_query(&connection, &json!({"entity": "Rust"})).await;
+        assert!(result.get("error").is_none(), "query must not error");
+        assert_eq!(result["entity"], "Rust");
+        assert!(result["count"].as_i64().expect("count") >= 1);
+    }
+
+    #[tokio::test]
+    async fn kg_query_invalid_direction() {
+        let (_db, connection) = test_conn().await;
+        let result = tool_kg_query(
+            &connection,
+            &json!({"entity": "Rust", "direction": "sideways"}),
+        )
+        .await;
+        assert!(result["error"].is_string(), "must return error");
+        assert!(
+            result["error"]
+                .as_str()
+                .expect("error string")
+                .contains("direction")
+        );
+    }
+
+    // --- tool_kg_invalidate ---
+
+    #[tokio::test]
+    async fn kg_invalidate_triple() {
+        let (_db, connection) = test_conn().await;
+        tool_kg_add(
+            &connection,
+            &json!({"subject": "Alice", "predicate": "worksAt", "object": "Acme"}),
+        )
+        .await;
+
+        let result = tool_kg_invalidate(
+            &connection,
+            &json!({"subject": "Alice", "predicate": "worksAt", "object": "Acme"}),
+        )
+        .await;
+        assert_eq!(result["success"], true);
+        assert!(
+            result["ended"].is_string(),
+            "ended timestamp must be present"
+        );
+    }
+
+    #[tokio::test]
+    async fn kg_invalidate_with_explicit_ended_date() {
+        let (_db, connection) = test_conn().await;
+        tool_kg_add(
+            &connection,
+            &json!({"subject": "Bob", "predicate": "livesIn", "object": "NYC"}),
+        )
+        .await;
+
+        let result = tool_kg_invalidate(
+            &connection,
+            &json!({
+                "subject": "Bob",
+                "predicate": "livesIn",
+                "object": "NYC",
+                "ended": "2025-01-01"
+            }),
+        )
+        .await;
+        assert_eq!(result["success"], true);
+        assert_eq!(result["ended"], "2025-01-01");
+    }
+
+    // --- tool_kg_timeline ---
+
+    #[tokio::test]
+    async fn kg_timeline_empty() {
+        let (_db, connection) = test_conn().await;
+        let result = tool_kg_timeline(&connection, &json!({})).await;
+        assert!(result.get("error").is_none(), "must not error");
+        assert_eq!(result["count"], 0);
+    }
+
+    #[tokio::test]
+    async fn kg_timeline_with_data() {
+        let (_db, connection) = test_conn().await;
+        tool_kg_add(
+            &connection,
+            &json!({"subject": "Eve", "predicate": "knows", "object": "Alice"}),
+        )
+        .await;
+
+        let result = tool_kg_timeline(&connection, &json!({"entity": "Eve"})).await;
+        assert!(result.get("error").is_none(), "must not error");
+        assert!(result["count"].as_i64().expect("count") >= 1);
+    }
+
+    // --- tool_kg_stats ---
+
+    #[tokio::test]
+    async fn kg_stats_empty_db() {
+        let (_db, connection) = test_conn().await;
+        let result = tool_kg_stats(&connection).await;
+        assert!(result.get("error").is_none(), "must not error");
+        assert_eq!(result["entities"], 0);
+        assert_eq!(result["triples"], 0);
+    }
+
+    #[tokio::test]
+    async fn kg_stats_after_adding_triples() {
+        let (_db, connection) = test_conn().await;
+        tool_kg_add(
+            &connection,
+            &json!({"subject": "X", "predicate": "rel", "object": "Y"}),
+        )
+        .await;
+
+        let result = tool_kg_stats(&connection).await;
+        assert!(result.get("error").is_none(), "must not error");
+        assert!(result["triples"].as_i64().expect("triples") >= 1);
+        assert!(result["entities"].as_i64().expect("entities") >= 1);
+    }
+
+    // --- tool_create_tunnel ---
+
+    async fn seed_tunnel(connection: &Connection) -> Value {
+        tool_create_tunnel(
+            connection,
+            &json!({
+                "source_wing": "alpha",
+                "source_room": "code",
+                "target_wing": "beta",
+                "target_room": "docs",
+                "label": "cross-reference link",
+            }),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn create_tunnel_success() {
+        let (_db, connection) = test_conn().await;
+        let result = seed_tunnel(&connection).await;
+        assert!(result.get("error").is_none(), "must not error");
+        assert!(result["id"].is_string(), "tunnel must have an id");
+        assert_eq!(result["source_wing"], "alpha");
+    }
+
+    #[tokio::test]
+    async fn create_tunnel_missing_label_returns_error() {
+        let (_db, connection) = test_conn().await;
+        let result = tool_create_tunnel(
+            &connection,
+            &json!({
+                "source_wing": "a",
+                "source_room": "b",
+                "target_wing": "c",
+                "target_room": "d",
+            }),
+        )
+        .await;
+        assert_eq!(result["success"], false);
+        assert!(
+            result["error"].is_string(),
+            "must return error for missing label"
+        );
+    }
+
+    // --- tool_list_tunnels ---
+
+    #[tokio::test]
+    async fn list_tunnels_empty() {
+        let (_db, connection) = test_conn().await;
+        let result = tool_list_tunnels(&connection, &json!({})).await;
+        assert!(result.get("error").is_none(), "must not error");
+        assert_eq!(result["count"], 0);
+    }
+
+    #[tokio::test]
+    async fn list_tunnels_after_create() {
+        let (_db, connection) = test_conn().await;
+        seed_tunnel(&connection).await;
+
+        let result = tool_list_tunnels(&connection, &json!({})).await;
+        assert!(result.get("error").is_none(), "must not error");
+        assert!(result["count"].as_i64().expect("count") >= 1);
+    }
+
+    // --- tool_delete_tunnel ---
+
+    #[tokio::test]
+    async fn delete_tunnel_success() {
+        let (_db, connection) = test_conn().await;
+        let tunnel = seed_tunnel(&connection).await;
+        let tunnel_id = tunnel["id"].as_str().expect("tunnel must have id");
+
+        let result = tool_delete_tunnel(&connection, &json!({"tunnel_id": tunnel_id})).await;
+        assert!(result.get("error").is_none(), "delete must not error");
+        assert_eq!(result["deleted"], true);
+    }
+
+    #[tokio::test]
+    async fn delete_tunnel_invalid_id_format() {
+        let (_db, connection) = test_conn().await;
+        let result = tool_delete_tunnel(&connection, &json!({"tunnel_id": "not-valid"})).await;
+        assert!(result["error"].is_string(), "must return error");
+        assert!(
+            result["error"]
+                .as_str()
+                .expect("error string")
+                .contains("16-character hex")
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_tunnel_nonexistent_returns_false() {
+        let (_db, connection) = test_conn().await;
+        // Valid 16-char hex that doesn't exist
+        let result =
+            tool_delete_tunnel(&connection, &json!({"tunnel_id": "0000000000000000"})).await;
+        assert!(result.get("error").is_none(), "must not error");
+        assert_eq!(result["deleted"], false);
+    }
+
+    // --- tool_follow_tunnels ---
+
+    #[tokio::test]
+    async fn follow_tunnels_no_connections() {
+        let (_db, connection) = test_conn().await;
+        let result =
+            tool_follow_tunnels(&connection, &json!({"wing": "alpha", "room": "code"})).await;
+        assert!(result.get("error").is_none(), "must not error");
+        assert!(
+            result["connections"]
+                .as_array()
+                .expect("connections must be array")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn follow_tunnels_with_tunnel() {
+        let (_db, connection) = test_conn().await;
+        seed_tunnel(&connection).await;
+
+        let result =
+            tool_follow_tunnels(&connection, &json!({"wing": "alpha", "room": "code"})).await;
+        assert!(result.get("error").is_none(), "must not error");
+        assert_eq!(result["wing"], "alpha");
+        // Should find at least one connection from the seeded tunnel
+        let conns = result["connections"]
+            .as_array()
+            .expect("connections must be array");
+        assert!(!conns.is_empty(), "must find the seeded tunnel");
+    }
+
+    // --- tool_traverse ---
+
+    #[tokio::test]
+    async fn traverse_empty_graph() {
+        let (_db, connection) = test_conn().await;
+        let result = tool_traverse(&connection, &json!({"start_room": "nonexistent"})).await;
+        assert!(
+            result.get("error").is_none(),
+            "must not error on empty graph"
+        );
+        assert!(result.get("results").is_some(), "must have results key");
+    }
+
+    #[tokio::test]
+    async fn traverse_with_shared_room() {
+        let (_db, connection) = test_conn().await;
+        // Two wings sharing the same room name creates a graph edge
+        seed_drawer(
+            &connection,
+            "alpha",
+            "shared",
+            "alpha shared drawer content",
+        )
+        .await;
+        seed_drawer(&connection, "beta", "shared", "beta shared drawer content").await;
+
+        let result =
+            tool_traverse(&connection, &json!({"start_room": "shared", "max_hops": 1})).await;
+        assert!(result.get("error").is_none(), "must not error");
+        let results = result["results"].as_array().expect("results must be array");
+        assert!(
+            !results.is_empty(),
+            "shared room should yield traversal results"
+        );
+    }
+
+    // --- tool_find_tunnels ---
+
+    #[tokio::test]
+    async fn find_tunnels_empty_graph() {
+        let (_db, connection) = test_conn().await;
+        let result = tool_find_tunnels(&connection, &json!({})).await;
+        assert!(result.get("error").is_none(), "must not error");
+        assert!(
+            result["tunnels"]
+                .as_array()
+                .expect("tunnels must be array")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn find_tunnels_between_wings() {
+        let (_db, connection) = test_conn().await;
+        // Create drawers in two wings sharing a room name
+        seed_drawer(&connection, "alpha", "shared", "alpha shared content here").await;
+        seed_drawer(&connection, "beta", "shared", "beta shared content here").await;
+
+        let result =
+            tool_find_tunnels(&connection, &json!({"wing_a": "alpha", "wing_b": "beta"})).await;
+        assert!(result.get("error").is_none(), "must not error");
+        let tunnels = result["tunnels"].as_array().expect("tunnels must be array");
+        assert!(
+            !tunnels.is_empty(),
+            "wings sharing a room should have tunnels"
+        );
+    }
+
+    // --- tool_graph_stats ---
+
+    #[tokio::test]
+    async fn graph_stats_empty_db() {
+        let (_db, connection) = test_conn().await;
+        let result = tool_graph_stats(&connection).await;
+        assert!(result.get("error").is_none(), "must not error");
+        assert_eq!(result["total_rooms"], 0);
+        assert_eq!(result["total_edges"], 0);
+    }
+
+    #[tokio::test]
+    async fn graph_stats_with_data() {
+        let (_db, connection) = test_conn().await;
+        seed_drawer(&connection, "alpha", "notes", "alpha notes for graph stats").await;
+        seed_drawer(&connection, "beta", "notes", "beta notes for graph stats").await;
+
+        let result = tool_graph_stats(&connection).await;
+        assert!(result.get("error").is_none(), "must not error");
+        assert!(
+            result["total_rooms"].as_i64().expect("total_rooms") >= 1,
+            "must count at least one room"
+        );
+    }
+
+    // --- tool_diary_write ---
+
+    #[tokio::test]
+    async fn diary_write_success() {
+        let (_db, connection) = test_conn().await;
+        let result = tool_diary_write(
+            &connection,
+            &json!({
+                "agent_name": "TestAgent",
+                "entry": "Today I learned about Rust lifetimes and borrowing",
+            }),
+        )
+        .await;
+        assert_eq!(result["success"], true);
+        assert!(result["entry_id"].is_string(), "must return entry_id");
+        assert_eq!(result["agent"], "TestAgent");
+        assert_eq!(result["topic"], "general");
+    }
+
+    #[tokio::test]
+    async fn diary_write_with_topic() {
+        let (_db, connection) = test_conn().await;
+        let result = tool_diary_write(
+            &connection,
+            &json!({
+                "agent_name": "TestAgent",
+                "entry": "Debugging session notes about async runtime",
+                "topic": "debugging",
+            }),
+        )
+        .await;
+        assert_eq!(result["success"], true);
+        assert_eq!(result["topic"], "debugging");
+    }
+
+    #[tokio::test]
+    async fn diary_write_missing_entry_returns_error() {
+        let (_db, connection) = test_conn().await;
+        let result = tool_diary_write(&connection, &json!({"agent_name": "TestAgent"})).await;
+        assert_eq!(result["success"], false);
+        assert!(result["error"].is_string(), "must return error");
+    }
+
+    // --- tool_diary_read ---
+
+    #[tokio::test]
+    async fn diary_read_empty() {
+        let (_db, connection) = test_conn().await;
+        let result = tool_diary_read(&connection, &json!({"agent_name": "TestAgent"})).await;
+        assert!(result.get("error").is_none(), "must not error");
+        assert_eq!(result["total"], 0);
+        assert_eq!(result["agent"], "TestAgent");
+    }
+
+    #[tokio::test]
+    async fn diary_read_after_write() {
+        let (_db, connection) = test_conn().await;
+        tool_diary_write(
+            &connection,
+            &json!({
+                "agent_name": "TestAgent",
+                "entry": "diary entry content for read test",
+                "topic": "testing",
+            }),
+        )
+        .await;
+
+        let result = tool_diary_read(&connection, &json!({"agent_name": "TestAgent"})).await;
+        assert!(result.get("error").is_none(), "must not error");
+        assert_eq!(result["total"], 1);
+        let entries = result["entries"].as_array().expect("entries must be array");
+        assert_eq!(entries[0]["topic"], "testing");
+    }
+
+    // --- dispatch ---
+
+    #[tokio::test]
+    async fn dispatch_unknown_tool_returns_error() {
+        let (_db, connection) = test_conn().await;
+        let result = dispatch(&connection, "nonexistent_tool", &json!({})).await;
+        assert!(result["error"].is_string(), "must return error");
+        assert!(
+            result["error"]
+                .as_str()
+                .expect("error string")
+                .contains("Unknown tool")
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_empty_name_returns_error() {
+        let (_db, connection) = test_conn().await;
+        let result = dispatch(&connection, "", &json!({})).await;
+        assert!(
+            result["error"].is_string(),
+            "must return error for empty name"
+        );
+        assert!(
+            result["error"]
+                .as_str()
+                .expect("error string")
+                .contains("empty")
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_non_object_args_returns_error() {
+        let (_db, connection) = test_conn().await;
+        let result = dispatch(&connection, "mempalace_status", &json!("not an object")).await;
+        assert!(
+            result["error"].is_string(),
+            "must return error for non-object args"
+        );
+        assert!(
+            result["error"]
+                .as_str()
+                .expect("error string")
+                .contains("JSON object")
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_routes_to_correct_tool() {
+        let (_db, connection) = test_conn().await;
+        let result = dispatch(&connection, "mempalace_status", &json!({})).await;
+        // tool_status returns total_drawers, proving it was routed correctly
+        assert!(
+            result.get("total_drawers").is_some(),
+            "must route to tool_status"
+        );
+        assert!(
+            result.get("protocol").is_some(),
+            "status must include protocol"
+        );
+    }
+
+    // --- get_aaak_spec (via dispatch) ---
+
+    #[tokio::test]
+    async fn get_aaak_spec_returns_non_empty() {
+        let (_db, connection) = test_conn().await;
+        let result = dispatch(&connection, "mempalace_get_aaak_spec", &json!({})).await;
+        let spec = result["aaak_spec"]
+            .as_str()
+            .expect("aaak_spec must be string");
+        assert!(!spec.is_empty(), "spec must not be empty");
+        assert!(spec.contains("AAAK"), "spec must mention AAAK");
+    }
 }

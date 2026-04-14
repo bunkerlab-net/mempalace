@@ -363,3 +363,123 @@ pub fn run(
 
     Ok(())
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    // --- find_session_boundaries ---
+
+    #[test]
+    fn find_session_boundaries_empty_input() {
+        let result = find_session_boundaries(&[]);
+        assert!(result.is_empty(), "empty input must produce empty vec");
+        assert_eq!(result.len(), 0);
+    }
+
+    #[test]
+    fn find_session_boundaries_no_sessions() {
+        let lines = &["hello world", "some random text", "no markers here"];
+        let result = find_session_boundaries(lines);
+        assert!(
+            result.is_empty(),
+            "lines without markers must produce empty vec"
+        );
+        assert_eq!(result.len(), 0);
+    }
+
+    #[test]
+    fn find_session_boundaries_finds_markers() {
+        let lines = &[
+            "╭──── Claude Code v1.0.0",
+            "some content here",
+            "more content",
+            "╭──── Claude Code v1.1.0",
+            "other content",
+            "╭──── Claude Code v1.2.0",
+        ];
+        let result = find_session_boundaries(lines);
+        assert_eq!(result.len(), 3, "must find all three session markers");
+        assert_eq!(
+            result,
+            vec![0, 3, 5],
+            "boundary positions must match marker lines"
+        );
+    }
+
+    #[test]
+    fn find_session_boundaries_skips_context_restore() {
+        // A marker followed by "Ctrl+E" within 6 lines should be excluded.
+        // The first marker is far enough away from the restore text to pass.
+        let lines = &[
+            "╭──── Claude Code v1.0.0",
+            "some content line 1",
+            "some content line 2",
+            "some content line 3",
+            "some content line 4",
+            "some content line 5",
+            "some content line 6",
+            "some content line 7",
+            "╭──── Claude Code v1.1.0",
+            "Ctrl+E to restore",
+            "more content",
+        ];
+        let result = find_session_boundaries(lines);
+        // First marker's nearby window (lines 0..6) has no restore text — kept.
+        // Second marker's nearby window (lines 8..11) contains "Ctrl+E" — skipped.
+        assert_eq!(result.len(), 1, "context-restore marker must be excluded");
+        assert_eq!(result[0], 0);
+    }
+
+    // --- extract_timestamp ---
+
+    #[test]
+    fn extract_timestamp_parses_valid() {
+        let lines = &[
+            "some header",
+            "⏺ 2:30 PM Monday, January 15, 2025",
+            "other content",
+        ];
+        let result = extract_timestamp(lines);
+        assert!(result.is_some(), "valid timestamp line must be parsed");
+        assert_eq!(result.expect("already checked Some"), "2025-01-15_230PM");
+    }
+
+    #[test]
+    fn extract_timestamp_no_match() {
+        let lines = &["no timestamp here", "just plain text", "nothing to see"];
+        let result = extract_timestamp(lines);
+        assert!(result.is_none(), "lines without timestamp must return None");
+        assert_eq!(result, None);
+    }
+
+    // --- extract_subject ---
+
+    #[test]
+    fn extract_subject_from_prompt() {
+        let lines = &[
+            "some header",
+            "> How do I fix bugs in Rust",
+            "other content",
+        ];
+        let result = extract_subject(lines);
+        assert!(
+            result.contains("How"),
+            "subject must contain 'How' from the prompt"
+        );
+        assert_ne!(result, "session", "must not fall through to default");
+    }
+
+    #[test]
+    fn extract_subject_default_for_commands() {
+        // Command-like prompts that match SKIP_RE should be skipped.
+        let lines = &["> git status", "> cd /tmp", "> ls -la"];
+        let result = extract_subject(lines);
+        assert_eq!(
+            result, "session",
+            "command-only prompts must return default 'session'"
+        );
+        assert!(!result.is_empty(), "subject must not be empty");
+    }
+}

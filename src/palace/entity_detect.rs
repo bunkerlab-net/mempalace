@@ -441,3 +441,198 @@ fn classify_entity_build(
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+    use std::io::Write as _;
+    use tempfile;
+
+    #[test]
+    fn extract_candidates_finds_capitalized_names() {
+        // "Alice" appears 5 times — well above the frequency threshold of 3.
+        let text =
+            "Alice went to the store. Alice bought milk. Alice came home. Alice cooked. Alice ate.";
+        let candidates = extract_candidates(text);
+        assert!(
+            candidates.contains_key("Alice"),
+            "Alice should be detected as a candidate"
+        );
+        assert!(
+            *candidates.get("Alice").expect("Alice must be present") >= 3,
+            "Alice frequency should be at least 3"
+        );
+    }
+
+    #[test]
+    fn extract_candidates_ignores_low_frequency() {
+        // "Bartholomew" appears only once — below the threshold of 3.
+        let text = "Bartholomew visited the library. Xander Xander Xander was there.";
+        let candidates = extract_candidates(text);
+        assert!(
+            !candidates.contains_key("Bartholomew"),
+            "Single-occurrence names should be filtered out"
+        );
+        assert!(
+            candidates.contains_key("Xander"),
+            "Names at threshold should survive"
+        );
+    }
+
+    #[test]
+    fn extract_candidates_multi_word_names() {
+        // "John Smith" repeated 3 times should be detected as a multi-word candidate.
+        let text =
+            "John Smith led the team. John Smith reviewed the code. John Smith merged the PR.";
+        let candidates = extract_candidates(text);
+        assert!(
+            candidates.contains_key("John Smith"),
+            "Multi-word names should be detected"
+        );
+        assert!(
+            *candidates
+                .get("John Smith")
+                .expect("John Smith must be present")
+                >= 3,
+            "John Smith frequency should be at least 3"
+        );
+    }
+
+    #[test]
+    fn extract_candidates_filters_stop_words() {
+        // "The" and "This" are stop words — they should never appear as candidates
+        // even at high frequency.
+        let text =
+            "The quick fox. The lazy dog. The bright sun. This is great. This is fine. This works.";
+        let candidates = extract_candidates(text);
+        assert!(
+            !candidates.contains_key("The"),
+            "Stop word 'The' should be filtered"
+        );
+        assert!(
+            !candidates.contains_key("This"),
+            "Stop word 'This' should be filtered"
+        );
+    }
+
+    #[test]
+    fn score_entity_person_detects_speech_verbs() {
+        let name = "Alice";
+        let text = "Alice said hello. Alice asked a question. Alice told a story.";
+        let lines: Vec<String> = text.lines().map(String::from).collect();
+        let scores = score_entity(name, text, &lines);
+        assert!(
+            scores.person_score > 0,
+            "Person score should be positive when speech verbs are present"
+        );
+        assert!(
+            !scores.person_signals.is_empty(),
+            "Person signals should be non-empty for speech verb matches"
+        );
+    }
+
+    #[test]
+    fn score_entity_project_detects_build_verbs() {
+        let text =
+            "building Mempalace from scratch. deploying Mempalace to prod. shipping Mempalace v2.";
+        let lines: Vec<String> = text.lines().map(String::from).collect();
+        let scores = score_entity("Mempalace", text, &lines);
+        assert!(
+            scores.project_score > 0,
+            "Project score should be positive when build verbs are present"
+        );
+        assert!(
+            !scores.project_signals.is_empty(),
+            "Project signals should be non-empty for build verb matches"
+        );
+    }
+
+    #[test]
+    fn classify_entity_as_person() {
+        // High person score with multiple signal categories triggers person classification.
+        let scores = EntityScores {
+            person_score: 12,
+            project_score: 0,
+            person_signals: vec![
+                "'Alice said' (3x)".to_string(),
+                "dialogue marker (2x)".to_string(),
+                "pronoun nearby (1x)".to_string(),
+            ],
+            project_signals: vec![],
+        };
+        let entity = classify_entity("Alice", 10, &scores);
+        assert_eq!(
+            entity.entity_type, "person",
+            "Entity with high person score and multiple signal categories should be classified as person"
+        );
+        assert!(
+            entity.confidence > 0.5,
+            "Person confidence should be above 0.5"
+        );
+    }
+
+    #[test]
+    fn classify_entity_as_project() {
+        // Project score dominates — person_ratio <= 0.3 triggers project classification.
+        let scores = EntityScores {
+            person_score: 0,
+            project_score: 10,
+            person_signals: vec![],
+            project_signals: vec!["project verb (5x)".to_string()],
+        };
+        let entity = classify_entity("Mempalace", 8, &scores);
+        assert_eq!(
+            entity.entity_type, "project",
+            "Entity with dominant project score should be classified as project"
+        );
+        assert!(
+            entity.confidence > 0.5,
+            "Project confidence should be above 0.5"
+        );
+    }
+
+    #[test]
+    fn detect_entities_end_to_end() {
+        // Write temp files with a name repeated enough times to cross the threshold.
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let file_path = dir.path().join("story.txt");
+        let mut f = std::fs::File::create(&file_path).expect("file should be created");
+        let content = "Alice said hello. Alice asked why. Alice told Bob. Alice replied quickly. Alice laughed.\n";
+        f.write_all(content.as_bytes())
+            .expect("write should succeed");
+
+        let paths: Vec<&Path> = vec![file_path.as_path()];
+        let result = detect_entities(&paths, 10);
+
+        // At least one category should be non-empty since "Alice" appears 5 times
+        // with person-verb signals.
+        let total = result.people.len() + result.projects.len() + result.uncertain.len();
+        assert!(total > 0, "Should detect at least one entity");
+        assert!(
+            result.people.iter().any(|e| e.name == "Alice")
+                || result.uncertain.iter().any(|e| e.name == "Alice"),
+            "Alice should appear in people or uncertain"
+        );
+    }
+
+    #[test]
+    fn detect_entities_empty_files() {
+        // Empty files should produce no candidates — but extract_candidates asserts
+        // non-empty text, so detect_entities handles the empty-read case by
+        // producing an empty all_text only if no files are readable.
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let file_path = dir.path().join("empty.txt");
+        std::fs::write(&file_path, "").expect("write should succeed");
+
+        // The file is empty so read_to_string returns "" which gets appended as
+        // just a newline. detect_entities calls extract_candidates only when
+        // all_text is non-empty after accumulation. With a single empty file,
+        // all_text is "\n" which is non-empty but has no capitalized words.
+        let paths: Vec<&Path> = vec![file_path.as_path()];
+        let result = detect_entities(&paths, 10);
+
+        assert!(result.people.is_empty(), "No people from empty file");
+        assert!(result.projects.is_empty(), "No projects from empty file");
+    }
+}

@@ -2,6 +2,7 @@ mempalace.yaml
 
 # Claude local
 .claude/local
+.claude/worktrees
 .claude/settings.local.json
 .claude/CLAUDE.local.md
 

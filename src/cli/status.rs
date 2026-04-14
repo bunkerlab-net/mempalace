@@ -111,3 +111,50 @@ pub async fn run(connection: &Connection) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod async_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn run_empty_palace_succeeds() {
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let result = run(&connection).await;
+        assert!(result.is_ok(), "status on empty palace must not error");
+        assert_eq!(
+            result.expect("run should succeed"),
+            (),
+            "run must return unit on success"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_with_data_succeeds() {
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        crate::palace::drawer::add_drawer(
+            &connection,
+            &crate::palace::drawer::DrawerParams {
+                id: "status-test-1",
+                wing: "docs",
+                room: "guides",
+                content: "status test content with enough words for indexing",
+                source_file: "readme.md",
+                chunk_index: 0,
+                added_by: "test",
+                ingest_mode: "projects",
+                source_mtime: None,
+            },
+        )
+        .await
+        .expect("seeding drawer for status test must succeed");
+
+        let result = run(&connection).await;
+        assert!(result.is_ok(), "status with data must not error");
+        assert_eq!(
+            result.expect("run should succeed"),
+            (),
+            "run must return unit on success"
+        );
+    }
+}

@@ -334,3 +334,39 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
         .expect("json!([...]) is always Value::Array; as_array() cannot return None here")
         .clone()
 }
+
+#[cfg(test)]
+// Test code — .expect() is acceptable with a descriptive message.
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_definitions_count() {
+        let tools = tool_definitions();
+        assert_eq!(tools.len(), 26, "expected 26 tool definitions");
+        // Verify the first and last tool names as a structural sanity check.
+        assert_eq!(tools[0]["name"], "mempalace_status");
+        assert_eq!(tools[25]["name"], "mempalace_follow_tunnels");
+    }
+
+    #[test]
+    fn tool_definitions_all_have_required_fields() {
+        let tools = tool_definitions();
+        for tool in &tools {
+            let name = tool["name"]
+                .as_str()
+                .expect("every tool should have a string 'name'");
+            assert!(
+                tool.get("description").and_then(|v| v.as_str()).is_some(),
+                "tool {name} missing 'description'"
+            );
+            assert!(
+                tool.get("inputSchema")
+                    .and_then(|v| v.as_object())
+                    .is_some(),
+                "tool {name} missing 'inputSchema' object"
+            );
+        }
+    }
+}

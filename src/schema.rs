@@ -143,3 +143,82 @@ pub async fn ensure_schema(connection: &Connection) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    const EXPECTED_TABLES: &[&str] = &[
+        "compressed",
+        "drawer_words",
+        "drawers",
+        "entities",
+        "explicit_tunnels",
+        "triples",
+    ];
+
+    #[tokio::test]
+    async fn ensure_schema_creates_all_tables() {
+        let (_db, conn) = crate::test_helpers::test_db().await;
+
+        let rows = crate::db::query_all(
+            &conn,
+            "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
+            (),
+        )
+        .await
+        .expect("sqlite_master query should succeed after ensure_schema");
+
+        let table_names: Vec<String> = rows
+            .iter()
+            .filter_map(|r| r.get::<String>(0).ok())
+            .collect();
+
+        // All 6 core tables must be present.
+        for &expected in EXPECTED_TABLES {
+            assert!(
+                table_names.contains(&expected.to_string()),
+                "table '{expected}' must exist after ensure_schema"
+            );
+        }
+        assert!(
+            table_names.len() >= EXPECTED_TABLES.len(),
+            "at least {} tables should exist, found {}",
+            EXPECTED_TABLES.len(),
+            table_names.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_schema_idempotent() {
+        let (_db, conn) = crate::test_helpers::test_db().await;
+
+        // test_db already called ensure_schema once; call it again.
+        ensure_schema(&conn)
+            .await
+            .expect("second ensure_schema call should succeed (idempotent)");
+
+        let rows = crate::db::query_all(
+            &conn,
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'",
+            (),
+        )
+        .await
+        .expect("table count query should succeed");
+        let count: i64 = rows[0]
+            .get(0)
+            .expect("COUNT(*) column 0 should be readable as i64");
+
+        // Table count must be at least the 6 core tables and must not have changed.
+        assert!(
+            count >= 6,
+            "at least 6 core tables should exist, got {count}"
+        );
+        assert_eq!(
+            usize::try_from(count).expect("table count should fit in usize"),
+            EXPECTED_TABLES.len(),
+            "table count should match expected after idempotent call"
+        );
+    }
+}

@@ -140,3 +140,98 @@ pub async fn run(
 
     Ok(())
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_load_dialect_none_returns_empty() {
+        let dialect = run_load_dialect(None).expect("None config must return Ok");
+        // Dialect::empty() has zero entity codes — compress with it and verify
+        // it produces non-empty output (proves the dialect is usable).
+        let output = dialect.compress("hello world test content", None);
+        assert!(
+            !output.is_empty(),
+            "empty dialect must still produce output"
+        );
+        // AAAK content line always starts with "0:" entity prefix.
+        assert!(
+            output.contains("0:"),
+            "compressed output must contain entity prefix"
+        );
+    }
+
+    #[test]
+    fn run_load_dialect_valid_file() {
+        let dir = tempfile::tempdir().expect("must create temp dir");
+        let config_path = dir.path().join("dialect.json");
+        std::fs::write(
+            &config_path,
+            r#"{"entities": {"Rust": "RS", "Python": "PY"}, "skip_names": ["test"]}"#,
+        )
+        .expect("must write config file");
+
+        let path_str = config_path.to_str().expect("path must be valid utf-8");
+        let dialect = run_load_dialect(Some(path_str)).expect("valid config must return Ok");
+        // Verify the dialect loaded entities by compressing text that mentions them.
+        let output = dialect.compress("Rust and Python are languages for programming", None);
+        assert!(
+            !output.is_empty(),
+            "dialect with entities must produce output"
+        );
+        // AAAK content line always starts with "0:" entity prefix.
+        assert!(
+            output.contains("0:"),
+            "compressed output must contain entity prefix"
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod async_tests {
+    use super::*;
+
+    async fn seed_drawer(connection: &Connection) {
+        crate::palace::drawer::add_drawer(
+            connection,
+            &crate::palace::drawer::DrawerParams {
+                id: "compress-test-1",
+                wing: "test_wing",
+                room: "test_room",
+                content: "This is test content for compression with enough words to be meaningful",
+                source_file: "test.txt",
+                chunk_index: 0,
+                added_by: "test",
+                ingest_mode: "projects",
+                source_mtime: None,
+            },
+        )
+        .await
+        .expect("seeding drawer for compress test must succeed");
+    }
+
+    #[tokio::test]
+    async fn run_compress_row_returns_sizes() {
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        seed_drawer(&connection).await;
+
+        let rows = crate::db::query_all(
+            &connection,
+            "SELECT id, content, wing, room, source_file, filed_at FROM drawers LIMIT 1",
+            (),
+        )
+        .await
+        .expect("query must succeed");
+        let row = rows.first().expect("must have at least one row");
+
+        let dialect = Dialect::empty();
+        let (orig, comp) = run_compress_row(&connection, row, &dialect, true, 1)
+            .await
+            .expect("compress row must succeed");
+        assert!(orig > 0, "original size must be positive");
+        assert!(comp > 0, "compressed size must be positive");
+    }
+}
