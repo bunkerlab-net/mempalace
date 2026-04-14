@@ -21,6 +21,9 @@ const CHUNK_SIZE: usize = 800;
 /// Files larger than this are skipped — prevents OOM on huge files.
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
 
+// Compile-time invariant: chunk size must be greater than min chunk size.
+const _: () = assert!(CHUNK_SIZE > MIN_CHUNK_SIZE);
+
 use super::WALK_DEPTH_LIMIT;
 
 const TOPIC_KEYWORDS: &[(&str, &[&str])] = &[
