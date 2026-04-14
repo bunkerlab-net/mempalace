@@ -200,6 +200,7 @@ fn chunk_by_exchange(lines: &[&str]) -> Vec<Chunk> {
                 // mid-codepoint for multi-byte chars (emoji, CJK, accents).
                 let first_end = chunk_by_exchange_floor_char_boundary(&content, CHUNK_SIZE);
                 let first = &content[..first_end];
+                // Guard first chunk to avoid nearly-empty starts.
                 if first.trim().len() > MIN_CHUNK_SIZE {
                     chunks.push(Chunk {
                         content: first.to_string(),
@@ -207,6 +208,8 @@ fn chunk_by_exchange(lines: &[&str]) -> Vec<Chunk> {
                     });
                 }
                 // Remaining response in CHUNK_SIZE continuation drawers.
+                // Continuation fragments are always pushed (no MIN_CHUNK_SIZE filter)
+                // to prevent silent data loss once we've committed to multi-chunk output.
                 let mut remainder = &content[first_end..];
                 while !remainder.is_empty() {
                     let end = chunk_by_exchange_floor_char_boundary(remainder, CHUNK_SIZE);
@@ -215,12 +218,10 @@ fn chunk_by_exchange(lines: &[&str]) -> Vec<Chunk> {
                     let end = end.max(1);
                     let part = &remainder[..end];
                     remainder = &remainder[end..];
-                    if part.trim().len() > MIN_CHUNK_SIZE {
-                        chunks.push(Chunk {
-                            content: part.to_string(),
-                            chunk_index: chunks.len(),
-                        });
-                    }
+                    chunks.push(Chunk {
+                        content: part.to_string(),
+                        chunk_index: chunks.len(),
+                    });
                 }
             } else if content.trim().len() > MIN_CHUNK_SIZE {
                 chunks.push(Chunk {
@@ -672,6 +673,16 @@ mod tests {
                 "every chunk must be valid UTF-8"
             );
         }
+        // Round-trip validation: reconstruct original from chunks and verify bytes match.
+        let reconstructed = chunks
+            .iter()
+            .map(|c| c.content.as_str())
+            .collect::<String>();
+        assert_eq!(
+            reconstructed.as_bytes(),
+            input.as_bytes(),
+            "reconstructed content must match original bytes exactly"
+        );
     }
 
     #[test]

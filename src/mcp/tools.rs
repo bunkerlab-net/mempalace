@@ -181,6 +181,35 @@ fn sanitize_opt_name(value: &str, field_name: &str) -> Result<Option<String>, Va
     sanitize_name(value, field_name).map(Some)
 }
 
+/// Validate tunnel label: trim, non-empty, reject null bytes and length violations.
+fn sanitize_label(value: &str) -> Result<String, Value> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(
+            json!({"success": false, "error": "label must be a non-empty string", "public": true}),
+        );
+    }
+    if trimmed.len() > MAX_LABEL_LEN {
+        return Err(
+            json!({"success": false, "error": format!("label exceeds maximum length of {MAX_LABEL_LEN} characters"), "public": true}),
+        );
+    }
+    if trimmed.contains('\0') {
+        return Err(
+            json!({"success": false, "error": "label contains null bytes", "public": true}),
+        );
+    }
+    let result = trimmed.to_string();
+
+    // Postconditions: result is non-empty, trimmed, and safe.
+    debug_assert!(!result.is_empty());
+    debug_assert!(result == result.trim());
+    debug_assert!(!result.contains('\0'));
+    debug_assert!(result.len() <= MAX_LABEL_LEN);
+
+    Ok(result)
+}
+
 /// Validate drawer/diary content.  Returns `Ok(trimmed)` if valid, or `Err(error_json)` if not.
 fn sanitize_content(value: &str) -> Result<String, Value> {
     let trimmed = value.trim();
@@ -1144,12 +1173,9 @@ async fn tool_create_tunnel(connection: &Connection, args: &Value) -> Value {
         Ok(v) => v,
         Err(e) => return e,
     };
-    let label = {
-        let v = str_arg(args, "label");
-        if v.len() > MAX_LABEL_LEN {
-            return json!({"success": false, "error": format!("label exceeds maximum length of {MAX_LABEL_LEN} characters"), "public": true});
-        }
-        v
+    let label = match sanitize_label(str_arg(args, "label")) {
+        Ok(v) => v,
+        Err(e) => return e,
     };
     let source_drawer_id =
         match sanitize_opt_name(str_arg(args, "source_drawer_id"), "source_drawer_id") {
@@ -1169,7 +1195,7 @@ async fn tool_create_tunnel(connection: &Connection, args: &Value) -> Value {
             source_room: &source_room,
             target_wing: &target_wing,
             target_room: &target_room,
-            label,
+            label: &label,
             source_drawer_id: source_drawer_id.as_deref(),
             target_drawer_id: target_drawer_id.as_deref(),
         },
