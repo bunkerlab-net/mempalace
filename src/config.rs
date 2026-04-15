@@ -165,7 +165,10 @@ fn maybe_migrate() -> Result<()> {
         return Ok(());
     }
 
-    // Already migrated — config.json exists in the XDG location.
+    // Already migrated — config.json was moved last in maybe_migrate_inner(),
+    // so its presence at the destination confirms full completion. A partial
+    // migration (crash before config.json was moved) re-enters here and resumes
+    // because source still contains config.json.
     if destination.join("config.json").exists() {
         return Ok(());
     }
@@ -177,14 +180,20 @@ fn maybe_migrate() -> Result<()> {
 }
 
 /// Perform the actual migration: move files from `source` to `destination`.
+///
+/// `config.json` is moved last so that its presence at the destination acts as
+/// an atomic completion marker. If this function is interrupted mid-run, the
+/// next call re-enters and resumes: already-moved files are skipped because
+/// their source paths no longer exist.
 fn maybe_migrate_inner(source: &Path, destination: &Path) -> Result<()> {
     assert!(source.exists());
     assert_ne!(source, destination);
 
     std::fs::create_dir_all(destination)?;
 
+    // Move all artifacts except config.json first. config.json moves last —
+    // its arrival at the destination is the completion marker (see maybe_migrate).
     let files = [
-        "config.json",
         "identity.txt",
         "palace.db",
         "palace.db-wal",
@@ -203,12 +212,15 @@ fn maybe_migrate_inner(source: &Path, destination: &Path) -> Result<()> {
         maybe_migrate_move_dir(&wal_source, &destination.join("wal"))?;
     }
 
-    // Patch palace_path in config.json if it still points to the legacy location.
-    let destination_config = destination.join("config.json");
-    if destination_config.exists() {
+    // Patch palace_path in config.json while it is still at the source so that
+    // the moved copy already contains the correct path. Moving it after patching
+    // keeps the patch and the move atomic with respect to the completion marker.
+    let source_config = source.join("config.json");
+    if source_config.exists() {
         let legacy_db = source.join("palace.db");
         let new_db = destination.join("palace.db");
-        maybe_migrate_patch_config(&destination_config, &legacy_db, &new_db)?;
+        maybe_migrate_patch_config(&source_config, &legacy_db, &new_db)?;
+        maybe_migrate_move_file(&source_config, &destination.join("config.json"))?;
     }
 
     // Remove the legacy directory if it is now empty.
@@ -547,6 +559,47 @@ mod tests {
 
                 let destination = home.path().join(".local").join("share").join("mempalace");
                 assert!(destination.join("config.json").exists());
+            },
+        );
+    }
+
+    #[test]
+    fn migrate_resumes_after_partial_migration() {
+        // Simulate a crash mid-migration: palace.db was already moved to the
+        // destination but config.json is still in the legacy dir. The next run
+        // must detect that config.json is still in the source (completion marker
+        // absent at destination) and finish the migration rather than skipping it.
+        let home = tempfile::tempdir().expect("failed to create temp dir");
+        let legacy = home.path().join(".mempalace");
+        let destination = home.path().join(".local").join("share").join("mempalace");
+
+        std::fs::create_dir_all(&legacy).expect("create legacy dir");
+        std::fs::create_dir_all(&destination).expect("create destination dir");
+
+        // config.json is still in the legacy dir (not yet moved — migration incomplete).
+        std::fs::write(
+            legacy.join("config.json"),
+            r#"{"palace_path":"/old/palace.db","collection_name":"mempalace_drawers","people_map":{}}"#,
+        )
+        .expect("write config.json");
+        // palace.db was already moved to the destination in the previous partial run.
+        std::fs::write(destination.join("palace.db"), b"fake db content").expect("write palace.db");
+
+        temp_env::with_vars(
+            [
+                ("HOME", Some(home.path().to_str().expect("valid path"))),
+                ("MEMPALACE_DIR", None),
+                ("XDG_DATA_HOME", None),
+            ],
+            || {
+                maybe_migrate().expect("migration must resume successfully");
+
+                // Completion marker must now exist.
+                assert!(destination.join("config.json").exists());
+                // palace.db must still be present (was already there).
+                assert!(destination.join("palace.db").exists());
+                // Legacy dir must be gone (now empty).
+                assert!(!legacy.exists());
             },
         );
     }
