@@ -51,5 +51,5 @@ turso = { version = "0.5.3", default-features = false }
 uuid = { version = "1", default-features = false, features = ["v4"] }
 
 [dev-dependencies]
-temp-env = "0.3"
+temp-env = { version = "0.3", features = ["async_closure"] }
 tempfile = "3"

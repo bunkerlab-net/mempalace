@@ -251,10 +251,12 @@ async fn wal_log(operation: &str, params: Value) {
         return;
     }
 
+    // Evaluate config_dir() here, in the async context, so the path is captured
+    // by the move closure. Evaluating inside spawn_blocking would race with
+    // temp_env::async_with_vars restoring the env var before the task runs.
+    let wal_dir = crate::config::config_dir().join("wal");
     let operation = operation.to_string();
     let _ = tokio::task::spawn_blocking(move || {
-        let wal_dir = crate::config::config_dir().join("wal");
-
         // Create directory with restrictive permissions atomically on Unix.
         #[cfg(unix)]
         {
