@@ -76,9 +76,24 @@ pub fn legacy_dir() -> PathBuf {
     legacy_directory
 }
 
-/// Returns the user's home directory, or `.` if `HOME` is unset.
+/// Returns the user's home directory, or `.` if it cannot be determined.
+///
+/// Checks `HOME` (POSIX), then `USERPROFILE` (Windows), then
+/// `HOMEDRIVE`+`HOMEPATH` (legacy Windows), mirroring the fallback order
+/// used by `expand_tilde()` in `main.rs`.
 fn home_dir() -> PathBuf {
-    std::env::var("HOME").map_or_else(|_| PathBuf::from("."), PathBuf::from)
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .or_else(|| {
+            let drive = std::env::var_os("HOMEDRIVE")?;
+            let path = std::env::var_os("HOMEPATH")?;
+            Some(PathBuf::from(drive).join(path).into_os_string())
+        })
+        .map_or_else(|| PathBuf::from("."), PathBuf::from);
+    assert!(!home.as_os_str().is_empty());
+    // Negative space: path must not contain null bytes.
+    assert!(!home.to_string_lossy().contains('\0'));
+    home
 }
 
 /// Path to the global config file.
