@@ -179,6 +179,15 @@ fn maybe_migrate() -> Result<()> {
         return Ok(());
     }
 
+    // Without a resolvable home directory there is no legacy ~/.mempalace to
+    // migrate from; skip silently rather than panicking inside legacy_dir().
+    let home_resolvable = std::env::var_os("HOME").is_some()
+        || std::env::var_os("USERPROFILE").is_some()
+        || (std::env::var_os("HOMEDRIVE").is_some() && std::env::var_os("HOMEPATH").is_some());
+    if !home_resolvable {
+        return Ok(());
+    }
+
     let source = legacy_dir();
     let destination = config_dir();
 
@@ -390,24 +399,29 @@ mod tests {
 
     #[test]
     fn default_config_has_palace_path() {
-        // The default palace path is under the XDG data dir.
-        // Test the formula directly using home_dir() to avoid MEMPALACE_DIR interference.
-        let path = home_dir()
-            .join(".local")
-            .join("share")
-            .join("mempalace")
-            .join("palace.db");
-        let path_str = path.to_string_lossy();
-        assert!(path_str.contains("mempalace"));
-        assert!(path_str.ends_with("palace.db"));
+        // default_palace_path() must return a path inside the XDG data directory.
+        // Clear overrides so the function resolves through HOME/.local/share.
+        temp_env::with_vars(
+            [("MEMPALACE_DIR", None::<&str>), ("XDG_DATA_HOME", None)],
+            || {
+                let path = default_palace_path();
+                let path_str = path.to_string_lossy();
+                assert!(path_str.contains("mempalace"));
+                assert!(path_str.ends_with("palace.db"));
+            },
+        );
     }
 
     #[test]
     fn config_dir_ends_with_mempalace() {
-        // Test the default formula directly via xdg_data_dir() to avoid
-        // MEMPALACE_DIR interference from the test runner environment.
-        let directory = home_dir().join(".local").join("share").join("mempalace");
-        assert!(directory.ends_with("mempalace"));
+        // config_dir() must end with "mempalace" when resolved via the XDG default.
+        // Clear overrides so the function uses HOME/.local/share/mempalace.
+        temp_env::with_vars(
+            [("MEMPALACE_DIR", None::<&str>), ("XDG_DATA_HOME", None)],
+            || {
+                assert!(config_dir().ends_with("mempalace"));
+            },
+        );
     }
 
     #[test]
