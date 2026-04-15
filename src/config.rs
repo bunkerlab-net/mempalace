@@ -627,6 +627,51 @@ mod tests {
     }
 
     #[test]
+    fn migrate_patches_palace_path_when_pointing_to_legacy_default() {
+        // maybe_migrate_patch_config() only rewrites palace_path when it equals
+        // the legacy default (source.join("palace.db")). All other migration
+        // tests use "/old/palace.db" which never matches, leaving this code path
+        // untested. This test uses the real legacy default path to exercise it.
+        let home = tempfile::tempdir().expect("failed to create temp dir");
+        let legacy = home.path().join(".mempalace");
+        std::fs::create_dir_all(&legacy).expect("create legacy dir");
+
+        // Write config.json using serde to avoid hand-rolling JSON with a
+        // path that may contain characters requiring escaping.
+        let legacy_db = legacy.join("palace.db");
+        let config_content = serde_json::to_string(&MempalaceConfig {
+            palace_path: legacy_db,
+            collection_name: "mempalace_drawers".to_string(),
+            people_map: std::collections::HashMap::new(),
+        })
+        .expect("serialize config");
+        std::fs::write(legacy.join("config.json"), &config_content).expect("write config.json");
+
+        temp_env::with_vars(
+            [
+                ("HOME", Some(home.path().to_str().expect("valid path"))),
+                ("MEMPALACE_DIR", None),
+                ("XDG_DATA_HOME", None),
+            ],
+            || {
+                maybe_migrate().expect("migration should succeed");
+
+                let destination = home.path().join(".local").join("share").join("mempalace");
+                let new_db = destination.join("palace.db");
+
+                let data = std::fs::read_to_string(destination.join("config.json"))
+                    .expect("read migrated config.json");
+                let config: MempalaceConfig =
+                    serde_json::from_str(&data).expect("parse migrated config.json");
+
+                // palace_path must now point to the XDG location, not the legacy one.
+                assert_eq!(config.palace_path, new_db);
+                assert!(!config.palace_path.to_string_lossy().contains(".mempalace"));
+            },
+        );
+    }
+
+    #[test]
     fn project_config_yaml_round_trip() {
         let yaml = r"
 wing: my_project
