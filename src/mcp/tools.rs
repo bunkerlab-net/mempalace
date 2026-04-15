@@ -1396,9 +1396,7 @@ mod tests {
     #[tokio::test]
     async fn add_drawer_inserts_and_returns_success() {
         // Each test gets its own temp dir so WAL writes are isolated.
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             let args = json!({
                 "wing": "personal",
                 "room": "notes",
@@ -1422,9 +1420,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_drawer_idempotent_returns_already_exists() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             let args = json!({
                 "wing": "personal",
                 "room": "notes",
@@ -1444,9 +1440,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_drawer_deterministic_id_same_content() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             // Verify the ID is derived from sha256(wing+room+content)[:24].
             let content = "fn main() { println!(\"hello\"); }";
             let args = json!({
@@ -1473,9 +1467,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_drawer_different_content_different_id() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             let ra = tool_add_drawer(
                 &connection,
                 &json!({"wing": "w", "room": "r", "content": "first piece of content"}),
@@ -1493,10 +1485,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_drawer_missing_required_fields_returns_error() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
-
+        with_isolated_env(|connection| async move {
             // Missing content
             let r = tool_add_drawer(&connection, &json!({"wing": "w", "room": "r"})).await;
             assert_eq!(r["success"], false);
@@ -1529,13 +1518,29 @@ mod tests {
         result
     }
 
+    // --- Helper: isolated WAL dir + env override + fresh connection ---
+
+    // Wraps the three-line test setup (tempdir, async_with_vars, test_conn) so
+    // callers only express what is under test.  The connection is passed by value
+    // so the closure can borrow it as `&connection` without lifetime complications.
+    async fn with_isolated_env<F, Fut>(test: F)
+    where
+        F: FnOnce(turso::Connection) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
+        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async move {
+            let (_db, connection) = test_conn().await;
+            test(connection).await;
+        })
+        .await;
+    }
+
     // --- tool_status ---
 
     #[tokio::test]
     async fn status_empty_db_returns_zero_totals() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             let result = tool_status(&connection).await;
             assert_eq!(result["total_drawers"], 0);
             assert!(result["protocol"].is_string(), "protocol must be present");
@@ -1545,9 +1550,7 @@ mod tests {
 
     #[tokio::test]
     async fn status_with_drawers_counts_correctly() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             seed_drawer(&connection, "alpha", "notes", "first drawer content here").await;
             seed_drawer(&connection, "alpha", "code", "second drawer content here").await;
             seed_drawer(&connection, "beta", "notes", "third drawer content here").await;
@@ -1564,9 +1567,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_wings_empty_db() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             let result = tool_list_wings(&connection).await;
             let wings = result["wings"].as_object().expect("wings must be object");
             assert!(wings.is_empty(), "empty DB should have no wings");
@@ -1577,9 +1578,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_wings_with_data() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             seed_drawer(&connection, "personal", "notes", "my personal note content").await;
             seed_drawer(&connection, "work", "tasks", "my work task content here").await;
 
@@ -1595,9 +1594,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_rooms_empty_db() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             let result = tool_list_rooms(&connection, &json!({})).await;
             let rooms = result["rooms"].as_object().expect("rooms must be object");
             assert!(rooms.is_empty(), "empty DB should have no rooms");
@@ -1608,9 +1605,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_rooms_with_wing_filter() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             seed_drawer(&connection, "proj", "code", "some code content here").await;
             seed_drawer(&connection, "proj", "docs", "some docs content here").await;
             seed_drawer(&connection, "other", "misc", "other misc content here").await;
@@ -1627,9 +1622,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_taxonomy_empty_db() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             let result = tool_get_taxonomy(&connection).await;
             let taxonomy = result["taxonomy"]
                 .as_object()
@@ -1642,9 +1635,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_taxonomy_with_data() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             seed_drawer(
                 &connection,
                 "proj",
@@ -1674,9 +1665,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_empty_query_returns_error() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             let result = tool_search(&connection, &json!({"query": ""})).await;
             assert!(
                 result["error"].is_string(),
@@ -1689,9 +1678,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_happy_path_returns_results() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             seed_drawer(
                 &connection,
                 "tech",
@@ -1709,9 +1696,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_with_wing_filter() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             seed_drawer(
                 &connection,
                 "tech",
@@ -1742,9 +1727,7 @@ mod tests {
 
     #[tokio::test]
     async fn check_duplicate_no_match() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             let result = tool_check_duplicate(
                 &connection,
                 &json!({"content": "completely unique content that has no match"}),
@@ -1763,9 +1746,7 @@ mod tests {
 
     #[tokio::test]
     async fn check_duplicate_with_matching_content() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             seed_drawer(
                 &connection,
                 "tech",
@@ -1794,9 +1775,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_drawer_success() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             let seeded = seed_drawer(&connection, "temp", "notes", "content to be deleted").await;
             let drawer_id = seeded["drawer_id"]
                 .as_str()
@@ -1811,9 +1790,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_drawer_invalid_format() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             let result =
                 tool_delete_drawer(&connection, &json!({"drawer_id": "not_a_drawer_id"})).await;
             assert_eq!(result["success"], false);
@@ -1831,9 +1808,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_drawer_success() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             let seeded = seed_drawer(&connection, "proj", "code", "fn main for get test").await;
             let drawer_id = seeded["drawer_id"]
                 .as_str()
@@ -1849,9 +1824,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_drawer_not_found() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             let result = tool_get_drawer(
                 &connection,
                 &json!({"drawer_id": "drawer_x_y_aaaaaaaabbbbbbbbcccccccc"}),
@@ -1873,9 +1846,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_drawers_empty_db() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             let result = tool_list_drawers(&connection, &json!({})).await;
             assert_eq!(result["count"], 0);
             assert!(
@@ -1890,9 +1861,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_drawers_with_pagination() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             seed_drawer(&connection, "w", "r", "first content for pagination test").await;
             seed_drawer(&connection, "w", "r", "second content for pagination test").await;
             seed_drawer(&connection, "w", "r", "third content for pagination test").await;
@@ -1912,9 +1881,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_drawers_wing_filter() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             seed_drawer(
                 &connection,
                 "alpha",
@@ -1936,9 +1903,7 @@ mod tests {
 
     #[tokio::test]
     async fn update_drawer_content() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             let seeded =
                 seed_drawer(&connection, "proj", "code", "original content for update").await;
             let old_id = seeded["drawer_id"]
@@ -1963,9 +1928,7 @@ mod tests {
 
     #[tokio::test]
     async fn update_drawer_not_found() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             let result = tool_update_drawer(
                 &connection,
                 &json!({
@@ -1988,9 +1951,7 @@ mod tests {
 
     #[tokio::test]
     async fn update_drawer_noop_when_nothing_changes() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             let seeded = seed_drawer(&connection, "proj", "code", "stable content no change").await;
             let drawer_id = seeded["drawer_id"]
                 .as_str()
@@ -2008,9 +1969,7 @@ mod tests {
 
     #[tokio::test]
     async fn kg_add_triple() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             let result = tool_kg_add(
                 &connection,
                 &json!({
@@ -2031,9 +1990,7 @@ mod tests {
 
     #[tokio::test]
     async fn kg_add_missing_field_returns_error() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             // Missing object
             let result =
                 tool_kg_add(&connection, &json!({"subject": "Rust", "predicate": "is"})).await;
@@ -2047,9 +2004,7 @@ mod tests {
 
     #[tokio::test]
     async fn kg_query_entity() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             // Add a triple first
             tool_kg_add(
                 &connection,
@@ -2067,9 +2022,7 @@ mod tests {
 
     #[tokio::test]
     async fn kg_query_invalid_direction() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             let result = tool_kg_query(
                 &connection,
                 &json!({"entity": "Rust", "direction": "sideways"}),
@@ -2090,9 +2043,7 @@ mod tests {
 
     #[tokio::test]
     async fn kg_invalidate_triple() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             tool_kg_add(
                 &connection,
                 &json!({"subject": "Alice", "predicate": "worksAt", "object": "Acme"}),
@@ -2115,9 +2066,7 @@ mod tests {
 
     #[tokio::test]
     async fn kg_invalidate_with_explicit_ended_date() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             tool_kg_add(
                 &connection,
                 &json!({"subject": "Bob", "predicate": "livesIn", "object": "NYC"}),
@@ -2144,9 +2093,7 @@ mod tests {
 
     #[tokio::test]
     async fn kg_timeline_empty() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             let result = tool_kg_timeline(&connection, &json!({})).await;
             assert!(result.get("error").is_none(), "must not error");
             assert_eq!(result["count"], 0);
@@ -2156,9 +2103,7 @@ mod tests {
 
     #[tokio::test]
     async fn kg_timeline_with_data() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             tool_kg_add(
                 &connection,
                 &json!({"subject": "Eve", "predicate": "knows", "object": "Alice"}),
@@ -2176,9 +2121,7 @@ mod tests {
 
     #[tokio::test]
     async fn kg_stats_empty_db() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             let result = tool_kg_stats(&connection).await;
             assert!(result.get("error").is_none(), "must not error");
             assert_eq!(result["entities"], 0);
@@ -2189,9 +2132,7 @@ mod tests {
 
     #[tokio::test]
     async fn kg_stats_after_adding_triples() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             tool_kg_add(
                 &connection,
                 &json!({"subject": "X", "predicate": "rel", "object": "Y"}),
@@ -2224,9 +2165,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_tunnel_success() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             let result = seed_tunnel(&connection).await;
             assert!(result.get("error").is_none(), "must not error");
             assert!(result["id"].is_string(), "tunnel must have an id");
@@ -2237,9 +2176,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_tunnel_missing_label_returns_error() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             let result = tool_create_tunnel(
                 &connection,
                 &json!({
@@ -2263,9 +2200,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_tunnels_empty() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             let result = tool_list_tunnels(&connection, &json!({})).await;
             assert!(result.get("error").is_none(), "must not error");
             assert_eq!(result["count"], 0);
@@ -2275,9 +2210,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_tunnels_after_create() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             seed_tunnel(&connection).await;
 
             let result = tool_list_tunnels(&connection, &json!({})).await;
@@ -2291,9 +2224,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_tunnel_success() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             let tunnel = seed_tunnel(&connection).await;
             let tunnel_id = tunnel["id"].as_str().expect("tunnel must have id");
 
@@ -2306,9 +2237,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_tunnel_invalid_id_format() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             let result = tool_delete_tunnel(&connection, &json!({"tunnel_id": "not-valid"})).await;
             assert!(result["error"].is_string(), "must return error");
             assert!(
@@ -2323,9 +2252,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_tunnel_nonexistent_returns_false() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             // Valid 16-char hex that doesn't exist
             let result =
                 tool_delete_tunnel(&connection, &json!({"tunnel_id": "0000000000000000"})).await;
@@ -2339,9 +2266,7 @@ mod tests {
 
     #[tokio::test]
     async fn follow_tunnels_no_connections() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             let result =
                 tool_follow_tunnels(&connection, &json!({"wing": "alpha", "room": "code"})).await;
             assert!(result.get("error").is_none(), "must not error");
@@ -2357,9 +2282,7 @@ mod tests {
 
     #[tokio::test]
     async fn follow_tunnels_with_tunnel() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             seed_tunnel(&connection).await;
 
             let result =
@@ -2379,9 +2302,7 @@ mod tests {
 
     #[tokio::test]
     async fn traverse_empty_graph() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             let result = tool_traverse(&connection, &json!({"start_room": "nonexistent"})).await;
             assert!(
                 result.get("error").is_none(),
@@ -2394,9 +2315,7 @@ mod tests {
 
     #[tokio::test]
     async fn traverse_with_shared_room() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             // Two wings sharing the same room name creates a graph edge
             seed_drawer(
                 &connection,
@@ -2423,9 +2342,7 @@ mod tests {
 
     #[tokio::test]
     async fn find_tunnels_empty_graph() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             let result = tool_find_tunnels(&connection, &json!({})).await;
             assert!(result.get("error").is_none(), "must not error");
             assert!(
@@ -2440,9 +2357,7 @@ mod tests {
 
     #[tokio::test]
     async fn find_tunnels_between_wings() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             // Create drawers in two wings sharing a room name
             seed_drawer(&connection, "alpha", "shared", "alpha shared content here").await;
             seed_drawer(&connection, "beta", "shared", "beta shared content here").await;
@@ -2463,9 +2378,7 @@ mod tests {
 
     #[tokio::test]
     async fn graph_stats_empty_db() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             let result = tool_graph_stats(&connection).await;
             assert!(result.get("error").is_none(), "must not error");
             assert_eq!(result["total_rooms"], 0);
@@ -2476,9 +2389,7 @@ mod tests {
 
     #[tokio::test]
     async fn graph_stats_with_data() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             seed_drawer(&connection, "alpha", "notes", "alpha notes for graph stats").await;
             seed_drawer(&connection, "beta", "notes", "beta notes for graph stats").await;
 
@@ -2496,9 +2407,7 @@ mod tests {
 
     #[tokio::test]
     async fn diary_write_success() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             let result = tool_diary_write(
                 &connection,
                 &json!({
@@ -2517,9 +2426,7 @@ mod tests {
 
     #[tokio::test]
     async fn diary_write_with_topic() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             let result = tool_diary_write(
                 &connection,
                 &json!({
@@ -2537,9 +2444,7 @@ mod tests {
 
     #[tokio::test]
     async fn diary_write_missing_entry_returns_error() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             let result = tool_diary_write(&connection, &json!({"agent_name": "TestAgent"})).await;
             assert_eq!(result["success"], false);
             assert!(result["error"].is_string(), "must return error");
@@ -2551,9 +2456,7 @@ mod tests {
 
     #[tokio::test]
     async fn diary_read_empty() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             let result = tool_diary_read(&connection, &json!({"agent_name": "TestAgent"})).await;
             assert!(result.get("error").is_none(), "must not error");
             assert_eq!(result["total"], 0);
@@ -2564,9 +2467,7 @@ mod tests {
 
     #[tokio::test]
     async fn diary_read_after_write() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             tool_diary_write(
                 &connection,
                 &json!({
@@ -2590,9 +2491,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_unknown_tool_returns_error() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             let result = dispatch(&connection, "nonexistent_tool", &json!({})).await;
             assert!(result["error"].is_string(), "must return error");
             assert!(
@@ -2607,9 +2506,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_empty_name_returns_error() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             let result = dispatch(&connection, "", &json!({})).await;
             assert!(
                 result["error"].is_string(),
@@ -2627,9 +2524,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_non_object_args_returns_error() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             let result = dispatch(&connection, "mempalace_status", &json!("not an object")).await;
             assert!(
                 result["error"].is_string(),
@@ -2647,9 +2542,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_routes_to_correct_tool() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             let result = dispatch(&connection, "mempalace_status", &json!({})).await;
             // tool_status returns total_drawers, proving it was routed correctly
             assert!(
@@ -2668,9 +2561,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_aaak_spec_returns_non_empty() {
-        let wal_dir = tempfile::tempdir().expect("failed to create WAL temp dir");
-        temp_env::async_with_vars([("MEMPALACE_DIR", Some(wal_dir.path()))], async {
-            let (_db, connection) = test_conn().await;
+        with_isolated_env(|connection| async move {
             let result = dispatch(&connection, "mempalace_get_aaak_spec", &json!({})).await;
             let spec = result["aaak_spec"]
                 .as_str()
