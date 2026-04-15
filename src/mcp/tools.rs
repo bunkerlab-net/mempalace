@@ -238,11 +238,12 @@ fn sanitize_content(value: &str) -> Result<String, Value> {
     Ok(result)
 }
 
-/// Append a write-operation entry to `~/.mempalace/wal/write_log.jsonl`.
+/// Append a write-operation entry to `config_dir()/wal/write_log.jsonl`.
 ///
-/// Failures are non-fatal: logged to stderr so the server stays alive even if
-/// the WAL directory is unwritable.  I/O is offloaded to `spawn_blocking` so
-/// the async worker thread is not stalled by filesystem calls.
+/// The data directory is `$XDG_DATA_HOME/mempalace` by default, or the value
+/// of `MEMPALACE_DIR` when set. Failures are non-fatal: logged to stderr so
+/// the server stays alive even if the WAL directory is unwritable. I/O is
+/// offloaded to `spawn_blocking` so the async worker thread is not stalled.
 async fn wal_log(operation: &str, params: Value) {
     // wal_log is best-effort and must never crash. An empty operation string is a
     // programmer error caught in debug builds; in release builds we silently skip.
