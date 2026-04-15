@@ -1,0 +1,6 @@
+[profile.default.env]
+# Redirect all config and WAL writes away from ~/.mempalace during test runs.
+# config_dir() checks MEMPALACE_DIR before falling back to the legacy default.
+# /tmp is cleaned up by the OS; no per-process subdirectory is needed since WAL
+# writes are append-only and test processes use in-memory databases.
+MEMPALACE_DIR = "/tmp/mempalace_test"
