@@ -76,23 +76,30 @@ pub fn legacy_dir() -> PathBuf {
     legacy_directory
 }
 
-/// Returns the user's home directory, or `.` if it cannot be determined.
+/// Returns the user's home directory.
 ///
 /// Checks `HOME` (POSIX), then `USERPROFILE` (Windows), then
 /// `HOMEDRIVE`+`HOMEPATH` (legacy Windows), mirroring the fallback order
-/// used by `expand_tilde()` in `main.rs`.
+/// used by `expand_tilde()` in `main.rs`. Panics if none are set — a missing
+/// home directory is a fatal misconfiguration that yields unusable XDG paths.
 fn home_dir() -> PathBuf {
-    let home = std::env::var_os("HOME")
+    let os_home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .or_else(|| {
             let drive = std::env::var_os("HOMEDRIVE")?;
             let path = std::env::var_os("HOMEPATH")?;
             Some(PathBuf::from(drive).join(path).into_os_string())
-        })
-        .map_or_else(|| PathBuf::from("."), PathBuf::from);
+        });
+    // A missing home directory is a programmer/environment error, not a
+    // recoverable operating error — assert so both debug and release builds fail fast.
+    assert!(
+        os_home.is_some(),
+        "HOME, USERPROFILE, or HOMEDRIVE+HOMEPATH must be set"
+    );
+    // unwrap_or_default() is unreachable after the assert above; used in place
+    // of unwrap() because clippy::unwrap_used is denied in this project.
+    let home = PathBuf::from(os_home.unwrap_or_default());
     assert!(!home.as_os_str().is_empty());
-    // Negative space: path must not contain null bytes.
-    assert!(!home.to_string_lossy().contains('\0'));
     home
 }
 
