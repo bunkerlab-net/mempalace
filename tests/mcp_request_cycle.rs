@@ -247,6 +247,18 @@ async fn update_drawer_changes_id() {
         get_result_after["content"],
         "updated content that is completely different now"
     );
+
+    // Verify the old drawer was removed — update must not leave a ghost entry.
+    let get_old_after = dispatch(
+        &connection,
+        "mempalace_get_drawer",
+        &json!({"drawer_id": old_id}),
+    )
+    .await;
+    assert!(
+        get_old_after.get("error").is_some(),
+        "old drawer_id should no longer be found after update"
+    );
 }
 
 /// Dispatching a non-existent tool should return a structured error.

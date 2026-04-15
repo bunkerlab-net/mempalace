@@ -215,4 +215,5 @@ async fn multiple_triples_same_entities() {
         predicates.contains(&"works_with"),
         "should contain 'works_with' (normalized from 'works with')"
     );
+    assert!(predicates.contains(&"mentors"), "should contain 'mentors'");
 }

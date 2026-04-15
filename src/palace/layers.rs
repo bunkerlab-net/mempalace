@@ -226,8 +226,12 @@ mod tests {
             "layer1 output should contain the essential story header"
         );
         assert!(
-            result.contains("Rust compiler") || result.contains("UI mockups"),
-            "layer1 output should contain content snippets from seeded drawers"
+            result.contains("Rust compiler"),
+            "layer1 output should contain content from the first seeded drawer"
+        );
+        assert!(
+            result.contains("UI mockups"),
+            "layer1 output should contain content from the second seeded drawer"
         );
     }
 

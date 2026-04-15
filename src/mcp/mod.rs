@@ -30,6 +30,8 @@ enum LineRead {
     Line(String),
     /// The line exceeded the byte limit — stream resynced past the next newline.
     Overflow,
+    /// The line contained invalid UTF-8 and cannot be parsed as JSON.
+    Invalid,
     /// End-of-stream — stdin closed.
     Eof,
 }
@@ -51,6 +53,18 @@ pub async fn run(connection: &Connection) -> Result<()> {
                     "jsonrpc": "2.0",
                     "id": null,
                     "error": {"code": -32700, "message": "Request exceeds maximum frame size"}
+                });
+                let out = serde_json::to_string(&err_response).unwrap_or_default();
+                stdout.write_all(out.as_bytes()).await?;
+                stdout.write_all(b"\n").await?;
+                stdout.flush().await?;
+                continue;
+            }
+            Ok(LineRead::Invalid) => {
+                let err_response = json!({
+                    "jsonrpc": "2.0",
+                    "id": null,
+                    "error": {"code": -32700, "message": "Request contains invalid UTF-8"}
                 });
                 let out = serde_json::to_string(&err_response).unwrap_or_default();
                 stdout.write_all(out.as_bytes()).await?;
@@ -128,8 +142,10 @@ async fn run_read_line_impl<R: AsyncBufRead + Unpin>(
                 return Ok(LineRead::Eof);
             }
             debug_assert!(buffer.len() <= limit);
-            let line = String::from_utf8_lossy(buffer).into_owned();
-            return Ok(LineRead::Line(line));
+            return match String::from_utf8(buffer.clone()) {
+                Ok(line) => Ok(LineRead::Line(line)),
+                Err(_) => Ok(LineRead::Invalid),
+            };
         }
 
         let chunk_length = available.len();
@@ -151,8 +167,10 @@ async fn run_read_line_impl<R: AsyncBufRead + Unpin>(
                 buffer.pop();
             }
             debug_assert!(buffer.len() <= limit);
-            let line = String::from_utf8_lossy(buffer).into_owned();
-            return Ok(LineRead::Line(line));
+            return match String::from_utf8(buffer.clone()) {
+                Ok(line) => Ok(LineRead::Line(line)),
+                Err(_) => Ok(LineRead::Invalid),
+            };
         }
 
         // No newline in this chunk — accumulate if within limit.
@@ -610,10 +628,11 @@ mod tests {
 
     #[tokio::test]
     async fn read_line_overflow() {
-        // Line exceeds the limit — should return Overflow.
+        // Oversized line followed by a valid short line. After the Overflow the
+        // reader must resync past the newline so the next frame is recovered.
         let limit = 10;
-        let long_line = "a".repeat(limit + 5) + "\n";
-        let cursor = Cursor::new(long_line.into_bytes());
+        let input = "a".repeat(limit + 5) + "\n" + "ok\n";
+        let cursor = Cursor::new(input.into_bytes());
         let mut reader = BufReader::new(cursor);
         let mut buf = Vec::new();
         let result = run_read_line_impl(&mut reader, &mut buf, limit)
@@ -623,15 +642,36 @@ mod tests {
             matches!(result, LineRead::Overflow),
             "expected Overflow for line exceeding limit"
         );
-        // After overflow, the reader should have consumed past the newline,
-        // so a subsequent read on empty remaining data should return Eof.
+        // After overflow drain, the reader must resync and return the next line.
         buf.clear();
         let next = run_read_line_impl(&mut reader, &mut buf, limit)
             .await
             .expect("second read should succeed");
+        let LineRead::Line(recovered) = next else {
+            panic!("expected LineRead::Line after overflow resync, got Eof or Overflow");
+        };
+        assert_eq!(
+            recovered, "ok",
+            "valid line after overflow must be recovered"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_line_invalid_utf8() {
+        // A line containing an invalid UTF-8 sequence must yield Invalid, not a
+        // silently repaired string that could produce unexpected JSON parse results.
+        let mut input = b"valid prefix \xFF\xFE invalid suffix\n".to_vec();
+        // Pair assertion: the bytes are definitely not valid UTF-8.
+        assert!(String::from_utf8(input.clone()).is_err());
+        let cursor = Cursor::new(std::mem::take(&mut input));
+        let mut reader = BufReader::new(cursor);
+        let mut buf = Vec::new();
+        let result = run_read_line_impl(&mut reader, &mut buf, 1024)
+            .await
+            .expect("read should succeed");
         assert!(
-            matches!(next, LineRead::Eof),
-            "stream should be at EOF after overflow drain"
+            matches!(result, LineRead::Invalid),
+            "expected Invalid for line with non-UTF-8 bytes"
         );
     }
 
