@@ -238,7 +238,7 @@ fn sanitize_content(value: &str) -> Result<String, Value> {
     Ok(result)
 }
 
-/// Append a write-operation entry to `~/.mempalace/wal/write_log.jsonl`.
+/// Append a write-operation entry to `$XDG_DATA_HOME/mempalace/wal/write_log.jsonl`.
 ///
 /// Failures are non-fatal: logged to stderr so the server stays alive even if
 /// the WAL directory is unwritable.  I/O is offloaded to `spawn_blocking` so

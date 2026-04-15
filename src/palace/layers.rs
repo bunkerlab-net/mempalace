@@ -16,25 +16,27 @@ const MAX_DRAWERS: usize = 15;
 // rule of thumb, leaving headroom for L0 and the user's own message.
 const MAX_CHARS: usize = 3200;
 
-/// Layer 0: Identity text from ~/.mempalace/identity.txt
+/// Layer 0: Identity text from `$XDG_DATA_HOME/mempalace/identity.txt`.
 pub fn layer0() -> String {
     let path = config::config_dir().join("identity.txt");
+    let missing = format!(
+        "## L0 — IDENTITY\nNo identity configured. Create {}",
+        path.display()
+    );
     if path.exists() {
         match std::fs::read_to_string(&path) {
             Ok(text) => {
                 let text = text.trim().to_string();
                 if text.is_empty() {
-                    "## L0 — IDENTITY\nNo identity configured. Create ~/.mempalace/identity.txt"
-                        .to_string()
+                    missing
                 } else {
                     format!("## L0 — IDENTITY\n{text}")
                 }
             }
-            Err(_) => "## L0 — IDENTITY\nNo identity configured. Create ~/.mempalace/identity.txt"
-                .to_string(),
+            Err(_) => missing,
         }
     } else {
-        "## L0 — IDENTITY\nNo identity configured. Create ~/.mempalace/identity.txt".to_string()
+        missing
     }
 }
 
