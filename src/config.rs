@@ -50,10 +50,13 @@ pub fn config_dir() -> PathBuf {
     data_directory
 }
 
-/// Returns `$XDG_DATA_HOME` if set and non-empty, otherwise `$HOME/.local/share`.
+/// Returns `$XDG_DATA_HOME` if set to an absolute path, otherwise `$HOME/.local/share`.
+///
+/// A relative or empty `$XDG_DATA_HOME` is treated as unset, per XDG spec intent.
 fn xdg_data_dir() -> PathBuf {
     let base_directory = if let Ok(val) = std::env::var("XDG_DATA_HOME")
         && !val.is_empty()
+        && PathBuf::from(&val).is_absolute()
     {
         PathBuf::from(val)
     } else {
@@ -399,6 +402,28 @@ mod tests {
             || {
                 let result = config_dir();
                 assert_eq!(result, xdg_tempdir.path().join("mempalace"));
+            },
+        );
+    }
+
+    #[test]
+    fn xdg_data_home_relative_path_falls_back_to_default() {
+        // A relative XDG_DATA_HOME must be ignored — only absolute paths are valid
+        // per XDG spec intent. The fallback is $HOME/.local/share/mempalace.
+        let home = tempfile::tempdir().expect("failed to create temp dir");
+        temp_env::with_vars(
+            [
+                ("HOME", Some(home.path().to_str().expect("valid path"))),
+                ("XDG_DATA_HOME", Some("relative/path")),
+                ("MEMPALACE_DIR", None),
+            ],
+            || {
+                let result = config_dir();
+                assert_eq!(
+                    result,
+                    home.path().join(".local").join("share").join("mempalace")
+                );
+                assert!(!result.to_string_lossy().contains("relative/path"));
             },
         );
     }
