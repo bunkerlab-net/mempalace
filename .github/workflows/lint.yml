@@ -8,6 +8,7 @@ permissions: {}
 jobs:
   run:
     runs-on: ubuntu-24.04
+    continue-on-error: ${{ matrix.toolchain == 'nightly' }}
 
     permissions:
       contents: read
@@ -54,8 +55,5 @@ jobs:
             ${{ runner.os }}-cargo-lint-
 
       - run: cargo clippy --all-targets --all-features
-        continue-on-error: ${{ matrix.toolchain == 'nightly' }}
       - run: cargo fmt --check --all
-        continue-on-error: ${{ matrix.toolchain == 'nightly' }}
       - run: hk check --all --skip-step no_commit_protected_branch
-        continue-on-error: ${{ matrix.toolchain == 'nightly' }}
