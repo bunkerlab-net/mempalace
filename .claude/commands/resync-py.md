@@ -11,10 +11,10 @@ Rust codebase.
 
 ## Instructions
 
-### Phase 1 — Discover what changed in Python
+### Phase 0 — Branch and commit the submodule update
 
-`mempalace-py` is a git submodule at `./mempalace-py`. Advance it to the latest upstream `main`, then diff to find the
-old and new commit hashes.
+Do this before any analysis so the submodule pointer is captured on a dedicated branch
+regardless of whether Rust changes follow.
 
 1. Record the current (old) submodule commit:
 
@@ -28,21 +28,33 @@ old and new commit hashes.
    git submodule update --init --remote mempalace-py
    ```
 
-3. Use `git diff` to confirm the old → new pointer:
+3. Identify the new commit hash:
 
    ```bash
    git diff mempalace-py
    ```
 
-   The `-Subproject commit <old>` / `+Subproject commit <new>` lines give you both hashes.
+   The `+Subproject commit <new>` line gives the full hash. Use the first 7 characters as `<short>`.
 
-4. List all new commits:
+4. Create a branch named after the new commit and commit the pointer:
+
+   ```bash
+   git checkout -b resync/mempalace-py/<short>
+   git add mempalace-py
+   git commit -m "Update mempalace-py submodule to <short>"
+   ```
+
+### Phase 1 — Discover what changed in Python
+
+With the submodule advanced, diff to find the old and new commit hashes.
+
+1. List all new commits (using the old/new hashes from Phase 0):
 
    ```bash
    git -C ./mempalace-py log --oneline <old>..<new>
    ```
 
-5. Diff the interesting directory (check stat first; full diff can exceed 30 KB):
+2. Diff the interesting directory (check stat first; full diff can exceed 30 KB):
 
    ```bash
    git -C ./mempalace-py diff <old>..<new> --stat -- mempalace/
@@ -50,7 +62,7 @@ old and new commit hashes.
 
    Then diff each interesting file individually.
 
-6. Group changes by theme: security, features, bug fixes, documentation, tests.
+3. Group changes by theme: security, features, bug fixes, documentation, tests.
 
 ### Phase 2 — Determine what's applicable to Rust
 
@@ -96,19 +108,15 @@ Run `cargo nextest run` and `cargo clippy --all-targets --all-features` after al
 
 ### Phase 6 — Commit
 
-Stage the updated submodule pointer alongside the Rust changes:
-
-```bash
-git add mempalace-py
-```
-
-Commit with a message like:
+The submodule pointer is already committed from Phase 0. Stage only the Rust changes and commit:
 
 ```text
 Resync with mempalace-py @ <short-hash>
 
 Ports: <bullet list of what was ported>
 ```
+
+If there are no Rust changes to port, no additional commit is needed — Phase 0 is the only commit.
 
 ## Key file mappings (Python → Rust)
 
