@@ -87,7 +87,7 @@ src/
   main.rs              Entry point: clap dispatch → open_palace() → handler
   db.rs                open_db(), query_all() helpers over turso::Connection
   schema.rs            DDL: 6 tables + indexes, ensure_schema()
-  config.rs            MempalaceConfig (~/.mempalace/config.json) + ProjectConfig (mempalace.yaml)
+  config.rs            MempalaceConfig ($XDG_DATA_HOME/mempalace/config.json) + ProjectConfig (mempalace.yaml)
   error.rs             thiserror Error enum
 
   cli/                 One file per subcommand

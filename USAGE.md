@@ -21,8 +21,8 @@ for efficient LLM context loading. The **knowledge graph** stores temporal facts
 
 ### 1. Identity file
 
-Write `~/.mempalace/identity.txt` — this is L0, loaded every session (~100 tokens).
-Never auto-generated; write it yourself.
+Write `$XDG_DATA_HOME/mempalace/identity.txt` (default: `~/.local/share/mempalace/identity.txt`)
+— this is L0, loaded every session (~100 tokens). Never auto-generated; write it yourself.
 
 ```text
 I am Atlas, assistant to Alice.
@@ -33,11 +33,12 @@ Traits: direct, memory-first, no summaries.
 
 ### 2. Global config
 
-`~/.mempalace/config.json` is created automatically on first run.
+`$XDG_DATA_HOME/mempalace/config.json` (default: `~/.local/share/mempalace/config.json`) is
+created automatically on first run.
 
 ```json
 {
-  "palace_path": "~/.mempalace/palace.db",
+  "palace_path": "~/.local/share/mempalace/palace.db",
   "collection_name": "mempalace_drawers",
   "people_map": {}
 }
@@ -49,10 +50,11 @@ Traits: direct, memory-first, no summaries.
 | `collection_name` | Legacy field (unused; kept for config compatibility with mempalace-py) |
 | `people_map`      | Optional name → code mappings for AAAK compression                     |
 
-Override the path without editing the file:
+Override the data directory or just the DB path without editing the file:
 
 ```bash
-export MEMPALACE_PALACE_PATH=/path/to/palace.db
+export MEMPALACE_DIR=/path/to/mempalace           # overrides the entire data directory
+export MEMPALACE_PALACE_PATH=/path/to/palace.db   # overrides only the database path
 ```
 
 ---
@@ -188,7 +190,7 @@ mempalace wake-up
 mempalace wake-up --wing wing_myproject
 ```
 
-- **L0 (identity):** Contents of `~/.mempalace/identity.txt` (~100 tokens).
+- **L0 (identity):** Contents of `$XDG_DATA_HOME/mempalace/identity.txt` (~100 tokens).
 - **L1 (essential story):** The 15 most-recent drawers grouped by room, capped at 3200 characters.
 
 Paste the output into a local model's system prompt, or let the MCP server handle it automatically.
@@ -356,7 +358,7 @@ Diary entries live in `wing_{agent_name}/diary`. Use AAAK format for compact ent
 
 ## Database Schema
 
-Single SQLite file at `~/.mempalace/palace.db`:
+Single SQLite file at `$XDG_DATA_HOME/mempalace/palace.db` (default: `~/.local/share/mempalace/palace.db`):
 
 | Table              | Purpose                                                                                        |
 | ------------------ | ---------------------------------------------------------------------------------------------- |
