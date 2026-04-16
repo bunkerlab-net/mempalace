@@ -65,8 +65,7 @@ mempalace init ~/my-project
 # 2. Mine project files into the palace
 mempalace mine ~/my-project
 
-# 3. Mine conversation transcripts (split Claude Code mega-files first)
-mempalace split ~/.claude/projects/
+# 3. Mine conversation transcripts
 mempalace mine ~/.claude/projects/ --mode convos
 
 # 4. Search
