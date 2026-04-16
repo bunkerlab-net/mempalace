@@ -255,10 +255,7 @@ fn maybe_migrate_inner(source: &Path, destination: &Path) -> Result<()> {
     }
 
     // Remove the legacy directory if it is now empty.
-    if std::fs::read_dir(source)
-        .map(|mut entries| entries.next().is_none())
-        .unwrap_or(false)
-    {
+    if std::fs::read_dir(source).is_ok_and(|mut entries| entries.next().is_none()) {
         let _ = std::fs::remove_dir(source);
     }
 
@@ -293,10 +290,7 @@ fn maybe_migrate_move_dir(source: &Path, destination: &Path) -> Result<()> {
     }
 
     // Remove source dir if now empty.
-    if std::fs::read_dir(source)
-        .map(|mut entries| entries.next().is_none())
-        .unwrap_or(false)
-    {
+    if std::fs::read_dir(source).is_ok_and(|mut entries| entries.next().is_none()) {
         let _ = std::fs::remove_dir(source);
     }
 
@@ -341,8 +335,7 @@ fn maybe_migrate_patch_config(config_path: &Path, legacy_db: &Path, new_db: &Pat
         // Pair assertion: patched value must round-trip correctly.
         debug_assert!(
             serde_json::from_str::<MempalaceConfig>(&patched)
-                .map(|c| c.palace_path.as_path() == new_db)
-                .unwrap_or(false)
+                .is_ok_and(|c| c.palace_path.as_path() == new_db)
         );
     }
 

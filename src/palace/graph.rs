@@ -247,7 +247,7 @@ pub async fn find_tunnels(
         .collect();
 
     // Surface the busiest shared rooms first — they are the most useful bridges.
-    tunnels.sort_by(|a, b| b.count.cmp(&a.count));
+    tunnels.sort_by_key(|b| std::cmp::Reverse(b.count));
     let truncated = tunnels.len() > GRAPH_RESULT_CAP;
     tunnels.truncate(GRAPH_RESULT_CAP);
 
@@ -275,7 +275,7 @@ pub async fn graph_stats(connection: &Connection) -> Result<GraphStats> {
         .filter(|n| n.wings.len() >= 2)
         .cloned()
         .collect();
-    top_tunnels.sort_by(|a, b| b.wings.len().cmp(&a.wings.len()));
+    top_tunnels.sort_by_key(|b| std::cmp::Reverse(b.wings.len()));
     top_tunnels.truncate(10);
 
     Ok(GraphStats {

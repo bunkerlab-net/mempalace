@@ -220,7 +220,7 @@ fn mine_print_summary(
     println!("\n  By room:");
 
     let mut sorted_rooms: Vec<_> = room_counts.iter().collect();
-    sorted_rooms.sort_by(|a, b| b.1.cmp(a.1));
+    sorted_rooms.sort_by_key(|b| std::cmp::Reverse(b.1));
     for (room, count) in sorted_rooms {
         println!("    {room:20} {count} files");
     }
