@@ -1,4 +1,5 @@
 name: Clean PR Cache
+
 on:
   pull_request:
     types:
@@ -19,7 +20,7 @@ jobs:
       - name: Cleanup
         run: |-
           echo "Fetching list of cache key"
-          cacheKeysForPR=$(gh cache list --ref "$BRANCH" --limit 100 --json id --jq '.[].id')
+          mapfile -t cacheKeysForPR < <(gh cache list --ref "$BRANCH" --limit 100 --json id --jq '.[].id')
 
           ## Setting this to not fail the workflow while deleting cache keys.
           set +e
