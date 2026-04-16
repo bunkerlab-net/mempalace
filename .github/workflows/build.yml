@@ -7,6 +7,7 @@ permissions: {}
 
 jobs:
   run:
+    name: ${{ matrix.runs-on }}
     runs-on: ${{ matrix.runs-on }}
 
     permissions:
