@@ -12,11 +12,14 @@ use crate::error::Result;
 /// omitted (same engine as `mine --no-gitignore`). Depth is fixed at 1 to match
 /// the original `fs::read_dir` behaviour — sub-directories are never traversed.
 fn split_collect_txt_files(directory: &Path, respect_gitignore: bool) -> Result<Vec<PathBuf>> {
-    assert!(
-        directory.is_dir(),
-        "split_collect_txt_files: directory must exist: {}",
-        directory.display()
-    );
+    // Operating condition: filesystem state can change between the caller's
+    // is_dir() check and this call (TOCTOU) — return Err rather than panic.
+    if !directory.is_dir() {
+        return Err(crate::error::Error::Other(format!(
+            "split_collect_txt_files: '{}' is not an existing directory",
+            directory.display()
+        )));
+    }
 
     let mut paths: Vec<PathBuf> = Vec::new();
 
@@ -40,6 +43,11 @@ fn split_collect_txt_files(directory: &Path, respect_gitignore: bool) -> Result<
     } else {
         for entry in fs::read_dir(directory)? {
             let path = entry?.path();
+            // Guard matches the respect_gitignore branch: skip non-files so
+            // that a directory named "foo.txt" is never collected.
+            if !path.is_file() {
+                continue;
+            }
             if path.extension().and_then(|e| e.to_str()) == Some("txt") {
                 paths.push(path);
             }
@@ -527,13 +535,16 @@ mod tests {
     #[test]
     fn split_collect_txt_files_no_gitignore_returns_all_top_level() {
         // Verify that when respect_gitignore=false, all top-level .txt files are
-        // returned regardless of .gitignore, and nested .txt files are excluded.
+        // returned regardless of .gitignore, non-files with a .txt name are excluded,
+        // and nested .txt files are excluded.
         let directory = tempfile::tempdir().expect("create temp dir");
         fs::write(directory.path().join("a.txt"), "content a").expect("write a.txt");
         fs::write(directory.path().join("b.txt"), "content b").expect("write b.txt");
         fs::write(directory.path().join("notes.md"), "# notes").expect("write notes.md");
         // .gitignore excludes b.txt — must be ignored when respect_gitignore=false.
         fs::write(directory.path().join(".gitignore"), "b.txt\n").expect("write .gitignore");
+        // A directory with a .txt extension — is_file() guard must exclude it.
+        fs::create_dir(directory.path().join("fake.txt")).expect("create fake.txt dir");
         // Subdirectory with a .txt — depth=1 must exclude it in both modes.
         let subdirectory = directory.path().join("sub");
         fs::create_dir(&subdirectory).expect("create sub");
@@ -552,6 +563,10 @@ mod tests {
         assert!(
             names.contains(&"b.txt".to_owned()),
             "b.txt must be present when gitignore not respected"
+        );
+        assert!(
+            !names.contains(&"fake.txt".to_owned()),
+            "directory named fake.txt must be excluded by is_file() guard"
         );
         assert!(
             !names.contains(&"nested.txt".to_owned()),
