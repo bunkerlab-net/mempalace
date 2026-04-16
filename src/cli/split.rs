@@ -521,4 +521,90 @@ mod tests {
         );
         assert!(!result.is_empty(), "subject must not be empty");
     }
+
+    // --- split_collect_txt_files ---
+
+    #[test]
+    fn split_collect_txt_files_no_gitignore_returns_all_top_level() {
+        // Verify that when respect_gitignore=false, all top-level .txt files are
+        // returned regardless of .gitignore, and nested .txt files are excluded.
+        let directory = tempfile::tempdir().expect("create temp dir");
+        fs::write(directory.path().join("a.txt"), "content a").expect("write a.txt");
+        fs::write(directory.path().join("b.txt"), "content b").expect("write b.txt");
+        fs::write(directory.path().join("notes.md"), "# notes").expect("write notes.md");
+        // .gitignore excludes b.txt — must be ignored when respect_gitignore=false.
+        fs::write(directory.path().join(".gitignore"), "b.txt\n").expect("write .gitignore");
+        // Subdirectory with a .txt — depth=1 must exclude it in both modes.
+        let subdirectory = directory.path().join("sub");
+        fs::create_dir(&subdirectory).expect("create sub");
+        fs::write(subdirectory.join("nested.txt"), "nested").expect("write nested.txt");
+
+        let result =
+            split_collect_txt_files(directory.path(), false).expect("collect must succeed");
+        let mut names: Vec<String> = result
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .collect();
+        names.sort();
+
+        assert_eq!(names.len(), 2, "both top-level .txt files must be returned");
+        assert!(names.contains(&"a.txt".to_owned()), "a.txt must be present");
+        assert!(
+            names.contains(&"b.txt".to_owned()),
+            "b.txt must be present when gitignore not respected"
+        );
+        assert!(
+            !names.contains(&"nested.txt".to_owned()),
+            "nested.txt in subdirectory must be excluded"
+        );
+    }
+
+    #[test]
+    fn split_collect_txt_files_respect_gitignore_filters_and_caps_depth() {
+        // Verify that when respect_gitignore=true, .gitignore-excluded files are
+        // omitted and nested files beyond depth=1 are excluded.
+        let directory = tempfile::tempdir().expect("create temp dir");
+        // The ignore crate only honours .gitignore when the directory is a git repo.
+        let git_init = std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(directory.path())
+            .output()
+            .expect("git init must run");
+        assert!(
+            git_init.status.success(),
+            "git init failed: {:?}",
+            String::from_utf8_lossy(&git_init.stderr)
+        );
+        fs::write(directory.path().join("a.txt"), "content a").expect("write a.txt");
+        fs::write(directory.path().join("b.txt"), "content b").expect("write b.txt");
+        // .gitignore excludes b.txt.
+        fs::write(directory.path().join(".gitignore"), "b.txt\n").expect("write .gitignore");
+        // Subdirectory with a .txt — depth limit must exclude it.
+        let subdirectory = directory.path().join("sub");
+        fs::create_dir(&subdirectory).expect("create sub");
+        fs::write(subdirectory.join("nested.txt"), "nested").expect("write nested.txt");
+
+        let result = split_collect_txt_files(directory.path(), true).expect("collect must succeed");
+        let mut names: Vec<String> = result
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .collect();
+        names.sort();
+
+        // Only a.txt survives: b.txt excluded by .gitignore, nested.txt by depth.
+        assert_eq!(
+            names.len(),
+            1,
+            "only the non-ignored top-level .txt must be returned"
+        );
+        assert!(names.contains(&"a.txt".to_owned()), "a.txt must be present");
+        assert!(
+            !names.contains(&"b.txt".to_owned()),
+            "b.txt must be excluded by .gitignore"
+        );
+        assert!(
+            !names.contains(&"nested.txt".to_owned()),
+            "nested.txt in subdirectory must be excluded"
+        );
+    }
 }
