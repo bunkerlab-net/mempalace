@@ -31,7 +31,10 @@ fn split_collect_txt_files(directory: &Path, respect_gitignore: bool) -> Result<
             .hidden(false)
             .max_depth(Some(1))
             .build();
-        for entry in walker.flatten() {
+        for entry in walker {
+            // Propagate IO/permission errors rather than silently dropping them,
+            // consistent with how the respect_gitignore=false branch uses `entry?`.
+            let entry = entry.map_err(|e| crate::error::Error::Other(e.to_string()))?;
             if !entry.file_type().is_some_and(|ft| ft.is_file()) {
                 continue;
             }
