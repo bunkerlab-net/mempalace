@@ -57,6 +57,13 @@ export MEMPALACE_DIR=/path/to/mempalace           # overrides the entire data di
 export MEMPALACE_PALACE_PATH=/path/to/palace.db   # overrides only the database path
 ```
 
+**Legacy migration:** On first run after upgrading from an older install, the binary
+automatically moves `~/.mempalace/` to the XDG location — `config.json`,
+`identity.txt`, `palace.db` (plus WAL files), and `wal/`. If `palace_path` in
+`config.json` still points to the old default it is patched in place. The legacy
+directory is removed if empty after migration. Migration is skipped when
+`MEMPALACE_DIR` is set.
+
 ---
 
 ## Typical Workflow
