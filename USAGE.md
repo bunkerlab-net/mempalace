@@ -75,8 +75,7 @@ mempalace init ~/my-project
 # 2. Mine project source files
 mempalace mine ~/my-project
 
-# 3. Mine conversation transcripts (split Claude Code mega-files first)
-mempalace split ~/.claude/projects/
+# 3. Mine conversation transcripts
 mempalace mine ~/.claude/projects/ --mode convos
 
 # 4. Connect to Claude Code as an MCP server
@@ -154,9 +153,13 @@ a file to re-mine it.
 
 ### `mempalace split <dir>`
 
-Splits concatenated transcript mega-files into per-session files.
-**Run this before `mine --mode convos`** when the source is Claude Code JSONL — Claude
-Code appends all sessions into one growing file per project.
+Splits plain-text terminal capture files that contain multiple concatenated sessions
+into individual per-session files. Useful when you've recorded your terminal with
+`script` or a similar tool and ended up with one large `.txt` file spanning many sessions.
+
+**Not needed for Claude Code's native JSONL format** — each session is already stored
+as its own UUID-named file in `~/.claude/projects/<project>/`. Use
+`mine --mode convos` directly on that directory.
 
 ```bash
 mempalace split ~/transcripts
