@@ -46,9 +46,9 @@ regardless of whether Rust changes follow.
 
 ### Phase 1 — Discover what changed in Python
 
-With the submodule advanced, diff to find the old and new commit hashes.
+Use `<old>` (from Phase 0 step 1) and `<new>` (from Phase 0 step 3) to diff the Python changes.
 
-1. List all new commits (using the old/new hashes from Phase 0):
+1. List all new commits:
 
    ```bash
    git -C ./mempalace-py log --oneline <old>..<new>
