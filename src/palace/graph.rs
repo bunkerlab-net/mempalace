@@ -247,7 +247,7 @@ pub async fn find_tunnels(
         .collect();
 
     // Surface the busiest shared rooms first — they are the most useful bridges.
-    tunnels.sort_by(|a, b| b.count.cmp(&a.count));
+    tunnels.sort_by_key(|b| std::cmp::Reverse(b.count));
     let truncated = tunnels.len() > GRAPH_RESULT_CAP;
     tunnels.truncate(GRAPH_RESULT_CAP);
 

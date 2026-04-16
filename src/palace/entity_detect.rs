@@ -86,7 +86,7 @@ pub fn detect_entities(file_paths: &[&Path], max_files: usize) -> DetectionResul
     let mut uncertain = Vec::new();
 
     let mut sorted_candidates: Vec<_> = candidates.into_iter().collect();
-    sorted_candidates.sort_by(|a, b| b.1.cmp(&a.1));
+    sorted_candidates.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     for (name, frequency) in sorted_candidates {
         let scores = score_entity(&name, &all_text, &all_lines);
@@ -109,7 +109,7 @@ pub fn detect_entities(file_paths: &[&Path], max_files: usize) -> DetectionResul
             .partial_cmp(&a.confidence)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    uncertain.sort_by(|a, b| b.frequency.cmp(&a.frequency));
+    uncertain.sort_by_key(|b| std::cmp::Reverse(b.frequency));
 
     people.truncate(15);
     projects.truncate(10);

@@ -135,7 +135,7 @@ fn extract_key_sentence(text: &str) -> String {
         })
         .collect();
 
-    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored.sort_by_key(|b| std::cmp::Reverse(b.0));
     let best = scored[0].1;
 
     if best.len() > 55 {
