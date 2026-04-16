@@ -64,7 +64,7 @@ pub fn extract_topics(text: &str, max_topics: usize) -> Vec<String> {
     }
 
     let mut ranked: Vec<_> = freq.into_iter().collect();
-    ranked.sort_by(|a, b| b.1.cmp(&a.1));
+    ranked.sort_by_key(|b| std::cmp::Reverse(b.1));
     ranked
         .into_iter()
         .take(max_topics)

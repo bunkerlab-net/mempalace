@@ -275,7 +275,7 @@ pub async fn graph_stats(connection: &Connection) -> Result<GraphStats> {
         .filter(|n| n.wings.len() >= 2)
         .cloned()
         .collect();
-    top_tunnels.sort_by(|a, b| b.wings.len().cmp(&a.wings.len()));
+    top_tunnels.sort_by_key(|b| std::cmp::Reverse(b.wings.len()));
     top_tunnels.truncate(10);
 
     Ok(GraphStats {
