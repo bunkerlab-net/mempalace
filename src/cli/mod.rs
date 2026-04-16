@@ -33,6 +33,10 @@ pub enum Command {
         /// Auto-accept detected rooms without prompting (non-interactive / CI mode)
         #[arg(long, short = 'y')]
         yes: bool,
+
+        /// Disable .gitignore filtering (include all files regardless of gitignore rules)
+        #[arg(long)]
+        no_gitignore: bool,
     },
 
     /// Mine files into the palace
@@ -125,6 +129,10 @@ pub enum Command {
         /// Minimum sessions to trigger split
         #[arg(long, default_value = "2")]
         min_sessions: usize,
+
+        /// Disable .gitignore filtering (include all files regardless of gitignore rules)
+        #[arg(long)]
+        no_gitignore: bool,
     },
 
     /// Show palace overview and stats

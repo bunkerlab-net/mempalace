@@ -45,15 +45,6 @@ const SKIP_FILES: &[&str] = &[
 ];
 
 /// Scan a project directory for all readable files.
-///
-/// When `respect_gitignore` is `true`, `.gitignore` rules are applied via the
-/// `ignore` crate (same engine as ripgrep). `SKIP_DIRS` and `SKIP_FILES` are always
-/// applied regardless.
-pub fn scan_project(project_dir: &Path) -> Vec<PathBuf> {
-    scan_project_with_opts(project_dir, true)
-}
-
-/// Scan with explicit gitignore control.
 pub fn scan_project_with_opts(project_dir: &Path, respect_gitignore: bool) -> Vec<PathBuf> {
     assert!(
         project_dir.is_dir(),
@@ -429,7 +420,7 @@ mod tests {
         std::fs::write(dir.path().join("notes.txt"), "hello world")
             .expect("write .txt should succeed");
 
-        let files = scan_project(dir.path());
+        let files = scan_project_with_opts(dir.path(), true);
         let names: Vec<String> = files
             .iter()
             .map(|p| {
@@ -477,7 +468,7 @@ mod tests {
         std::fs::write(dir.path().join("ignored.rs"), "// ignored")
             .expect("write ignored.rs should succeed");
 
-        let files = scan_project(dir.path());
+        let files = scan_project_with_opts(dir.path(), true);
         let names: Vec<String> = files
             .iter()
             .map(|p| {
@@ -555,7 +546,7 @@ mod tests {
         std::fs::write(dir.path().join("index.js"), "console.log('main')")
             .expect("write index.js should succeed");
 
-        let files = scan_project(dir.path());
+        let files = scan_project_with_opts(dir.path(), true);
         let names: Vec<String> = files
             .iter()
             .map(|p| {
@@ -586,7 +577,7 @@ mod tests {
         std::fs::write(dir.path().join("code.rs"), "fn main() {}")
             .expect("write .rs should succeed");
 
-        let files = scan_project(dir.path());
+        let files = scan_project_with_opts(dir.path(), true);
         let names: Vec<String> = files
             .iter()
             .map(|p| {

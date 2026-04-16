@@ -3,7 +3,7 @@
 
 use std::fs;
 
-use mempalace::palace::miner::{MineParams, scan_project};
+use mempalace::palace::miner::{MineParams, scan_project_with_opts};
 use mempalace::palace::search::search_memories;
 use mempalace::test_helpers::test_db;
 
@@ -27,7 +27,7 @@ async fn scan_and_mine_creates_searchable_drawers() {
     .expect("write design.md should succeed");
 
     // Scan should find both files.
-    let files = scan_project(directory.path());
+    let files = scan_project_with_opts(directory.path(), true);
     assert!(
         files.len() >= 2,
         "scan should find at least 2 readable files"
@@ -164,7 +164,7 @@ fn scan_respects_gitignore() {
     )
     .expect("write secret.rs should succeed");
 
-    let files = scan_project(directory.path());
+    let files = scan_project_with_opts(directory.path(), true);
     let names: Vec<String> = files
         .iter()
         .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))

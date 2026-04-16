@@ -5,7 +5,7 @@ use crate::config::ProjectConfig;
 use crate::error::Result;
 use crate::palace::room_detect::detect_rooms_from_folders;
 
-pub fn run(directory: &Path, yes: bool) -> Result<()> {
+pub fn run(directory: &Path, yes: bool, no_gitignore: bool) -> Result<()> {
     let directory = directory.canonicalize().map_err(|e| {
         crate::error::Error::Other(format!("directory not found: {}: {e}", directory.display()))
     })?;
@@ -19,8 +19,8 @@ pub fn run(directory: &Path, yes: bool) -> Result<()> {
 
     let rooms = detect_rooms_from_folders(&directory);
 
-    // Count files for display
-    let file_count = crate::palace::miner::scan_project(&directory).len();
+    // Count files for display; honour the same gitignore flag used by `mine`.
+    let file_count = crate::palace::miner::scan_project_with_opts(&directory, !no_gitignore).len();
 
     println!("\n=======================================================");
     println!("  MemPalace Init");

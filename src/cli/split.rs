@@ -6,6 +6,49 @@ use regex::Regex;
 
 use crate::error::Result;
 
+/// Collect `.txt` file paths from the top level of `directory`.
+///
+/// When `respect_gitignore` is `true`, files excluded by `.gitignore` rules are
+/// omitted (same engine as `mine --no-gitignore`). Depth is fixed at 1 to match
+/// the original `fs::read_dir` behaviour — sub-directories are never traversed.
+fn split_collect_txt_files(directory: &Path, respect_gitignore: bool) -> Result<Vec<PathBuf>> {
+    assert!(
+        directory.is_dir(),
+        "split_collect_txt_files: directory must exist: {}",
+        directory.display()
+    );
+
+    let mut paths: Vec<PathBuf> = Vec::new();
+
+    if respect_gitignore {
+        let walker = ignore::WalkBuilder::new(directory)
+            .git_ignore(true)
+            .git_global(true)
+            .git_exclude(true)
+            .hidden(false)
+            .max_depth(Some(1))
+            .build();
+        for entry in walker.flatten() {
+            if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+                continue;
+            }
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("txt") {
+                paths.push(path.to_path_buf());
+            }
+        }
+    } else {
+        for entry in fs::read_dir(directory)? {
+            let path = entry?.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("txt") {
+                paths.push(path);
+            }
+        }
+    }
+
+    Ok(paths)
+}
+
 // Regex statics are compile-time literals; .expect() cannot fail at runtime.
 #[allow(clippy::expect_used)]
 // Matches the timestamp header line emitted by Claude Code session logs.
@@ -268,6 +311,7 @@ pub fn run(
     output_dir: Option<&Path>,
     dry_run: bool,
     min_sessions: usize,
+    respect_gitignore: bool,
 ) -> Result<()> {
     if !directory.is_dir() {
         return Err(crate::error::Error::Other(format!(
@@ -282,13 +326,7 @@ pub fn run(
     }
     let mut mega_files: Vec<(PathBuf, usize)> = Vec::new();
 
-    for entry in fs::read_dir(directory)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("txt") {
-            continue;
-        }
-
+    for path in split_collect_txt_files(directory, respect_gitignore)? {
         if fs::metadata(&path).is_ok_and(|m| m.len() > MAX_SPLIT_FILE_SIZE) {
             println!("  SKIP: {} exceeds 500 MB limit", path.display());
             continue;

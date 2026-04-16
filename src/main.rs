@@ -102,8 +102,12 @@ async fn run(cli: Cli) -> error::Result<()> {
             run_status().await?;
         }
 
-        Command::Init { directory, yes } => {
-            cli::init::run(&directory, yes)?;
+        Command::Init {
+            directory,
+            yes,
+            no_gitignore,
+        } => {
+            cli::init::run(&directory, yes, no_gitignore)?;
         }
 
         Command::Mine {
@@ -164,11 +168,18 @@ async fn run(cli: Cli) -> error::Result<()> {
             output_dir,
             dry_run,
             min_sessions,
+            no_gitignore,
         } => {
             // Expand ~ so that `mempalace split ~/convos` works as expected.
             let directory = expand_tilde(&directory);
             let output_dir = output_dir.as_deref().map(expand_tilde);
-            cli::split::run(&directory, output_dir.as_deref(), dry_run, min_sessions)?;
+            cli::split::run(
+                &directory,
+                output_dir.as_deref(),
+                dry_run,
+                min_sessions,
+                !no_gitignore,
+            )?;
         }
 
         Command::Repair => {
