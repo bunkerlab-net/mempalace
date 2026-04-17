@@ -381,7 +381,13 @@ fn mine_load_config(project_dir: &Path, override_wing: Option<&str>) -> Result<P
     //
     // Wing resolution order: explicit --wing override, then directory basename.
     let wing_name = if let Some(wing) = override_wing {
-        wing.to_string()
+        let trimmed = wing.trim().to_string();
+        if trimmed.is_empty() {
+            return Err(crate::error::Error::Other(
+                "--wing override must not be empty or whitespace-only".to_string(),
+            ));
+        }
+        trimmed
     } else {
         let inferred = project_dir
             .file_name()
@@ -715,6 +721,35 @@ mod tests {
             .expect("override_wing must prevent error on root path");
         assert_eq!(config.wing, "myproject");
         assert_eq!(config.rooms[0].name, "general");
+    }
+
+    #[test]
+    fn mine_load_config_override_wing_trims_whitespace() {
+        // Leading/trailing whitespace in --wing must be stripped so that
+        // `mempalace mine . --wing " myproject "` yields wing="myproject".
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let config = mine_load_config(dir.path(), Some("  myproject  "))
+            .expect("trimmed override must succeed");
+        assert_eq!(config.wing, "myproject");
+    }
+
+    #[test]
+    fn mine_load_config_override_wing_rejects_empty() {
+        // An empty --wing override must be an error, not a blank wing name.
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let result = mine_load_config(dir.path(), Some(""));
+        assert!(result.is_err(), "empty override must produce an error");
+    }
+
+    #[test]
+    fn mine_load_config_override_wing_rejects_whitespace_only() {
+        // A whitespace-only --wing override must be an error, not a blank wing name.
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let result = mine_load_config(dir.path(), Some("   "));
+        assert!(
+            result.is_err(),
+            "whitespace-only override must produce an error"
+        );
     }
 
     #[test]

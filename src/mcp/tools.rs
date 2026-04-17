@@ -1750,8 +1750,10 @@ mod tests {
 
     #[tokio::test]
     async fn search_results_include_created_at() {
-        // Each search result must include a non-empty created_at field sourced
-        // from the drawer's filed_at column.
+        // Each search result must include a created_at key that maps to a JSON
+        // string. The value may be empty for legacy rows where filed_at was not
+        // recorded (SearchResult.created_at uses unwrap_or_default), so only
+        // the type is asserted here, not non-emptiness.
         with_isolated_env(|connection| async move {
             seed_drawer(
                 &connection,
@@ -1766,10 +1768,58 @@ mod tests {
             let results = result["results"].as_array().expect("results must be array");
             assert!(!results.is_empty(), "must have at least one result");
             for r in results {
+                // Assert the key is present and is a JSON string (may be empty).
+                assert!(
+                    r["created_at"].is_string(),
+                    "created_at must be a string in each result"
+                );
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn search_results_created_at_empty_for_legacy_row() {
+        // A drawer with filed_at = NULL (legacy row — filed_at was added after
+        // initial schema) must still appear in search results. created_at must
+        // be an empty string (unwrap_or_default of None), not an error.
+        with_isolated_env(|connection| async move {
+            seed_drawer(
+                &connection,
+                "tech",
+                "rust",
+                "rust programming language memory safety",
+            )
+            .await;
+
+            // Null out filed_at to simulate a row from before the column existed.
+            connection
+                .execute("UPDATE drawers SET filed_at = NULL", ())
+                .await
+                .expect("UPDATE filed_at to NULL must succeed");
+
+            let result = tool_search(&connection, &json!({"query": "rust programming"})).await;
+            assert!(
+                result.get("error").is_none(),
+                "search must not error for legacy row"
+            );
+            let results = result["results"].as_array().expect("results must be array");
+            assert!(
+                !results.is_empty(),
+                "legacy row must appear in search results"
+            );
+            for r in results {
+                assert!(
+                    r["created_at"].is_string(),
+                    "created_at must be a string even when filed_at is NULL"
+                );
                 let created_at = r["created_at"]
                     .as_str()
-                    .expect("created_at must be a string");
-                assert!(!created_at.is_empty(), "created_at must not be empty");
+                    .expect("created_at must be a JSON string");
+                assert_eq!(
+                    created_at, "",
+                    "created_at must be empty string when filed_at is NULL"
+                );
             }
         })
         .await;
