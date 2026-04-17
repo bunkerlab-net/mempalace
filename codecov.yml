@@ -9,5 +9,5 @@ coverage:
         target: 90%
 
 comment:
-  layout: "header, diff"
+  layout: "condensed_header, condensed_files, condensed_footer"
   require_changes: true
