@@ -301,6 +301,12 @@ async fn app_run_wakeup_with_palace() {
         },
     )
     .await;
+
+    // open_palace() must have created the database file as a side effect.
+    assert!(
+        palace_db_path.exists(),
+        "palace.db must exist after wakeup creates it via open_palace"
+    );
 }
 
 #[tokio::test]
@@ -340,6 +346,12 @@ async fn app_run_compress_with_palace() {
         },
     )
     .await;
+
+    // open_palace() must have created the database file as a side effect.
+    assert!(
+        palace_db_path.exists(),
+        "palace.db must exist after compress creates it via open_palace"
+    );
 }
 
 #[tokio::test]

@@ -1358,9 +1358,9 @@ mod tests {
             limited_file_count, 1,
             "limit=1 must process exactly one source file"
         );
-        assert!(
-            limited_file_count <= unlimited_file_count,
-            "limited run must not process more files than unlimited run"
+        assert_eq!(
+            unlimited_file_count, 2,
+            "unlimited run must process both source files (a.txt and b.txt)"
         );
     }
 

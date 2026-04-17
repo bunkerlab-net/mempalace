@@ -378,7 +378,6 @@ mod tests {
             result.is_empty(),
             "text with only short fragments must produce empty key sentence"
         );
-        assert_eq!(result.len(), 0, "empty key sentence must have zero length");
     }
 
     #[test]

@@ -154,6 +154,12 @@ fn extract_content(value: &serde_json::Value) -> String {
 mod tests {
     use super::*;
 
+    /// Parse a JSON string literal into a `serde_json::Value`.
+    /// Reduces boilerplate across tests that build JSON fixtures inline.
+    fn json(source: &str) -> serde_json::Value {
+        serde_json::from_str(source).expect("test JSON fixture must be valid JSON")
+    }
+
     #[test]
     fn parse_array_format() {
         let data: serde_json::Value = serde_json::from_str(
@@ -271,10 +277,9 @@ mod tests {
     fn extract_content_array_with_plain_strings() {
         // Content arrays can contain plain strings (not wrapped in {type: "text"}).
         // This exercises the `item.as_str()` branch inside extract_content.
-        let data: serde_json::Value = serde_json::from_str(
+        let data = json(
             r#"[{"role":"user","content":["plain string one","plain string two"]},{"role":"assistant","content":"reply"}]"#,
-        )
-        .expect("failed to parse JSON fixture for plain string content array test");
+        );
         let result = try_parse(&data).expect("must parse content array with plain strings");
         assert!(
             result.contains("plain string one"),
@@ -292,10 +297,8 @@ mod tests {
         // returns an empty string. The message is skipped if the text fallback is also absent.
         // With only one valid message (the assistant), try_parse returns None because the
         // minimum threshold is 2 messages.
-        let data: serde_json::Value = serde_json::from_str(
-            r#"[{"role":"user","content":42},{"role":"assistant","content":"only valid"}]"#,
-        )
-        .expect("failed to parse JSON fixture for non-string content test");
+        let data =
+            json(r#"[{"role":"user","content":42},{"role":"assistant","content":"only valid"}]"#);
         // User message has numeric content (empty after extraction), only assistant
         // is valid — fewer than 2 messages means None.
         let result = try_parse(&data);
@@ -309,10 +312,7 @@ mod tests {
     fn privacy_export_drops_short_conversations() {
         // A privacy export conversation with fewer than 2 messages must be silently
         // dropped. If all conversations are too short, try_parse returns None.
-        let data: serde_json::Value = serde_json::from_str(
-            r#"[{"chat_messages":[{"role":"user","content":"solo question"}]}]"#,
-        )
-        .expect("failed to parse JSON fixture for short conversation test");
+        let data = json(r#"[{"chat_messages":[{"role":"user","content":"solo question"}]}]"#);
         let result = try_parse(&data);
         assert!(
             result.is_none(),
@@ -324,13 +324,12 @@ mod tests {
     fn privacy_export_mixed_short_and_full_conversations() {
         // A privacy export with one short conversation (dropped) and one full
         // conversation (kept) must return only the full conversation's transcript.
-        let data: serde_json::Value = serde_json::from_str(
+        let data = json(
             r#"[
-                {"chat_messages":[{"role":"user","content":"orphan question"}]},
-                {"chat_messages":[{"role":"user","content":"full question"},{"role":"assistant","content":"full answer"}]}
-            ]"#,
-        )
-        .expect("failed to parse JSON fixture for mixed conversation test");
+            {"chat_messages":[{"role":"user","content":"orphan question"}]},
+            {"chat_messages":[{"role":"user","content":"full question"},{"role":"assistant","content":"full answer"}]}
+        ]"#,
+        );
         let result = try_parse(&data).expect("must parse when at least one conversation is valid");
         // The short conversation's content must not appear.
         assert!(
@@ -350,10 +349,9 @@ mod tests {
     #[test]
     fn messages_with_empty_text_are_skipped() {
         // Messages where both content and text fallback are empty must be skipped.
-        let data: serde_json::Value = serde_json::from_str(
+        let data = json(
             r#"[{"role":"user","content":""},{"role":"assistant","content":""},{"role":"user","content":"actual question"},{"role":"assistant","content":"actual answer"}]"#,
-        )
-        .expect("failed to parse JSON fixture for empty text test");
+        );
         let result = try_parse(&data).expect("must parse when enough non-empty messages exist");
         assert!(
             result.contains("> actual question"),
@@ -369,10 +367,9 @@ mod tests {
     fn non_object_items_in_array_are_skipped() {
         // Non-object items (strings, numbers, nulls) in the message array must be
         // silently skipped without breaking parsing.
-        let data: serde_json::Value = serde_json::from_str(
+        let data = json(
             r#"["not an object", null, 42, {"role":"user","content":"real user"}, {"role":"assistant","content":"real assistant"}]"#,
-        )
-        .expect("failed to parse JSON fixture for non-object items test");
+        );
         let result = try_parse(&data).expect("must parse despite non-object items in array");
         assert!(
             result.contains("> real user"),
@@ -388,10 +385,8 @@ mod tests {
     fn returns_none_for_non_object_non_array_data() {
         // When the top-level JSON value is neither an object nor an array (e.g. a
         // string or number), try_parse must return None.
-        let data_string: serde_json::Value = serde_json::from_str(r#""just a string""#)
-            .expect("failed to parse JSON string fixture");
-        let data_number: serde_json::Value =
-            serde_json::from_str("42").expect("failed to parse JSON number fixture");
+        let data_string = json(r#""just a string""#);
+        let data_number = json("42");
         assert!(
             try_parse(&data_string).is_none(),
             "string value must return None"

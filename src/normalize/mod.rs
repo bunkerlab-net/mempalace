@@ -238,6 +238,12 @@ mod tests {
                 r#"{"weather": "sunny", "temperature": 72, "units": "fahrenheit"}"#,
                 "weather",
             ),
+            // (non-.json extension — triggers content-sniffing via `content.starts_with('{')`)
+            (
+                "config.txt",
+                r#"{"sniffed_key": "detected by content start", "value": true}"#,
+                "sniffed_key",
+            ),
         ];
         for &(filename, json_content, expected_key) in cases {
             let filepath = temp_directory.path().join(filename);
@@ -258,13 +264,19 @@ mod tests {
 
     #[test]
     fn normalize_two_quote_lines_do_not_short_circuit() {
-        // Fewer than 3 lines starting with > must not short-circuit; JSON parsing is attempted.
+        // Fewer than 3 lines starting with > must not short-circuit to the
+        // transcript passthrough; format detection runs but finds no match,
+        // so the raw content is returned unchanged (after trim).
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         let path = temp_dir.path().join("two_quotes.txt");
-        // Only two > lines — below the threshold of 3 — so format detection runs.
-        std::fs::write(&path, "> first line\n> second line\nplain text here")
-            .expect("write two-quote file");
+        let content = "> first line\n> second line\nplain text here";
+        std::fs::write(&path, content).expect("write two-quote file");
         let result = normalize(&path).expect("two-quote file must return Ok");
+        assert_eq!(
+            result.trim(),
+            content.trim(),
+            "content with only two > lines must be returned unchanged"
+        );
         assert!(!result.is_empty(), "result must not be empty");
     }
 
