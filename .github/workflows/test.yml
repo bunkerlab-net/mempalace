@@ -12,6 +12,7 @@ jobs:
 
     permissions:
       contents: read
+      id-token: write
 
     strategy:
       matrix:
@@ -80,4 +81,14 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: cargo binstall -y --force cargo-nextest cargo-llvm-cov
 
-      - run: cargo llvm-cov nextest --all-features
+      - if: matrix.runs-on != 'ubuntu-24.04'
+        run: cargo llvm-cov --all-features nextest
+      - if: matrix.runs-on == 'ubuntu-24.04'
+        run: cargo llvm-cov --all-features --lcov --output-path lcov.info nextest
+
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2 # v6.0.0
+        if: matrix.runs-on == 'ubuntu-24.04'
+        with:
+          files: lcov.info
+          use_oidc: true
