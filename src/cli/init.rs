@@ -63,3 +63,65 @@ pub fn run(directory: &Path, yes: bool, no_gitignore: bool) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+// Test code — .expect() is acceptable with a descriptive message.
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn init_run_creates_mempalace_yaml_in_directory() {
+        // init::run with yes=true must write a mempalace.yaml to the target directory.
+        let temp_directory =
+            tempfile::tempdir().expect("failed to create temporary directory for init test");
+        run(temp_directory.path(), true, false)
+            .expect("init::run should succeed for a valid directory with yes=true");
+
+        let config_path = temp_directory.path().join("mempalace.yaml");
+        assert!(config_path.exists(), "mempalace.yaml must be created");
+        // Pair assertion: the file must contain valid YAML with a wing key.
+        let contents = std::fs::read_to_string(&config_path)
+            .expect("mempalace.yaml must be readable after init");
+        assert!(
+            contents.contains("wing:"),
+            "config must contain a wing field"
+        );
+        assert!(!contents.is_empty(), "config file must not be empty");
+    }
+
+    #[test]
+    fn init_run_nonexistent_directory_returns_error() {
+        // Passing a path that does not exist must return Err.
+        let path = std::path::Path::new("/nonexistent/path/that/does/not/exist");
+        let result = run(path, true, false);
+        assert!(result.is_err(), "nonexistent directory must return Err");
+        assert!(
+            result
+                .err()
+                .is_some_and(|error| !error.to_string().is_empty()),
+            "error message must not be empty"
+        );
+    }
+
+    #[test]
+    fn init_run_no_gitignore_flag_counts_files() {
+        // no_gitignore=true must still produce a valid config (just without .gitignore filtering).
+        let temp_directory = tempfile::tempdir()
+            .expect("failed to create temporary directory for no-gitignore init test");
+        std::fs::write(temp_directory.path().join("test.rs"), "fn main() {}")
+            .expect("failed to write test source file");
+
+        run(temp_directory.path(), true, true)
+            .expect("init::run should succeed with no_gitignore=true");
+
+        let config_path = temp_directory.path().join("mempalace.yaml");
+        assert!(
+            config_path.exists(),
+            "mempalace.yaml must be created with no_gitignore=true"
+        );
+        let contents = std::fs::read_to_string(&config_path)
+            .expect("mempalace.yaml must be readable after init with no_gitignore");
+        assert!(contents.contains("wing:"), "config must contain wing field");
+    }
+}

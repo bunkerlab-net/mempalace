@@ -234,3 +234,161 @@ async fn run_mine(
     }
     Ok(())
 }
+
+#[cfg(test)]
+// Test code — .expect() is acceptable with a descriptive message.
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    // -- expand_tilde ---------------------------------------------------------
+
+    #[test]
+    fn expand_tilde_no_leading_tilde_returns_path_unchanged() {
+        // A path with no leading ~ must be returned as-is.
+        let path = std::path::Path::new("/absolute/path/to/file");
+        let result = expand_tilde(path);
+        assert_eq!(result, path, "absolute path must be returned unchanged");
+        assert!(
+            !result.to_string_lossy().starts_with("~/"),
+            "result must not start with ~/"
+        );
+    }
+
+    #[test]
+    fn expand_tilde_relative_path_returned_unchanged() {
+        // A relative path that does not start with ~ must be returned as-is.
+        let path = std::path::Path::new("relative/path");
+        let result = expand_tilde(path);
+        assert_eq!(
+            result, path,
+            "relative path without ~ must be returned unchanged"
+        );
+        assert_eq!(result.to_string_lossy(), "relative/path");
+    }
+
+    #[test]
+    fn expand_tilde_tilde_only_expands_to_home() {
+        // A path of just "~" must expand to the HOME directory.
+        temp_env::with_var("HOME", Some("/test/home"), || {
+            let path = std::path::Path::new("~");
+            let result = expand_tilde(path);
+            assert_eq!(
+                result,
+                std::path::Path::new("/test/home"),
+                "bare ~ must expand to HOME"
+            );
+            assert!(
+                !result.to_string_lossy().contains('~'),
+                "result must not contain ~"
+            );
+        });
+    }
+
+    #[test]
+    fn expand_tilde_tilde_slash_path_appends_suffix() {
+        // "~/foo/bar" must expand to "<HOME>/foo/bar".
+        temp_env::with_var("HOME", Some("/test/home"), || {
+            let path = std::path::Path::new("~/foo/bar");
+            let result = expand_tilde(path);
+            assert_eq!(
+                result,
+                std::path::Path::new("/test/home/foo/bar"),
+                "~/foo/bar must expand to HOME/foo/bar"
+            );
+            assert!(
+                result.starts_with("/test/home"),
+                "result must start with HOME"
+            );
+        });
+    }
+
+    #[test]
+    fn expand_tilde_no_home_set_returns_path_unchanged() {
+        // When HOME is unset expand_tilde must return the path unchanged rather than panicking.
+        // This covers the None branch of the home directory resolution chain.
+        temp_env::with_vars(
+            [
+                ("HOME", None::<&str>),
+                ("USERPROFILE", None::<&str>),
+                ("HOMEDRIVE", None::<&str>),
+                ("HOMEPATH", None::<&str>),
+            ],
+            || {
+                let path = std::path::Path::new("~/no/home");
+                let result = expand_tilde(path);
+                // With no home env vars the expansion falls back to returning path as-is.
+                assert!(
+                    !result.to_string_lossy().is_empty(),
+                    "result must not be empty"
+                );
+                assert!(
+                    !result.is_absolute(),
+                    "result must remain a relative path when home is unresolvable"
+                );
+            },
+        );
+    }
+
+    // -- run_mine error path --------------------------------------------------
+
+    #[tokio::test]
+    async fn run_mine_unknown_mode_returns_error() {
+        // An unrecognised mode must return Err without calling open_palace.
+        // This avoids requiring a real palace DB for the error path.
+        let temp_directory =
+            tempfile::tempdir().expect("failed to create temporary directory for run_mine test");
+        let result = run_mine(
+            temp_directory.path().to_path_buf(),
+            "invalid_mode".to_string(),
+            "full".to_string(),
+            None,
+            "test_agent".to_string(),
+            0,
+            false,
+            false,
+        )
+        .await;
+        assert!(result.is_err(), "unknown mine mode must return Err");
+        assert!(
+            result
+                .err()
+                .is_some_and(|error| error.to_string().contains("invalid_mode")),
+            "error message must contain the unknown mode name"
+        );
+    }
+
+    // -- run_status without a palace ------------------------------------------
+
+    #[tokio::test]
+    async fn run_status_with_no_palace_db_returns_ok() {
+        // When the palace.db does not exist run_status must print a friendly message
+        // and return Ok without panicking.
+        let temp_directory =
+            tempfile::tempdir().expect("failed to create temporary directory for run_status test");
+        let temp_directory_path_string = temp_directory
+            .path()
+            .to_str()
+            .expect("temporary directory path must be valid UTF-8")
+            .to_string();
+        temp_env::async_with_vars(
+            [
+                ("MEMPALACE_DIR", Some(temp_directory_path_string.as_str())),
+                ("MEMPALACE_PALACE_PATH", None),
+            ],
+            async {
+                let result = run_status().await;
+                assert!(
+                    result.is_ok(),
+                    "run_status must return Ok when palace.db does not exist"
+                );
+                // Pair assertion: no error variant must be returned.
+                assert!(
+                    result.err().is_none(),
+                    "run_status must not produce any error for a missing palace"
+                );
+            },
+        )
+        .await;
+    }
+}

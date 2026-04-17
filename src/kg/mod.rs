@@ -46,6 +46,124 @@ mod tests {
     fn entity_id_empty_string() {
         assert_eq!(entity_id(""), "");
     }
+
+    #[test]
+    fn add_triple_validate_params_rejects_nan_confidence() {
+        // NaN confidence must be rejected — it would corrupt sort comparisons downstream.
+        let params = TripleParams {
+            subject: "Alice",
+            predicate: "knows",
+            object: "Bob",
+            valid_from: None,
+            valid_to: None,
+            confidence: f64::NAN,
+            source_closet: None,
+            source_file: None,
+        };
+        let result = add_triple_validate_params(&params);
+        assert!(result.is_err(), "NaN confidence must be rejected");
+        assert!(
+            result
+                .err()
+                .is_some_and(|error| error.to_string().contains("confidence")),
+            "error message must mention confidence"
+        );
+    }
+
+    #[test]
+    fn add_triple_validate_params_rejects_negative_confidence() {
+        // Negative confidence is outside the valid [0.0, 1.0] range.
+        let params = TripleParams {
+            subject: "Alice",
+            predicate: "knows",
+            object: "Bob",
+            valid_from: None,
+            valid_to: None,
+            confidence: -0.1,
+            source_closet: None,
+            source_file: None,
+        };
+        let result = add_triple_validate_params(&params);
+        assert!(result.is_err(), "negative confidence must be rejected");
+        assert!(
+            result
+                .err()
+                .is_some_and(|error| error.to_string().contains("confidence")),
+            "error message must mention confidence"
+        );
+    }
+
+    #[test]
+    fn add_triple_validate_params_rejects_invalid_date_format() {
+        // A non-ISO date in valid_from must be rejected with a clear error.
+        let params = TripleParams {
+            subject: "Alice",
+            predicate: "knows",
+            object: "Bob",
+            valid_from: Some("not-a-date"),
+            valid_to: None,
+            confidence: 0.5,
+            source_closet: None,
+            source_file: None,
+        };
+        let result = add_triple_validate_params(&params);
+        assert!(result.is_err(), "invalid date format must be rejected");
+        assert!(
+            result
+                .err()
+                .is_some_and(|error| error.to_string().contains("valid_from")),
+            "error message must mention valid_from"
+        );
+    }
+
+    #[test]
+    fn add_triple_validate_params_rejects_from_after_to() {
+        // valid_from after valid_to is logically impossible and must be rejected.
+        let params = TripleParams {
+            subject: "Alice",
+            predicate: "knows",
+            object: "Bob",
+            valid_from: Some("2025-06-01"),
+            valid_to: Some("2025-01-01"),
+            confidence: 0.8,
+            source_closet: None,
+            source_file: None,
+        };
+        let result = add_triple_validate_params(&params);
+        assert!(
+            result.is_err(),
+            "valid_from after valid_to must be rejected"
+        );
+        assert!(
+            result
+                .err()
+                .is_some_and(|error| error.to_string().contains("must not be after")),
+            "error message must explain the temporal ordering constraint"
+        );
+    }
+
+    #[test]
+    fn add_triple_validate_params_rejects_invalid_valid_to_date() {
+        // A non-ISO date in valid_to must also be rejected.
+        let params = TripleParams {
+            subject: "Alice",
+            predicate: "knows",
+            object: "Bob",
+            valid_from: None,
+            valid_to: Some("garbage"),
+            confidence: 0.5,
+            source_closet: None,
+            source_file: None,
+        };
+        let result = add_triple_validate_params(&params);
+        assert!(result.is_err(), "invalid valid_to date must be rejected");
+        assert!(
+            result
+                .err()
+                .is_some_and(|error| error.to_string().contains("valid_to")),
+            "error message must mention valid_to"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -53,6 +171,24 @@ mod tests {
 #[allow(clippy::expect_used)]
 mod async_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn add_entity_rejects_all_apostrophe_name() {
+        // A name consisting entirely of apostrophes normalizes to an empty entity id.
+        // add_entity must reject this with an Err rather than inserting a blank key.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let result = add_entity(&connection, "'''", "person", None).await;
+        assert!(
+            result.is_err(),
+            "all-apostrophe name must produce an empty entity id and be rejected"
+        );
+        assert!(
+            result
+                .err()
+                .is_some_and(|error| error.to_string().contains("empty")),
+            "error message must mention empty entity id"
+        );
+    }
 
     #[tokio::test]
     async fn add_entity_inserts_and_returns_id() {

@@ -679,6 +679,310 @@ mod tests {
     }
 
     #[test]
+    fn load_returns_default_when_no_config_file() {
+        // MempalaceConfig::load() must return defaults when no config.json exists.
+        let temp_directory = tempfile::tempdir()
+            .expect("failed to create temporary directory for load-default test");
+        temp_env::with_vars(
+            [
+                (
+                    "MEMPALACE_DIR",
+                    Some(
+                        temp_directory
+                            .path()
+                            .to_str()
+                            .expect("temporary directory path must be valid UTF-8"),
+                    ),
+                ),
+                (
+                    "HOME",
+                    Some(
+                        temp_directory
+                            .path()
+                            .to_str()
+                            .expect("temporary directory path must be valid UTF-8"),
+                    ),
+                ),
+            ],
+            || {
+                let config = MempalaceConfig::load().expect(
+                    "MempalaceConfig::load should return defaults when config.json is absent",
+                );
+                assert!(
+                    !config.palace_path.as_os_str().is_empty(),
+                    "palace_path must not be empty"
+                );
+                assert_eq!(config.collection_name, "mempalace_drawers");
+            },
+        );
+    }
+
+    #[test]
+    fn load_reads_existing_config_file() {
+        // MempalaceConfig::load() must parse an existing config.json.
+        let temp_directory = tempfile::tempdir()
+            .expect("failed to create temporary directory for load-existing test");
+        let config_json =
+            r#"{"palace_path":"/custom/palace.db","collection_name":"custom","people_map":{}}"#;
+        std::fs::write(temp_directory.path().join("config.json"), config_json)
+            .expect("failed to write test config.json");
+
+        temp_env::with_vars(
+            [
+                (
+                    "MEMPALACE_DIR",
+                    Some(
+                        temp_directory
+                            .path()
+                            .to_str()
+                            .expect("temporary directory path must be valid UTF-8"),
+                    ),
+                ),
+                (
+                    "HOME",
+                    Some(
+                        temp_directory
+                            .path()
+                            .to_str()
+                            .expect("temporary directory path must be valid UTF-8"),
+                    ),
+                ),
+            ],
+            || {
+                let config = MempalaceConfig::load()
+                    .expect("MempalaceConfig::load should succeed when config.json exists");
+                assert_eq!(config.collection_name, "custom");
+                assert_eq!(
+                    config.palace_path,
+                    std::path::PathBuf::from("/custom/palace.db")
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn init_creates_config_file_when_none_exists() {
+        // MempalaceConfig::init() must create config.json when the directory is fresh.
+        let temp_directory = tempfile::tempdir()
+            .expect("failed to create temporary directory for init-creates test");
+        temp_env::with_vars(
+            [
+                (
+                    "MEMPALACE_DIR",
+                    Some(
+                        temp_directory
+                            .path()
+                            .to_str()
+                            .expect("temporary directory path must be valid UTF-8"),
+                    ),
+                ),
+                (
+                    "HOME",
+                    Some(
+                        temp_directory
+                            .path()
+                            .to_str()
+                            .expect("temporary directory path must be valid UTF-8"),
+                    ),
+                ),
+            ],
+            || {
+                let config = MempalaceConfig::init()
+                    .expect("MempalaceConfig::init should succeed on a fresh directory");
+                // config.json must have been written.
+                assert!(
+                    temp_directory.path().join("config.json").exists(),
+                    "init must create config.json"
+                );
+                assert!(
+                    !config.palace_path.as_os_str().is_empty(),
+                    "palace_path must not be empty after init"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn init_reads_existing_config_when_present() {
+        // MempalaceConfig::init() must read an existing config.json rather than overwriting it.
+        let temp_directory = tempfile::tempdir()
+            .expect("failed to create temporary directory for init-reads-existing test");
+        let config_json =
+            r#"{"palace_path":"/existing/palace.db","collection_name":"existing","people_map":{}}"#;
+        std::fs::write(temp_directory.path().join("config.json"), config_json)
+            .expect("failed to write existing config.json for init test");
+
+        temp_env::with_vars(
+            [
+                (
+                    "MEMPALACE_DIR",
+                    Some(
+                        temp_directory
+                            .path()
+                            .to_str()
+                            .expect("temporary directory path must be valid UTF-8"),
+                    ),
+                ),
+                (
+                    "HOME",
+                    Some(
+                        temp_directory
+                            .path()
+                            .to_str()
+                            .expect("temporary directory path must be valid UTF-8"),
+                    ),
+                ),
+            ],
+            || {
+                let config = MempalaceConfig::init()
+                    .expect("MempalaceConfig::init should read existing config.json without error");
+                assert_eq!(
+                    config.collection_name, "existing",
+                    "init must return existing config values"
+                );
+                assert_eq!(
+                    config.palace_path,
+                    std::path::PathBuf::from("/existing/palace.db")
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn palace_db_path_env_var_overrides_config() {
+        // MEMPALACE_PALACE_PATH must take priority over the config value.
+        let config = MempalaceConfig {
+            palace_path: std::path::PathBuf::from("/config/palace.db"),
+            collection_name: "mempalace_drawers".to_string(),
+            people_map: std::collections::HashMap::new(),
+        };
+        temp_env::with_var("MEMPALACE_PALACE_PATH", Some("/env/override.db"), || {
+            let path = config.palace_db_path();
+            assert_eq!(
+                path,
+                std::path::PathBuf::from("/env/override.db"),
+                "env var must override config palace_path"
+            );
+            assert!(
+                !path.to_string_lossy().contains("config"),
+                "result must not contain the config path"
+            );
+        });
+    }
+
+    #[test]
+    fn project_config_load_wrong_extension_returns_error() {
+        // ProjectConfig::load() must reject files that are not .yaml or .yml.
+        let temp_directory = tempfile::tempdir()
+            .expect("failed to create temporary directory for wrong-extension test");
+        let json_path = temp_directory.path().join("config.json");
+        std::fs::write(&json_path, "wing: test\nrooms: []")
+            .expect("failed to write test file with wrong extension");
+        let result = ProjectConfig::load(&json_path);
+        assert!(result.is_err(), "non-yaml extension must return Err");
+        assert!(
+            result.err().is_some_and(
+                |error| error.to_string().contains("yaml") || error.to_string().contains("yml")
+            ),
+            "error must mention the expected extension"
+        );
+    }
+
+    #[test]
+    fn project_config_load_nonexistent_file_returns_error() {
+        // ProjectConfig::load() must return Err when the file does not exist.
+        let path = std::path::Path::new("/nonexistent/path/mempalace.yaml");
+        let result = ProjectConfig::load(path);
+        assert!(result.is_err(), "nonexistent file must return Err");
+        assert!(
+            result.err().is_some(),
+            "error must be present for nonexistent file"
+        );
+    }
+
+    #[test]
+    fn maybe_migrate_moves_wal_directory() {
+        // maybe_migrate_inner must move a "wal" subdirectory to the destination.
+        let home_directory = tempfile::tempdir()
+            .expect("failed to create temporary home directory for WAL migration test");
+        let legacy_directory = home_directory.path().join(".mempalace");
+        let wal_source_directory = legacy_directory.join("wal");
+        std::fs::create_dir_all(&wal_source_directory)
+            .expect("failed to create legacy wal directory");
+        std::fs::write(wal_source_directory.join("frame.bin"), b"wal data")
+            .expect("failed to write wal frame file");
+        // config.json acts as the completion marker — move it last.
+        std::fs::write(
+            legacy_directory.join("config.json"),
+            r#"{"palace_path":"/old/palace.db","collection_name":"mempalace_drawers","people_map":{}}"#,
+        )
+        .expect("failed to write config.json for WAL migration test");
+
+        temp_env::with_vars(
+            [
+                (
+                    "HOME",
+                    Some(
+                        home_directory
+                            .path()
+                            .to_str()
+                            .expect("home directory path must be valid UTF-8"),
+                    ),
+                ),
+                ("MEMPALACE_DIR", None),
+                ("XDG_DATA_HOME", None),
+            ],
+            || {
+                maybe_migrate()
+                    .expect("migration should succeed for legacy directory with wal subdirectory");
+                let destination = home_directory
+                    .path()
+                    .join(".local")
+                    .join("share")
+                    .join("mempalace");
+                // wal directory must have been moved to the destination.
+                assert!(
+                    destination.join("wal").exists(),
+                    "wal directory must exist at destination after migration"
+                );
+                assert!(
+                    destination.join("wal").join("frame.bin").exists(),
+                    "wal frame must be present in migrated wal directory"
+                );
+                assert!(
+                    destination.join("config.json").exists(),
+                    "config.json must exist as completion marker"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn maybe_migrate_patch_config_corrupted_json_is_noop() {
+        // maybe_migrate_patch_config must silently ignore a corrupted config.json.
+        let temp_directory = tempfile::tempdir()
+            .expect("failed to create temporary directory for corrupted-config test");
+        let config_path = temp_directory.path().join("config.json");
+        std::fs::write(&config_path, "not valid json {{{{")
+            .expect("failed to write corrupted config.json for test");
+        let legacy_db = std::path::Path::new("/old/palace.db");
+        let new_db = std::path::Path::new("/new/palace.db");
+
+        let result = maybe_migrate_patch_config(&config_path, legacy_db, new_db);
+
+        // Corrupted JSON must be left unchanged (Ok returned, not Err).
+        assert!(
+            result.is_ok(),
+            "corrupted config.json must not cause migration error"
+        );
+        let content = std::fs::read_to_string(&config_path).expect("config must still be readable");
+        assert_eq!(
+            content, "not valid json {{{{",
+            "corrupted config.json must be left unchanged"
+        );
+    }
+
+    #[test]
     fn project_config_yaml_round_trip() {
         let yaml = r"
 wing: my_project

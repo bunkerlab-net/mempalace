@@ -86,3 +86,96 @@ pub async fn run(connection: &Connection, palace_path: &Path) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+// Test code — .expect() is acceptable with a descriptive message.
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    /// Open a file-backed turso database at `path`, apply the schema, and return
+    /// `(Database, Connection)`.  `repair::run` requires a real filesystem path because
+    /// it calls `std::fs::copy`; an in-memory database cannot be used here.
+    async fn open_file_db(path: &std::path::Path) -> (turso::Database, turso::Connection) {
+        let database = turso::Builder::new_local(
+            path.to_str()
+                .expect("file-backed database path must be valid UTF-8"),
+        )
+        .experimental_triggers(true)
+        .build()
+        .await
+        .expect("failed to create file-backed turso database");
+        let connection = database
+            .connect()
+            .expect("failed to connect to file-backed database");
+        crate::schema::ensure_schema(&connection)
+            .await
+            .expect("failed to apply schema to file-backed database");
+        (database, connection)
+    }
+
+    #[tokio::test]
+    async fn repair_creates_backup_and_rebuilds_index() {
+        // repair::run must create a .db.bak backup and re-index all drawers.
+        let temp_directory = tempfile::tempdir()
+            .expect("failed to create temporary directory for repair backup test");
+        let database_path = temp_directory.path().join("palace.db");
+        let (_database, connection) = open_file_db(&database_path).await;
+
+        // Add a drawer so there is at least one entry to re-index.
+        crate::palace::drawer::add_drawer(
+            &connection,
+            &crate::palace::drawer::DrawerParams {
+                id: "drawer_repair_test_001",
+                wing: "test_wing",
+                room: "general",
+                content: "content to index during repair test",
+                source_file: "test.txt",
+                chunk_index: 0,
+                added_by: "test_agent",
+                ingest_mode: "repair_test",
+                source_mtime: None,
+            },
+        )
+        .await
+        .expect("failed to add drawer for repair test setup");
+
+        run(&connection, &database_path)
+            .await
+            .expect("repair::run should succeed after adding a test drawer");
+
+        // Backup file must exist after repair.
+        let backup_path = database_path.with_extension("db.bak");
+        assert!(
+            backup_path.exists(),
+            "repair must create a .db.bak backup file"
+        );
+        assert!(
+            database_path.exists(),
+            "original palace.db must still exist after repair"
+        );
+    }
+
+    #[tokio::test]
+    async fn repair_with_no_drawers_succeeds() {
+        // repair::run must succeed even when the palace has no drawers to re-index.
+        let temp_directory = tempfile::tempdir()
+            .expect("failed to create temporary directory for empty-palace repair test");
+        let database_path = temp_directory.path().join("empty_palace.db");
+        let (_database, connection) = open_file_db(&database_path).await;
+
+        run(&connection, &database_path)
+            .await
+            .expect("repair::run should succeed on a palace with zero drawers");
+
+        let backup_path = database_path.with_extension("db.bak");
+        assert!(
+            backup_path.exists(),
+            "backup must be created even for empty palace"
+        );
+        assert!(
+            database_path.exists(),
+            "original database file must remain after repair"
+        );
+    }
+}

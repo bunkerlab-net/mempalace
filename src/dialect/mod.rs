@@ -334,4 +334,59 @@ mod tests {
         assert!(found.contains(&"ALC".to_string()));
         assert!(found.contains(&"BOB".to_string()));
     }
+
+    #[test]
+    fn detect_emotions_caps_at_three() {
+        // detect_emotions must break after collecting 3 distinct emotion codes.
+        // This exercises the `detected.len() >= 3` early-exit branch.
+        let text = "I love this, I'm excited, but worried and frustrated about the deadline";
+        let emotions = detect_emotions(text);
+        assert!(emotions.len() <= 3, "emotion count must be capped at 3");
+        assert!(
+            !emotions.is_empty(),
+            "text with emotion keywords must produce at least one"
+        );
+    }
+
+    #[test]
+    fn detect_flags_caps_at_three() {
+        // detect_flags must break after collecting 3 distinct flag codes.
+        // This exercises the `detected.len() >= 3` early-exit branch.
+        let text =
+            "We decided to switch the api because the server architecture was launched wrong";
+        let flags = detect_flags(text);
+        assert!(flags.len() <= 3, "flag count must be capped at 3");
+        assert!(
+            !flags.is_empty(),
+            "text with flag keywords must produce at least one"
+        );
+    }
+
+    #[test]
+    fn extract_key_sentence_empty_on_short_text() {
+        // Text with no sentences longer than 10 chars must return an empty string.
+        // This exercises the `sentences.is_empty()` early return.
+        let result = extract_key_sentence("hi. ok.");
+        assert!(
+            result.is_empty(),
+            "text with only short fragments must produce empty key sentence"
+        );
+        assert_eq!(result.len(), 0, "empty key sentence must have zero length");
+    }
+
+    #[test]
+    fn extract_key_sentence_truncates_long_sentence() {
+        // A key sentence longer than 55 characters must be truncated with "...".
+        // This exercises the `best.len() > 55` truncation branch.
+        let long_text = "We decided to completely restructure the entire backend architecture because the legacy system was causing too many production failures and nobody understood the codebase anymore";
+        let result = extract_key_sentence(long_text);
+        assert!(
+            result.ends_with("..."),
+            "long key sentence must be truncated with ellipsis"
+        );
+        assert!(
+            result.len() <= 60,
+            "truncated key sentence must not exceed ~55 chars plus ellipsis"
+        );
+    }
 }

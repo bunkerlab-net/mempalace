@@ -391,4 +391,67 @@ mod tests {
         assert!(names.contains(&"general"));
         // TempDir auto-cleans up when dropped
     }
+
+    #[test]
+    fn detect_rooms_from_folders_scans_subdirectories_one_level_deep() {
+        // detect_rooms_from_folders descends one level into subdirectories to find
+        // rooms that are nested under a parent directory (e.g. `app/frontend`).
+        // This test exercises the sub-directory scanning branch (lines 148-162).
+        let temp_directory = tempfile::tempdir()
+            .expect("failed to create temporary directory for subdirectory test");
+        let parent_directory = temp_directory.path().join("app");
+        std::fs::create_dir_all(parent_directory.join("frontend"))
+            .expect("failed to create nested frontend directory");
+        std::fs::create_dir_all(parent_directory.join("backend"))
+            .expect("failed to create nested backend directory");
+        // Also create a file (not a directory) to exercise the is_dir() filter.
+        std::fs::write(parent_directory.join("README.md"), "# readme")
+            .expect("failed to write README.md in parent directory");
+
+        let rooms = detect_rooms_from_folders(temp_directory.path());
+        let names: Vec<&str> = rooms.iter().map(|room| room.name.as_str()).collect();
+
+        // Sub-directory rooms must be detected via the one-level-deeper scan.
+        assert!(
+            names.contains(&"frontend"),
+            "nested frontend directory must be detected as a room"
+        );
+        assert!(
+            names.contains(&"backend"),
+            "nested backend directory must be detected as a room"
+        );
+        // General room must always be present.
+        assert!(
+            names.contains(&"general"),
+            "general room must always be included"
+        );
+    }
+
+    #[test]
+    fn detect_rooms_from_folders_skips_node_modules_in_subdirs() {
+        // Directories in SKIP_DIRS (like node_modules) must be excluded from room
+        // detection even when nested one level deep inside a parent directory.
+        // The sub-directory scan only matches names in folder_map — "frontend" is
+        // a known mapped name, "node_modules" is in SKIP_DIRS and must be excluded.
+        let temp_directory =
+            tempfile::tempdir().expect("failed to create temporary directory for skip-dirs test");
+        let parent_directory = temp_directory.path().join("project");
+        std::fs::create_dir_all(parent_directory.join("node_modules"))
+            .expect("failed to create nested node_modules directory");
+        std::fs::create_dir_all(parent_directory.join("frontend"))
+            .expect("failed to create nested frontend directory");
+
+        let rooms = detect_rooms_from_folders(temp_directory.path());
+        let names: Vec<&str> = rooms.iter().map(|room| room.name.as_str()).collect();
+
+        assert!(
+            !names.contains(&"node_modules"),
+            "node_modules must be excluded from room detection"
+        );
+        // "frontend" is in the folder_map — the sub-directory scan must detect it.
+        assert!(
+            names.contains(&"frontend"),
+            "non-skipped subdirectory 'frontend' must be detected via folder_map"
+        );
+    }
 }

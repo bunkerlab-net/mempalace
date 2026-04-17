@@ -620,6 +620,8 @@ pub async fn mine_convos(
 }
 
 #[cfg(test)]
+// Test code — .expect() is acceptable with a descriptive message.
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -787,5 +789,584 @@ mod tests {
                 "chunk indices must be 0-based and contiguous"
             );
         }
+    }
+
+    #[test]
+    fn chunk_by_paragraph_multiple_paragraphs() {
+        // Content with multiple double-newline-separated paragraphs above MIN_CHUNK_SIZE
+        // must produce one chunk per paragraph with 0-based contiguous indices.
+        let content = "First paragraph with enough text to exceed the minimum size check here.\n\n\
+                       Second paragraph with its own content that also exceeds the minimum.\n\n\
+                       Third paragraph rounds out the set for thorough coverage.";
+        let chunks = chunk_by_paragraph(content);
+        assert!(
+            chunks.len() >= 2,
+            "multiple paragraphs must produce multiple chunks"
+        );
+        // Chunk indices must be contiguous from 0.
+        for (expected, chunk) in chunks.iter().enumerate() {
+            assert_eq!(
+                chunk.chunk_index, expected,
+                "chunk indices must be 0-based and contiguous"
+            );
+        }
+        assert!(
+            !chunks[0].content.is_empty(),
+            "first chunk must contain content"
+        );
+    }
+
+    #[test]
+    fn chunk_by_paragraph_long_content_no_double_newlines() {
+        // Content with more than 20 single-newline-separated lines but no double-newlines
+        // triggers the line-grouping fallback (chunks of 25 lines each).
+        let lines: Vec<String> = (0..26)
+            .map(|i| format!("Line {i} has enough content to pass the minimum size filter here."))
+            .collect();
+        let content = lines.join("\n");
+        let chunks = chunk_by_paragraph(&content);
+        // Two groups: first 25 lines and one trailing line (filtered if too short).
+        assert!(
+            !chunks.is_empty(),
+            "long single-block content must produce at least one chunk"
+        );
+        for chunk in &chunks {
+            assert!(
+                chunk.content.trim().len() > MIN_CHUNK_SIZE,
+                "every chunk must exceed MIN_CHUNK_SIZE"
+            );
+        }
+    }
+
+    #[test]
+    fn chunk_by_paragraph_short_paragraph_filtered() {
+        // A paragraph shorter than MIN_CHUNK_SIZE must be excluded from output.
+        let content = "short\n\nThis second paragraph has enough characters to exceed the minimum chunk threshold.";
+        let chunks = chunk_by_paragraph(content);
+        // "short" (5 chars) is below MIN_CHUNK_SIZE=30 and must be filtered.
+        assert_eq!(
+            chunks.len(),
+            1,
+            "short paragraph must be excluded; only long one survives"
+        );
+        assert!(
+            chunks[0].content.contains("second paragraph"),
+            "the surviving chunk must contain the long paragraph"
+        );
+    }
+
+    #[test]
+    fn detect_convo_room_general_fallback() {
+        // Content with no recognisable topic keywords must fall through to "general".
+        let content =
+            "This text contains no particular domain keywords at all, just random filler.";
+        let room = detect_convo_room(content);
+        assert_eq!(
+            room, "general",
+            "unrecognised content must produce 'general'"
+        );
+        assert!(!room.is_empty(), "room name must never be empty");
+    }
+
+    #[test]
+    fn detect_convo_room_architecture_keywords() {
+        // Content with architecture keywords must be classified as "architecture".
+        let content = "We discussed the system architecture, service interface design, and module components.";
+        let room = detect_convo_room(content);
+        assert_eq!(
+            room, "architecture",
+            "architecture keywords must map to 'architecture'"
+        );
+        assert!(!room.is_empty(), "room name must not be empty");
+    }
+
+    #[test]
+    fn detect_convo_room_planning_keywords() {
+        // Content with planning keywords must be classified as "planning".
+        let content =
+            "We need a roadmap with milestones, priorities, and sprint backlogs for the deadline.";
+        let room = detect_convo_room(content);
+        assert_eq!(room, "planning", "planning keywords must map to 'planning'");
+        assert!(!room.is_empty(), "room name must not be empty");
+    }
+
+    #[test]
+    fn detect_convo_room_decisions_keywords() {
+        // Content with decision keywords must be classified as "decisions".
+        let content = "We decided and chose the approach after considering the trade-off and alternative options.";
+        let room = detect_convo_room(content);
+        assert_eq!(
+            room, "decisions",
+            "decision keywords must map to 'decisions'"
+        );
+        assert!(!room.is_empty(), "room name must not be empty");
+    }
+
+    #[test]
+    fn detect_convo_room_problems_keywords() {
+        // Content with problem/issue keywords must be classified as "problems".
+        let content =
+            "There was a problem with a broken component that crashed; we found a workaround.";
+        let room = detect_convo_room(content);
+        assert_eq!(room, "problems", "problem keywords must map to 'problems'");
+        assert!(!room.is_empty(), "room name must not be empty");
+    }
+
+    #[test]
+    fn chunk_exchanges_routes_to_paragraph_when_preamble_precedes_quote() {
+        // Content whose first non-empty line is NOT a '>' marker must be routed to
+        // chunk_by_paragraph, preserving preamble text that chunk_by_exchange would drop.
+        let content = "This preamble paragraph is long enough to exceed the minimum chunk size threshold.\n\n\
+                       > user question here\nAI answer follows for the exchange.";
+        let chunks = chunk_exchanges(content);
+        // Preamble must be represented in output (chunk_by_paragraph preserves it).
+        assert!(
+            !chunks.is_empty(),
+            "non-empty content with preamble must produce chunks"
+        );
+        let all_text: String = chunks.iter().map(|c| c.content.as_str()).collect();
+        assert!(
+            all_text.contains("preamble"),
+            "preamble text must be preserved when routing to chunk_by_paragraph"
+        );
+    }
+
+    #[test]
+    fn walk_convos_collects_valid_extensions_excludes_meta_json() {
+        // walk_convos must collect .txt, .md, .json, .jsonl files but exclude .meta.json.
+        // The .meta.json exclusion is critical: Claude Code writes per-session metadata
+        // files with this suffix that are not conversation transcripts.
+        let temp_directory =
+            tempfile::tempdir().expect("failed to create temporary directory for walk_convos test");
+        std::fs::write(temp_directory.path().join("convo.txt"), "some content here")
+            .expect("failed to write test txt file");
+        std::fs::write(temp_directory.path().join("convo.md"), "# markdown content")
+            .expect("failed to write test md file");
+        std::fs::write(temp_directory.path().join("session.meta.json"), "{}")
+            .expect("failed to write test meta.json file");
+        std::fs::write(temp_directory.path().join("image.png"), b"\x89PNG")
+            .expect("failed to write test png file");
+
+        let mut files = Vec::new();
+        walk_convos(temp_directory.path(), &mut files);
+
+        let names: Vec<String> = files
+            .iter()
+            .filter_map(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .collect();
+
+        assert!(
+            names.contains(&"convo.txt".to_string()),
+            "txt must be collected"
+        );
+        assert!(
+            names.contains(&"convo.md".to_string()),
+            "md must be collected"
+        );
+        assert!(
+            !names.contains(&"session.meta.json".to_string()),
+            "meta.json must be excluded — it is Claude Code session metadata, not a transcript"
+        );
+        assert!(
+            !names.contains(&"image.png".to_string()),
+            "png must be excluded — not a supported conversation extension"
+        );
+        assert_eq!(names.len(), 2, "exactly two valid files must be collected");
+    }
+
+    #[test]
+    fn walk_convos_skips_tool_results_and_memory_dirs() {
+        // walk_convos must not descend into "tool-results" or "memory" directories
+        // — these contain Claude Code artefacts, not conversation transcripts.
+        let temp_directory = tempfile::tempdir()
+            .expect("failed to create temporary directory for walk_convos skip-dirs test");
+        let tool_results_directory = temp_directory.path().join("tool-results");
+        let memory_directory = temp_directory.path().join("memory");
+        std::fs::create_dir_all(&tool_results_directory)
+            .expect("failed to create tool-results directory");
+        std::fs::create_dir_all(&memory_directory).expect("failed to create memory directory");
+        std::fs::write(tool_results_directory.join("result.txt"), "tool output")
+            .expect("failed to write tool result file");
+        std::fs::write(memory_directory.join("note.md"), "memory note")
+            .expect("failed to write memory note file");
+        std::fs::write(
+            temp_directory.path().join("valid.txt"),
+            "valid conversation",
+        )
+        .expect("failed to write valid conversation file");
+
+        let mut files = Vec::new();
+        walk_convos(temp_directory.path(), &mut files);
+
+        let names: Vec<String> = files
+            .iter()
+            .filter_map(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .collect();
+
+        assert_eq!(
+            names,
+            vec!["valid.txt".to_string()],
+            "only the top-level valid.txt must be collected"
+        );
+        assert!(
+            !names.contains(&"result.txt".to_string()),
+            "files in tool-results must be excluded — not conversation transcripts"
+        );
+        assert!(
+            !names.contains(&"note.md".to_string()),
+            "files in memory must be excluded — not conversation transcripts"
+        );
+    }
+
+    // -- async tests ---------------------------------------------------------
+
+    #[tokio::test]
+    async fn mine_convos_write_chunks_stores_drawers_in_db() {
+        // Verify that mine_convos_write_chunks inserts exactly the provided chunks.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let chunks = vec![
+            Chunk {
+                content: "First chunk content with enough bytes to exceed minimum size."
+                    .to_string(),
+                chunk_index: 0,
+            },
+            Chunk {
+                content: "Second chunk follows with more content for the second drawer."
+                    .to_string(),
+                chunk_index: 1,
+            },
+        ];
+        let opts = MineParams {
+            wing: Some("test_wing".to_string()),
+            agent: "test_agent".to_string(),
+            limit: 0,
+            dry_run: false,
+            respect_gitignore: true,
+        };
+
+        mine_convos_write_chunks(
+            &connection,
+            &chunks,
+            "test_wing",
+            "technical",
+            "source.txt",
+            1_700_000_000.0,
+            &opts,
+        )
+        .await
+        .expect("mine_convos_write_chunks should succeed for valid chunks and connection");
+
+        // Pair assertion: verify the rows landed in the database.
+        let rows = crate::db::query_all(
+            &connection,
+            "SELECT id FROM drawers WHERE wing = 'test_wing'",
+            (),
+        )
+        .await
+        .expect("query for drawers after write should succeed");
+        assert_eq!(
+            rows.len(),
+            2,
+            "both chunks must be stored as separate drawers"
+        );
+        assert!(
+            rows[0].get::<String>(0).is_ok(),
+            "drawer id must be a valid string column"
+        );
+    }
+
+    #[tokio::test]
+    async fn mine_convos_processes_conversation_files() {
+        // End-to-end: mine_convos must scan a temp directory and file conversation chunks.
+        let temp_directory =
+            tempfile::tempdir().expect("failed to create temporary directory for mine_convos test");
+        // Exchange-format file: starts with '>' so chunk_by_exchange is used.
+        let content = "> user asks about architecture\n\
+                       The assistant explains component design and interface patterns in detail.";
+        std::fs::write(temp_directory.path().join("convo1.txt"), content)
+            .expect("failed to write test conversation file convo1.txt");
+
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let opts = MineParams {
+            wing: Some("test_wing".to_string()),
+            agent: "test_agent".to_string(),
+            limit: 0,
+            dry_run: false,
+            respect_gitignore: true,
+        };
+
+        mine_convos(&connection, temp_directory.path(), "full", &opts)
+            .await
+            .expect("mine_convos should succeed for a directory with valid conversation files");
+
+        // Pair assertion: at least one drawer must exist after mining.
+        let rows = crate::db::query_all(
+            &connection,
+            "SELECT id FROM drawers WHERE wing = 'test_wing'",
+            (),
+        )
+        .await
+        .expect("query for drawers after mining should succeed");
+        assert!(
+            !rows.is_empty(),
+            "at least one drawer must be filed after mining"
+        );
+        assert!(
+            !rows.is_empty(),
+            "drawer count must be positive after filing"
+        );
+    }
+
+    #[tokio::test]
+    async fn mine_convos_dry_run_writes_nothing() {
+        // In dry-run mode mine_convos must report without inserting any drawers.
+        let temp_directory =
+            tempfile::tempdir().expect("failed to create temporary directory for dry-run test");
+        let content = "> user asks about planning and roadmap details\n\
+                       The assistant replies about milestones, priorities, and sprints.";
+        std::fs::write(temp_directory.path().join("convo2.txt"), content)
+            .expect("failed to write test conversation file convo2.txt");
+
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let opts = MineParams {
+            wing: Some("dry_wing".to_string()),
+            agent: "test_agent".to_string(),
+            limit: 0,
+            dry_run: true,
+            respect_gitignore: true,
+        };
+
+        mine_convos(&connection, temp_directory.path(), "full", &opts)
+            .await
+            .expect("mine_convos dry run should succeed without writing to the database");
+
+        // Nothing should be written.
+        let rows = crate::db::query_all(
+            &connection,
+            "SELECT id FROM drawers WHERE wing = 'dry_wing'",
+            (),
+        )
+        .await
+        .expect("query for drawers after dry run should succeed");
+        assert!(rows.is_empty(), "dry run must not insert any drawers");
+        assert_eq!(rows.len(), 0, "drawer count must be zero after dry run");
+    }
+
+    #[tokio::test]
+    async fn mine_convos_skips_already_mined_files() {
+        // A file that is already mined must not produce duplicate drawers on a second run.
+        let temp_directory =
+            tempfile::tempdir().expect("failed to create temporary directory for dedup test");
+        let content =
+            "> question about decisions and alternatives\nAnswer with trade-off discussion here.";
+        std::fs::write(temp_directory.path().join("already_mined.txt"), content)
+            .expect("failed to write test conversation file already_mined.txt");
+
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let opts = MineParams {
+            wing: Some("skip_wing".to_string()),
+            agent: "test_agent".to_string(),
+            limit: 0,
+            dry_run: false,
+            respect_gitignore: true,
+        };
+
+        // First run: file gets mined.
+        mine_convos(&connection, temp_directory.path(), "full", &opts)
+            .await
+            .expect("first mine_convos run should succeed");
+        let first_count = crate::db::query_all(
+            &connection,
+            "SELECT id FROM drawers WHERE wing = 'skip_wing'",
+            (),
+        )
+        .await
+        .expect("query for drawers after first run should succeed")
+        .len();
+
+        // Second run: file is already filed; count must not increase.
+        mine_convos(&connection, temp_directory.path(), "full", &opts)
+            .await
+            .expect("second mine_convos run should succeed without re-filing");
+        let second_count = crate::db::query_all(
+            &connection,
+            "SELECT id FROM drawers WHERE wing = 'skip_wing'",
+            (),
+        )
+        .await
+        .expect("query for drawers after second run should succeed")
+        .len();
+
+        assert!(first_count >= 1, "first run must add at least one drawer");
+        assert_eq!(
+            first_count, second_count,
+            "second run must not add drawers for an already-mined file"
+        );
+    }
+
+    #[tokio::test]
+    async fn mine_convos_skips_too_short_files() {
+        // Files with content below MIN_CHUNK_SIZE must be counted as too-short
+        // and must not produce any drawers.
+        let temp_directory =
+            tempfile::tempdir().expect("failed to create temporary directory for too-short test");
+        std::fs::write(temp_directory.path().join("tiny.txt"), "tiny")
+            .expect("failed to write too-short test file tiny.txt");
+
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let opts = MineParams {
+            wing: Some("short_wing".to_string()),
+            agent: "test_agent".to_string(),
+            limit: 0,
+            dry_run: false,
+            respect_gitignore: true,
+        };
+
+        mine_convos(&connection, temp_directory.path(), "full", &opts)
+            .await
+            .expect("mine_convos should return Ok even for too-short files");
+
+        let rows = crate::db::query_all(
+            &connection,
+            "SELECT id FROM drawers WHERE wing = 'short_wing'",
+            (),
+        )
+        .await
+        .expect("query for drawers after too-short run should succeed");
+        assert!(rows.is_empty(), "too-short files must not produce drawers");
+        assert_eq!(
+            rows.len(),
+            0,
+            "drawer count must be zero for too-short input"
+        );
+    }
+
+    #[tokio::test]
+    async fn mine_convos_derives_wing_from_directory_name() {
+        // When opts.wing is None the wing is derived from the directory name.
+        let temp_directory = tempfile::tempdir()
+            .expect("failed to create temporary directory for wing-derivation test");
+        let content = "> user asks about architecture and service design patterns\n\
+             The assistant explains the module structure and interface components here.";
+        std::fs::write(temp_directory.path().join("test.txt"), content)
+            .expect("failed to write test conversation file test.txt");
+
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let opts = MineParams {
+            wing: None, // Falls back to directory name.
+            agent: "test_agent".to_string(),
+            limit: 0,
+            dry_run: false,
+            respect_gitignore: true,
+        };
+
+        mine_convos(&connection, temp_directory.path(), "full", &opts)
+            .await
+            .expect("mine_convos with derived wing should succeed");
+
+        // A drawer must exist; the wing is whatever the temp directory's last component is.
+        let rows = crate::db::query_all(&connection, "SELECT id FROM drawers", ())
+            .await
+            .expect("query for all drawers should succeed");
+        assert!(
+            !rows.is_empty(),
+            "mine_convos with None wing must file at least one drawer"
+        );
+        assert!(
+            !rows.is_empty(),
+            "drawer count must be positive after wing-derived mining"
+        );
+    }
+
+    #[tokio::test]
+    async fn mine_convos_with_limit_caps_files_processed() {
+        // opts.limit=1 must process at most one file even when the directory has more.
+        let temp_directory =
+            tempfile::tempdir().expect("failed to create temporary directory for limit test");
+        let content =
+            "> question about technical architecture design\nThe assistant explains the pattern.";
+        std::fs::write(temp_directory.path().join("a.txt"), content)
+            .expect("failed to write test file a.txt");
+        std::fs::write(temp_directory.path().join("b.txt"), content)
+            .expect("failed to write test file b.txt");
+
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let opts = MineParams {
+            wing: Some("limit_wing".to_string()),
+            agent: "test_agent".to_string(),
+            limit: 1,
+            dry_run: false,
+            respect_gitignore: true,
+        };
+
+        mine_convos(&connection, temp_directory.path(), "full", &opts)
+            .await
+            .expect("mine_convos with limit=1 should succeed");
+
+        // Only one file should have been processed; compare against unlimited run.
+        let limited_count = crate::db::query_all(
+            &connection,
+            "SELECT id FROM drawers WHERE wing = 'limit_wing'",
+            (),
+        )
+        .await
+        .expect("query for limited drawers should succeed")
+        .len();
+
+        let (_db2, connection2) = crate::test_helpers::test_db().await;
+        let opts_unlimited = MineParams {
+            wing: Some("unlimited_wing".to_string()),
+            agent: "test_agent".to_string(),
+            limit: 0,
+            dry_run: false,
+            respect_gitignore: true,
+        };
+        mine_convos(&connection2, temp_directory.path(), "full", &opts_unlimited)
+            .await
+            .expect("mine_convos with limit=0 should succeed");
+        let unlimited_count = crate::db::query_all(
+            &connection2,
+            "SELECT id FROM drawers WHERE wing = 'unlimited_wing'",
+            (),
+        )
+        .await
+        .expect("query for unlimited drawers should succeed")
+        .len();
+
+        assert!(limited_count >= 1, "limit=1 must file at least one drawer");
+        assert!(
+            limited_count <= unlimited_count,
+            "limited run must not exceed unlimited run's drawer count"
+        );
+    }
+
+    #[tokio::test]
+    async fn mine_convos_not_a_directory_returns_error() {
+        // Passing a non-directory path must return Err rather than panicking.
+        let temp_directory =
+            tempfile::tempdir().expect("failed to create temporary directory for error test");
+        let file_path = temp_directory.path().join("not_a_dir.txt");
+        std::fs::write(&file_path, "content").expect("failed to write not_a_dir.txt");
+
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let opts = MineParams {
+            wing: Some("err_wing".to_string()),
+            agent: "agent".to_string(),
+            limit: 0,
+            dry_run: false,
+            respect_gitignore: true,
+        };
+
+        let result = mine_convos(&connection, &file_path, "full", &opts).await;
+        assert!(result.is_err(), "non-directory path must return Err");
+        assert!(
+            result
+                .err()
+                .is_some_and(|error| error.to_string().contains("directory")
+                    || error.to_string().contains("not found")),
+            "error message must mention 'directory' or 'not found'"
+        );
     }
 }

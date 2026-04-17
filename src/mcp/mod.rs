@@ -690,4 +690,123 @@ mod tests {
         // Buffer should have 'hello' without the \r.
         assert_eq!(buf.len(), 5, "buffer should be 5 bytes after \\r strip");
     }
+
+    #[tokio::test]
+    async fn read_line_eof_with_partial_line_no_newline() {
+        // A stream that ends without a trailing newline must return the accumulated bytes as a line.
+        let cursor = Cursor::new(b"no newline at end".to_vec());
+        let mut reader = BufReader::new(cursor);
+        let mut buf = Vec::new();
+        let result = run_read_line_impl(&mut reader, &mut buf, 1024)
+            .await
+            .expect("read should succeed");
+        let LineRead::Line(line) = result else {
+            panic!("expected LineRead::Line for partial line at EOF");
+        };
+        assert_eq!(
+            line, "no newline at end",
+            "partial line at EOF must be returned"
+        );
+        assert_eq!(buf.len(), 17, "buffer must contain all bytes");
+    }
+
+    #[tokio::test]
+    async fn read_line_overflow_no_newline_drains_to_eof() {
+        // An oversized line with no trailing newline must drain to EOF and still report Overflow.
+        let limit = 5;
+        let input = "a".repeat(limit + 10); // No newline — entire input is one oversized line.
+        let cursor = Cursor::new(input.into_bytes());
+        let mut reader = BufReader::new(cursor);
+        let mut buf = Vec::new();
+        let result = run_read_line_impl(&mut reader, &mut buf, limit)
+            .await
+            .expect("read should succeed");
+        assert!(
+            matches!(result, LineRead::Overflow),
+            "oversized line without newline must report Overflow"
+        );
+        // After drain the stream is at EOF; next read must return Eof.
+        buf.clear();
+        let next = run_read_line_impl(&mut reader, &mut buf, limit)
+            .await
+            .expect("second read should succeed");
+        assert!(
+            matches!(next, LineRead::Eof),
+            "after overflow drain to EOF the next read must return Eof"
+        );
+    }
+
+    // -- handle_request_tools_call edge cases --------------------------------
+
+    #[tokio::test]
+    async fn handle_request_tools_call_non_object_params_returns_error() {
+        // When 'params' is not a JSON object (e.g. a string), tools/call must
+        // return Invalid Params (-32602) rather than panicking.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let request = json!({
+            "method": "tools/call",
+            "params": "not_an_object",
+            "id": 8
+        });
+        let response = handle_request(&connection, &request)
+            .await
+            .expect("handle_request should return Some for tools/call with non-object params");
+        assert_eq!(response["error"]["code"], -32602);
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .expect("error message must be a string")
+                .contains("params"),
+            "error must mention invalid params"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_request_tools_call_null_arguments_succeeds() {
+        // null arguments must be treated as an empty object — the call must succeed.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let request = json!({
+            "method": "tools/call",
+            "params": {"name": "mempalace_status", "arguments": null},
+            "id": 9
+        });
+        let response = handle_request(&connection, &request)
+            .await
+            .expect("handle_request should return Some for tools/call with null arguments");
+        // Must produce a result, not an error.
+        let content = response["result"]["content"]
+            .as_array()
+            .expect("result content must be a JSON array");
+        assert!(
+            !content.is_empty(),
+            "null arguments must produce a valid tool result"
+        );
+        assert_eq!(content[0]["type"], "text", "content type must be 'text'");
+    }
+
+    #[tokio::test]
+    async fn handle_request_tools_call_unknown_tool_returns_internal_error() {
+        // Calling an unknown tool name must return a sanitized error (not expose internals).
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let request = json!({
+            "method": "tools/call",
+            "params": {"name": "nonexistent_tool", "arguments": {}},
+            "id": 10
+        });
+        let response = handle_request(&connection, &request)
+            .await
+            .expect("handle_request should return Some for unknown tool name");
+        // The result content must contain an error field.
+        let content = response["result"]["content"]
+            .as_array()
+            .expect("result content must be a JSON array");
+        assert!(
+            !content.is_empty(),
+            "unknown tool must return content with error"
+        );
+        let text = content[0]["text"]
+            .as_str()
+            .expect("text field must be a string");
+        assert!(!text.is_empty(), "error text must not be empty");
+    }
 }

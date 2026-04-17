@@ -577,6 +577,242 @@ mod tests {
         );
     }
 
+    // --- split_file ---
+
+    /// Build a test file containing `n_sessions` Claude Code session blocks, each with
+    /// at least 12 content lines so the 10-line minimum is satisfied.
+    fn make_mega_file(n_sessions: usize) -> String {
+        let mut lines = Vec::new();
+        for i in 0..n_sessions {
+            lines.push(format!("╭──── Claude Code v1.{i}.0"));
+            // Twelve body lines — safely above the 10-line minimum in split_file.
+            for j in 0..12 {
+                lines.push(format!("Content line {j} for session {i} here."));
+            }
+            lines.push(format!("> User prompt for session {i} to create subject."));
+            lines.push(format!("Assistant answer for session {i} is here now."));
+        }
+        lines.join("\n")
+    }
+
+    #[test]
+    fn split_file_dry_run_returns_session_count() {
+        // split_file in dry-run mode must count sessions without writing any output files.
+        // The dry-run path is the same split logic but skips fs::write and fs::rename.
+        let temp_directory =
+            tempfile::tempdir().expect("failed to create temporary directory for dry-run test");
+        let mega_file_path = temp_directory.path().join("mega.txt");
+        fs::write(&mega_file_path, make_mega_file(3))
+            .expect("failed to write three-session mega file");
+        let output_directory =
+            tempfile::tempdir().expect("failed to create temporary output directory");
+
+        let written = split_file(&mega_file_path, output_directory.path(), true)
+            .expect("split_file dry run should succeed for a valid file");
+
+        assert_eq!(written, 3, "dry run must report three sessions written");
+        // Nothing must be written — output directory stays empty.
+        let output_count = fs::read_dir(output_directory.path())
+            .expect("failed to read output directory after dry run")
+            .count();
+        assert_eq!(
+            output_count, 0,
+            "dry run must not write any session files to disk"
+        );
+    }
+
+    #[test]
+    fn split_file_writes_sessions_and_renames_original() {
+        // split_file must write per-session files and rename the original to .mega_backup.
+        let temp_directory =
+            tempfile::tempdir().expect("failed to create temporary directory for write test");
+        let mega_file_path = temp_directory.path().join("mega.txt");
+        fs::write(&mega_file_path, make_mega_file(2))
+            .expect("failed to write two-session mega file");
+        let output_directory =
+            tempfile::tempdir().expect("failed to create temporary output directory");
+
+        let written = split_file(&mega_file_path, output_directory.path(), false)
+            .expect("split_file should succeed for a valid two-session file");
+
+        assert_eq!(written, 2, "must report two sessions written");
+        // Original must be renamed to .mega_backup — a rename signals successful completion.
+        assert!(
+            !mega_file_path.exists(),
+            "original file must be renamed away after split"
+        );
+        assert!(
+            mega_file_path.with_extension("mega_backup").exists(),
+            "backup file must exist at original path with .mega_backup extension"
+        );
+        // Two session files must be in the output directory.
+        let output_count = fs::read_dir(output_directory.path())
+            .expect("failed to read output directory after split")
+            .count();
+        assert_eq!(
+            output_count, 2,
+            "two session files must be written to the output directory"
+        );
+    }
+
+    #[test]
+    fn split_file_fewer_than_two_sessions_returns_zero() {
+        // A file with only one session boundary must return 0 — nothing to split.
+        let temp_directory = tempfile::tempdir()
+            .expect("failed to create temporary directory for single-session test");
+        let single_session_path = temp_directory.path().join("single.txt");
+        fs::write(&single_session_path, make_mega_file(1))
+            .expect("failed to write single-session test file");
+        let output_directory =
+            tempfile::tempdir().expect("failed to create temporary output directory");
+
+        let written = split_file(&single_session_path, output_directory.path(), false)
+            .expect("split_file should return Ok even when there is only one session");
+
+        assert_eq!(
+            written, 0,
+            "single session must return 0 — nothing to split"
+        );
+        // Original must not be renamed when no split occurred.
+        assert!(
+            single_session_path.exists(),
+            "original file must remain untouched when split produces zero sessions"
+        );
+    }
+
+    #[test]
+    fn split_file_not_a_file_returns_error() {
+        // Passing a directory path as the file argument must return Err.
+        let temp_directory =
+            tempfile::tempdir().expect("failed to create temporary directory for error test");
+        let output_directory =
+            tempfile::tempdir().expect("failed to create temporary output directory");
+        let result = split_file(temp_directory.path(), output_directory.path(), false);
+        assert!(
+            result.is_err(),
+            "directory path as file argument must return Err"
+        );
+        assert!(
+            result
+                .err()
+                .is_some_and(|error| error.to_string().contains("not an existing file")),
+            "error must mention 'not an existing file'"
+        );
+    }
+
+    // --- run ---
+
+    #[test]
+    fn run_min_sessions_below_two_returns_error() {
+        // min_sessions=1 must be rejected immediately — callers must require at least two.
+        let temp_directory = tempfile::tempdir()
+            .expect("failed to create temporary directory for min_sessions test");
+        let result = run(temp_directory.path(), None, false, 1, false);
+        assert!(result.is_err(), "min_sessions < 2 must return Err");
+        assert!(
+            result
+                .err()
+                .is_some_and(|error| error.to_string().contains("min_sessions")),
+            "error message must mention min_sessions"
+        );
+    }
+
+    #[test]
+    fn run_nonexistent_directory_returns_error() {
+        // A path that does not point to an existing directory must return Err.
+        let result = run(
+            std::path::Path::new("/nonexistent/path/that/does/not/exist"),
+            None,
+            false,
+            2,
+            false,
+        );
+        assert!(result.is_err(), "nonexistent directory must return Err");
+        assert!(
+            result
+                .err()
+                .is_some_and(|error| !error.to_string().is_empty()),
+            "error message must not be empty"
+        );
+    }
+
+    #[test]
+    fn run_no_mega_files_returns_ok() {
+        // A directory with no .txt files meeting min_sessions must return Ok with no output.
+        let temp_directory = tempfile::tempdir()
+            .expect("failed to create temporary directory for no-mega-files test");
+        // One .txt file but only one session — does not meet min_sessions=2.
+        fs::write(temp_directory.path().join("single.txt"), make_mega_file(1))
+            .expect("failed to write single-session test file");
+
+        let result = run(temp_directory.path(), None, false, 2, false);
+        assert!(
+            result.is_ok(),
+            "directory with no qualifying mega-files must return Ok"
+        );
+    }
+
+    #[test]
+    fn run_dry_run_with_mega_file_does_not_write() {
+        // run in dry-run mode must not write any output files or rename the original.
+        let temp_directory =
+            tempfile::tempdir().expect("failed to create temporary directory for run dry-run test");
+        let mega_file_path = temp_directory.path().join("mega.txt");
+        fs::write(&mega_file_path, make_mega_file(3))
+            .expect("failed to write three-session mega file");
+        let output_directory =
+            tempfile::tempdir().expect("failed to create temporary output directory for dry run");
+
+        run(
+            temp_directory.path(),
+            Some(output_directory.path()),
+            true,
+            2,
+            false,
+        )
+        .expect("run dry run should succeed without writing files");
+
+        // Original must still exist; output directory must be empty.
+        assert!(
+            mega_file_path.exists(),
+            "dry run must not rename original mega file"
+        );
+        let output_count = fs::read_dir(output_directory.path())
+            .expect("failed to read output directory after dry run")
+            .count();
+        assert_eq!(
+            output_count, 0,
+            "dry run must not write any session files to the output directory"
+        );
+    }
+
+    #[test]
+    fn run_invalid_output_dir_returns_error() {
+        // An explicit output directory path that does not exist must return Err.
+        let temp_directory = tempfile::tempdir()
+            .expect("failed to create temporary directory for invalid output test");
+        fs::write(temp_directory.path().join("mega.txt"), make_mega_file(3))
+            .expect("failed to write three-session mega file");
+
+        let result = run(
+            temp_directory.path(),
+            Some(std::path::Path::new("/nonexistent/output/directory")),
+            false,
+            2,
+            false,
+        );
+        assert!(
+            result.is_err(),
+            "nonexistent output directory must return Err"
+        );
+        assert!(
+            result
+                .err()
+                .is_some_and(|error| error.to_string().contains("output directory")),
+            "error message must mention 'output directory'"
+        );
+    }
+
     #[test]
     fn split_collect_txt_files_respect_gitignore_filters_and_caps_depth() {
         // Verify that when respect_gitignore=true, .gitignore-excluded files are
