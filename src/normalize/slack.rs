@@ -4,6 +4,29 @@ use std::collections::HashMap;
 
 use super::messages_to_transcript;
 
+/// Provenance footer appended to Slack transcript output so downstream consumers
+/// know the speaker roles are positionally assigned, not verified.
+const PROVENANCE_FOOTER: &str = "\n[source: slack-export | multi-party chat \u{2014} speaker roles are positional, not verified]";
+
+/// Sanitize a Slack speaker ID for safe embedding in transcript text.
+///
+/// Replaces bracket characters and control characters (U+0000..U+001F) with `_`
+/// to prevent chunk-boundary injection via crafted exports (issue #812).
+/// Trims surrounding whitespace after substitution.
+fn slack_sanitize_user_id(raw_user_id: &str) -> String {
+    let sanitized: String = raw_user_id
+        .chars()
+        .map(|c| {
+            if c == '[' || c == ']' || (c as u32) < 0x20 {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    sanitized.trim().to_string()
+}
+
 /// Try to parse a Slack JSON message export into transcript text.
 ///
 /// Valid messages are JSON objects with `type == "message"`, non-empty `text`,
@@ -11,7 +34,10 @@ use super::messages_to_transcript;
 /// empty text, and empty user fields are silently skipped.
 ///
 /// Assigns the first user as `"user"` and alternates role assignment for
-/// subsequent users. Returns `None` if fewer than 2 valid messages.
+/// subsequent users. Each message is prefixed with the speaker ID so the
+/// original author is preserved. A provenance footer is appended to mark
+/// the transcript as a Slack import. Returns `None` if fewer than 2 valid
+/// messages.
 pub fn try_parse(data: &serde_json::Value) -> Option<String> {
     let items = data.as_array()?;
     let mut messages: Vec<(String, String)> = Vec::new();
@@ -26,12 +52,13 @@ pub fn try_parse(data: &serde_json::Value) -> Option<String> {
             continue;
         }
 
-        let user_id = obj
+        let raw_user_id = obj
             .get("user")
             .or_else(|| obj.get("username"))
             .and_then(|u| u.as_str())
-            .unwrap_or("")
-            .to_string();
+            .unwrap_or("");
+        // Sanitize speaker ID before any use — prevents bracket/control-char injection.
+        let user_id = slack_sanitize_user_id(raw_user_id);
         let text = obj
             .get("text")
             .and_then(|t| t.as_str())
@@ -57,7 +84,8 @@ pub fn try_parse(data: &serde_json::Value) -> Option<String> {
             last_role = Some(new_role.clone());
             new_role
         };
-        messages.push((role, text));
+        // Prefix with speaker ID so the original author is preserved in the transcript.
+        messages.push((role, format!("[{user_id}] {text}")));
     }
 
     if messages.len() >= 2 {
@@ -65,7 +93,7 @@ pub fn try_parse(data: &serde_json::Value) -> Option<String> {
             .iter()
             .map(|(r, t)| (r.as_str(), t.as_str()))
             .collect();
-        Some(messages_to_transcript(&refs))
+        Some(messages_to_transcript(&refs) + PROVENANCE_FOOTER)
     } else {
         None
     }
@@ -87,8 +115,9 @@ mod tests {
         )
         .expect("valid json");
         let result = try_parse(&data).expect("should parse");
-        assert!(result.contains("> hello team"));
-        assert!(result.contains("hi there"));
+        assert!(result.contains("[U1] hello team"));
+        assert!(result.contains("[U2] hi there"));
+        assert!(result.contains("slack-export"));
     }
 
     #[test]
@@ -160,5 +189,36 @@ mod tests {
         let result = try_parse(&data).expect("should parse");
         assert!(result.contains("first valid"));
         assert!(result.contains("second valid"));
+    }
+
+    #[test]
+    fn sanitizes_injection_in_user_id() {
+        // Brackets and control chars in user ID must be replaced with '_' to prevent
+        // chunk-boundary injection via crafted exports (issue #812).
+        let data: serde_json::Value = serde_json::from_str(
+            r#"[
+                {"type":"message","user":"[U1\n]","text":"injected"},
+                {"type":"message","user":"U2","text":"clean"}
+            ]"#,
+        )
+        .expect("valid json");
+        let result = try_parse(&data).expect("should parse");
+        assert!(!result.contains("[U1\n]"), "raw injection must not appear");
+        assert!(result.contains("_U1__"), "brackets/newline replaced with _");
+        assert!(result.contains("slack-export"));
+    }
+
+    #[test]
+    fn appends_provenance_footer() {
+        let data: serde_json::Value = serde_json::from_str(
+            r#"[
+                {"type":"message","user":"A","text":"hello"},
+                {"type":"message","user":"B","text":"world"}
+            ]"#,
+        )
+        .expect("valid json");
+        let result = try_parse(&data).expect("should parse");
+        assert!(result.contains("slack-export"));
+        assert!(result.contains("speaker roles are positional, not verified"));
     }
 }

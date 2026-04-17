@@ -18,6 +18,8 @@ pub struct SearchResult {
     pub source_file: String,
     /// Relevance score — sum of matched word counts.
     pub relevance: f64,
+    /// ISO-8601 timestamp when this drawer was filed; empty string if not recorded.
+    pub created_at: String,
 }
 
 /// Search the palace using the inverted index (keyword matching with relevance scoring).
@@ -55,7 +57,7 @@ pub async fn search_memories(
     }
 
     let sql = format!(
-        "SELECT d.id, d.content, d.wing, d.room, d.source_file, SUM(dw.count) as relevance \
+        "SELECT d.id, d.content, d.wing, d.room, d.source_file, SUM(dw.count) as relevance, d.filed_at \
          FROM drawers d \
          JOIN drawer_words dw ON d.id = dw.drawer_id \
          WHERE dw.word IN ({in_clause}){filters} \
@@ -90,7 +92,7 @@ pub async fn search_memories(
     Ok(results)
 }
 
-/// Map query result rows (columns: id, content, wing, room, `source_file`, relevance)
+/// Map query result rows (columns: id, content, wing, room, `source_file`, relevance, `filed_at`)
 /// into `SearchResult` values.
 fn search_memories_parse_rows(rows: &[turso::Row]) -> Vec<SearchResult> {
     let mut results = Vec::new();
@@ -121,6 +123,11 @@ fn search_memories_parse_rows(rows: &[turso::Row]) -> Vec<SearchResult> {
             .and_then(|v| v.as_integer().copied())
             .unwrap_or(0);
         let relevance = f64::from(i32::try_from(raw_relevance).unwrap_or(i32::MAX));
+        let created_at = row
+            .get_value(6)
+            .ok()
+            .and_then(|v| v.as_text().cloned())
+            .unwrap_or_default();
 
         let source_name = Path::new(&source)
             .file_name()
@@ -134,6 +141,7 @@ fn search_memories_parse_rows(rows: &[turso::Row]) -> Vec<SearchResult> {
             room,
             source_file: source_name,
             relevance,
+            created_at,
         });
     }
     results

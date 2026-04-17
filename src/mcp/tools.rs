@@ -170,6 +170,54 @@ fn sanitize_name(value: &str, field_name: &str) -> Result<String, Value> {
     Ok(result)
 }
 
+/// Validate a knowledge-graph entity value (subject or object).
+///
+/// More permissive than `sanitize_name` — allows punctuation such as commas,
+/// colons, and parentheses that are common in natural-language KG values.
+/// Rejects null bytes, path-traversal sequences (`..`, `/`, `\`), and
+/// over-length strings.
+///
+/// Note: `/` is still rejected, so namespaced IRIs (e.g. `schema:Person`) are
+/// allowed but URI paths (e.g. `http://example.org/Person`) are not. If IRI
+/// support is ever needed, introduce a dedicated validator rather than relaxing
+/// this one.
+///
+/// Not used for wing/room names (filesystem constraints) or predicates
+/// (which should be simple relationship identifiers).
+fn sanitize_kg_value(value: &str, field_name: &str) -> Result<String, Value> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(
+            json!({"success": false, "error": format!("{field_name} must be a non-empty string"), "public": true}),
+        );
+    }
+    if trimmed.len() > 128 {
+        return Err(
+            json!({"success": false, "error": format!("{field_name} exceeds maximum length of 128 characters"), "public": true}),
+        );
+    }
+    if trimmed.contains("..")
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains('\x00')
+    {
+        return Err(
+            json!({"success": false, "error": format!("{field_name} contains invalid characters"), "public": true}),
+        );
+    }
+    let result = trimmed.to_string();
+
+    // Postconditions: result is non-empty, trimmed, and has no path-traversal chars.
+    debug_assert!(!result.is_empty());
+    debug_assert!(result == result.trim());
+    debug_assert!(!result.contains(".."));
+    debug_assert!(!result.contains('/'));
+    debug_assert!(!result.contains('\\'));
+    debug_assert!(!result.contains('\0'));
+
+    Ok(result)
+}
+
 /// Validate an optional name filter.
 ///
 /// Returns `Ok(None)` if the value is empty/whitespace-only, `Ok(Some(trimmed))`
@@ -468,6 +516,7 @@ async fn tool_search(connection: &Connection, args: &Value) -> Value {
                         "room": r.room,
                         "content": r.text,
                         "source_file": r.source_file,
+                        "created_at": r.created_at,
                         "similarity": r.relevance,
                     })
                 })
@@ -949,7 +998,7 @@ async fn tool_update_drawer(connection: &Connection, args: &Value) -> Value {
 }
 
 async fn tool_kg_query(connection: &Connection, args: &Value) -> Value {
-    let entity = match sanitize_name(str_arg(args, "entity"), "entity") {
+    let entity = match sanitize_kg_value(str_arg(args, "entity"), "entity") {
         Ok(v) => v,
         Err(e) => return e,
     };
@@ -999,7 +1048,7 @@ async fn tool_kg_add(connection: &Connection, args: &Value) -> Value {
         }
     };
 
-    let subject = match sanitize_name(subject, "subject") {
+    let subject = match sanitize_kg_value(subject, "subject") {
         Ok(v) => v,
         Err(e) => return e,
     };
@@ -1007,10 +1056,7 @@ async fn tool_kg_add(connection: &Connection, args: &Value) -> Value {
         Ok(v) => v,
         Err(e) => return e,
     };
-    // `sanitize_name` intentionally restricts objects to [a-zA-Z0-9_ .'-].
-    // If KG identifiers ever need ':', '@', or '/' (e.g. for namespaced IRIs),
-    // introduce a dedicated `sanitize_kg_object` rather than relaxing this one.
-    let object = match sanitize_name(object, "object") {
+    let object = match sanitize_kg_value(object, "object") {
         Ok(v) => v,
         Err(e) => return e,
     };
@@ -1064,7 +1110,7 @@ async fn tool_kg_invalidate(connection: &Connection, args: &Value) -> Value {
         }
     };
 
-    let subject = match sanitize_name(subject, "subject") {
+    let subject = match sanitize_kg_value(subject, "subject") {
         Ok(v) => v,
         Err(e) => return e,
     };
@@ -1072,7 +1118,7 @@ async fn tool_kg_invalidate(connection: &Connection, args: &Value) -> Value {
         Ok(v) => v,
         Err(e) => return e,
     };
-    let object = match sanitize_name(object, "object") {
+    let object = match sanitize_kg_value(object, "object") {
         Ok(v) => v,
         Err(e) => return e,
     };
@@ -1098,9 +1144,16 @@ async fn tool_kg_invalidate(connection: &Connection, args: &Value) -> Value {
 }
 
 async fn tool_kg_timeline(connection: &Connection, args: &Value) -> Value {
-    let entity = match sanitize_opt_name(str_arg(args, "entity"), "entity") {
-        Ok(v) => v,
-        Err(e) => return e,
+    let entity = {
+        let raw_entity = str_arg(args, "entity");
+        if raw_entity.is_empty() {
+            None
+        } else {
+            match sanitize_kg_value(raw_entity, "entity") {
+                Ok(v) => Some(v),
+                Err(e) => return e,
+            }
+        }
     };
 
     match kg::query::timeline(connection, entity.as_deref()).await {

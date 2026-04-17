@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use turso::Connection;
 
-use crate::config::ProjectConfig;
+use crate::config::{ProjectConfig, RoomConfig};
 use crate::error::Result;
 use crate::palace::chunker::chunk_text;
 use crate::palace::drawer;
@@ -351,6 +351,50 @@ async fn mine_process_files(
     ))
 }
 
+/// Load project config from `project_dir`, trying `mempalace.yaml` first, then the
+/// legacy `mempal.yaml` name. If neither exists, emits a warning to stderr and
+/// synthesises a default config using the directory basename as the wing name.
+///
+/// This mirrors the Python behaviour introduced in PR #604: directories without a
+/// config file can still be mined instead of aborting with an error.
+fn mine_load_config(project_dir: &Path) -> Result<ProjectConfig> {
+    let primary = project_dir.join("mempalace.yaml");
+    if primary.exists() {
+        return ProjectConfig::load(&primary);
+    }
+    let legacy = project_dir.join("mempal.yaml");
+    if legacy.exists() {
+        return ProjectConfig::load(&legacy);
+    }
+
+    // Neither config file found — warn and fall back to auto-detected defaults so
+    // mining can proceed without requiring an explicit `mempalace init` step.
+    let wing_name = project_dir
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    assert!(
+        !wing_name.is_empty(),
+        "mine_load_config: project_dir must have a basename"
+    );
+    eprintln!(
+        "  No mempalace.yaml found in {} \
+         — using auto-detected defaults (wing='{wing_name}'). \
+         Directories with the same basename will share a wing; \
+         add mempalace.yaml to disambiguate.",
+        project_dir.display()
+    );
+    Ok(ProjectConfig {
+        wing: wing_name,
+        rooms: vec![RoomConfig {
+            name: "general".to_string(),
+            description: "All project files".to_string(),
+            keywords: vec![],
+        }],
+    })
+}
+
 /// Mine a project directory into the palace.
 pub async fn mine(connection: &Connection, project_dir: &Path, opts: &MineParams) -> Result<()> {
     if !project_dir.is_dir() {
@@ -367,8 +411,7 @@ pub async fn mine(connection: &Connection, project_dir: &Path, opts: &MineParams
         ))
     })?;
 
-    let config_path = project_dir.join("mempalace.yaml");
-    let config = ProjectConfig::load(&config_path)?;
+    let config = mine_load_config(&project_dir)?;
 
     let wing = opts.wing.as_deref().unwrap_or(&config.wing);
     let mut rooms = config.rooms;
