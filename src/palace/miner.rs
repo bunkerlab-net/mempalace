@@ -436,9 +436,18 @@ pub async fn mine(connection: &Connection, project_dir: &Path, opts: &MineParams
         ))
     })?;
 
-    let config = mine_load_config(&project_dir, opts.wing.as_deref())?;
+    // Normalize the wing override: trim whitespace and treat empty/whitespace-only
+    // values as no override, falling back to config or directory basename.
+    let normalized_wing: Option<String> = opts
+        .wing
+        .as_deref()
+        .map(str::trim)
+        .filter(|w| !w.is_empty())
+        .map(str::to_string);
 
-    let wing = opts.wing.as_deref().unwrap_or(&config.wing);
+    let config = mine_load_config(&project_dir, normalized_wing.as_deref())?;
+
+    let wing = normalized_wing.as_deref().unwrap_or(&config.wing);
     let mut rooms = config.rooms;
     if rooms.is_empty() {
         // Empty rooms list in mempalace.yaml would violate detect_room's precondition;
@@ -780,6 +789,104 @@ mod tests {
         assert!(
             !names.contains(&"image.png".to_string()),
             "Non-readable extension should be excluded"
+        );
+    }
+
+    // --- mine() wing normalization ---
+
+    const CONFIG_YAML: &str = "wing: config-wing\nrooms:\n  - name: general\n    description: ''\n";
+
+    fn mine_opts(wing: Option<&str>) -> MineParams {
+        MineParams {
+            wing: wing.map(str::to_string),
+            agent: "test".to_string(),
+            limit: 0,
+            dry_run: false,
+            respect_gitignore: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn mine_wing_override_is_trimmed() {
+        // A padded --wing value must be trimmed before drawers are stored, so
+        // `mine . --wing " padded "` yields wing="padded" in the palace.
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        std::fs::write(dir.path().join("mempalace.yaml"), CONFIG_YAML)
+            .expect("write config should succeed");
+        std::fs::write(
+            dir.path().join("notes.txt"),
+            "rust programming language provides memory safety without a garbage collector",
+        )
+        .expect("write notes.txt should succeed");
+
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        mine(&connection, dir.path(), &mine_opts(Some("  padded  ")))
+            .await
+            .expect("mine must succeed with padded wing");
+
+        let rows = crate::db::query_all(&connection, "SELECT DISTINCT wing FROM drawers", ())
+            .await
+            .expect("query must succeed");
+        assert_eq!(rows.len(), 1, "must have exactly one distinct wing");
+        let stored_wing: String = rows[0].get(0).expect("wing column must be readable");
+        assert_eq!(stored_wing, "padded", "wing must be trimmed");
+    }
+
+    #[tokio::test]
+    async fn mine_wing_whitespace_only_falls_back_to_config() {
+        // A whitespace-only --wing must be treated as no override, so the
+        // config file's wing ("config-wing") is used instead.
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        std::fs::write(dir.path().join("mempalace.yaml"), CONFIG_YAML)
+            .expect("write config should succeed");
+        std::fs::write(
+            dir.path().join("notes.txt"),
+            "rust programming language provides memory safety without a garbage collector",
+        )
+        .expect("write notes.txt should succeed");
+
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        mine(&connection, dir.path(), &mine_opts(Some("   ")))
+            .await
+            .expect("mine must succeed when whitespace wing falls back to config");
+
+        let rows = crate::db::query_all(&connection, "SELECT DISTINCT wing FROM drawers", ())
+            .await
+            .expect("query must succeed");
+        assert_eq!(rows.len(), 1, "must have exactly one distinct wing");
+        let stored_wing: String = rows[0].get(0).expect("wing column must be readable");
+        assert_eq!(
+            stored_wing, "config-wing",
+            "whitespace-only wing must fall back to config"
+        );
+    }
+
+    #[tokio::test]
+    async fn mine_wing_empty_falls_back_to_config() {
+        // An empty --wing must be treated as no override, so the config file's
+        // wing ("config-wing") is used instead.
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        std::fs::write(dir.path().join("mempalace.yaml"), CONFIG_YAML)
+            .expect("write config should succeed");
+        std::fs::write(
+            dir.path().join("notes.txt"),
+            "rust programming language provides memory safety without a garbage collector",
+        )
+        .expect("write notes.txt should succeed");
+
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        mine(&connection, dir.path(), &mine_opts(Some("")))
+            .await
+            .expect("mine must succeed when empty wing falls back to config");
+
+        let rows = crate::db::query_all(&connection, "SELECT DISTINCT wing FROM drawers", ())
+            .await
+            .expect("query must succeed");
+        assert_eq!(rows.len(), 1, "must have exactly one distinct wing");
+        let stored_wing: String = rows[0].get(0).expect("wing column must be readable");
+        assert_eq!(
+            stored_wing, "config-wing",
+            "empty wing must fall back to config"
         );
     }
 }
