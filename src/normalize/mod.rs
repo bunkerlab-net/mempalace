@@ -337,25 +337,26 @@ mod tests {
 
     #[test]
     fn normalize_file_too_large_returns_error() {
-        // Files exceeding the 500 MB safety limit must be rejected. We cannot
-        // create a real 500 MB file in tests, so we test the metadata check by
-        // verifying the error message format matches the production path.
-        // Instead, we verify the error path by checking that the error message
-        // mentions "too large" for an appropriately sized scenario. Since we
-        // cannot practically create a 500 MB file in tests, we verify the
-        // normalize function's other error path (file not found) as a proxy
-        // for the error handling infrastructure being correct.
+        // Files exceeding the 500 MB safety limit must be rejected. Create a sparse
+        // file (no disk space consumed) whose metadata reports a size above MAX_SIZE.
         let temp_directory =
-            tempfile::tempdir().expect("failed to create temporary directory for normalize test");
-        let filepath = temp_directory.path().join("nonexistent_for_size_test.json");
+            tempfile::tempdir().expect("failed to create temporary directory for size-limit test");
+        let filepath = temp_directory.path().join("huge.json");
+        let file = std::fs::File::create(&filepath)
+            .expect("failed to create sparse file for size-limit test");
+        // 500 MB + 1 byte exceeds the MAX_SIZE constant (500 * 1024 * 1024).
+        file.set_len(500 * 1024 * 1024 + 1)
+            .expect("failed to set sparse file length above MAX_SIZE");
+        drop(file);
+
         let result = normalize(&filepath);
-        assert!(result.is_err(), "missing file must produce an error");
+        assert!(result.is_err(), "file exceeding 500 MB must be rejected");
         assert!(
             result
                 .as_ref()
                 .err()
-                .is_some_and(|error| error.to_string().contains("not found")),
-            "error message must indicate file was not found"
+                .is_some_and(|error| error.to_string().contains("too large")),
+            "error message must mention 'too large'"
         );
     }
 }

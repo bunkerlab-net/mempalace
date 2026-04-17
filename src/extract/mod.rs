@@ -496,6 +496,19 @@ mod tests {
             memories_19.is_empty(),
             "19-character segment must be skipped"
         );
+        // Boundary case: exactly 20 characters must NOT be skipped by the length
+        // filter. Uses "let's use" which matches the decision regex pattern.
+        let text_20 = "Let's use this tool.";
+        assert_eq!(
+            text_20.trim().len(),
+            20,
+            "test string must be exactly 20 chars"
+        );
+        let memories_20 = extract_memories(text_20, 0.0);
+        assert!(
+            !memories_20.is_empty(),
+            "20-character segment with keywords must not be skipped by the length filter"
+        );
     }
 
     #[test]
@@ -539,23 +552,22 @@ mod tests {
 
     #[test]
     fn test_disambiguate_problem_positive_milestone() {
-        // A problem with positive sentiment and milestone score must be reclassified
-        // as milestone (not emotional). This exercises the positive-sentiment branch
-        // in disambiguate where milestone score is present.
-        let text = "The bug was terrible but it finally works now and I'm so proud we built this breakthrough achievement.";
+        // A problem with resolution markers but no emotional markers must be
+        // reclassified as "milestone". The `disambiguate` function checks
+        // `has_resolution` first; when emotional score is 0 it returns "milestone".
+        // Avoid emotional keywords (proud, love, joy) to stay off the emotional branch.
+        let text = "The bug was terrible but the issue was finally fixed and it works after the long struggle.";
         let memories = extract_memories(text, 0.1);
         assert!(
             !memories.is_empty(),
             "text must produce at least one memory"
         );
-        // The text has problem markers ("bug"), positive sentiment ("proud",
-        // "breakthrough"), and milestone markers ("finally", "works", "built",
-        // "breakthrough"). Resolution word "works" triggers has_resolution,
-        // and positive + emotional → "emotional" or resolution → "milestone".
+        // "works" and "fixed" trigger has_resolution; no emotional keywords means
+        // the emotional score is 0, so disambiguate returns "milestone".
         let kind = &memories[0].kind;
-        assert!(
-            kind == "milestone" || kind == "emotional",
-            "resolved problem with positive sentiment must be milestone or emotional, got: {kind}"
+        assert_eq!(
+            kind, "milestone",
+            "resolved problem without emotional cues must be reclassified as milestone, got: {kind}"
         );
     }
 

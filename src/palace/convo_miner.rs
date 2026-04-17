@@ -1113,9 +1113,11 @@ mod tests {
             !rows.is_empty(),
             "at least one drawer must be filed after mining"
         );
+        // Pair assertion: verify the drawer has the correct wing.
+        let drawer_id: String = rows[0].get(0).expect("drawer id column must be readable");
         assert!(
-            !rows.is_empty(),
-            "drawer count must be positive after filing"
+            drawer_id.starts_with("drawer_"),
+            "drawer id must start with the 'drawer_' prefix"
         );
     }
 
@@ -1151,7 +1153,11 @@ mod tests {
         .await
         .expect("query for drawers after dry run should succeed");
         assert!(rows.is_empty(), "dry run must not insert any drawers");
-        assert_eq!(rows.len(), 0, "drawer count must be zero after dry run");
+        // Pair assertion: the conversation file must still exist (not consumed).
+        assert!(
+            temp_directory.path().join("convo2.txt").exists(),
+            "dry run must not delete or rename the source file"
+        );
     }
 
     #[tokio::test]
@@ -1236,10 +1242,10 @@ mod tests {
         .await
         .expect("query for drawers after too-short run should succeed");
         assert!(rows.is_empty(), "too-short files must not produce drawers");
-        assert_eq!(
-            rows.len(),
-            0,
-            "drawer count must be zero for too-short input"
+        // Pair assertion: the tiny file must still exist on disk (not consumed).
+        assert!(
+            temp_directory.path().join("tiny.txt").exists(),
+            "too-short file must not be deleted or renamed"
         );
     }
 
@@ -1274,9 +1280,11 @@ mod tests {
             !rows.is_empty(),
             "mine_convos with None wing must file at least one drawer"
         );
+        // Pair assertion: the drawer id must follow the expected prefix format.
+        let drawer_id: String = rows[0].get(0).expect("drawer id column must be readable");
         assert!(
-            !rows.is_empty(),
-            "drawer count must be positive after wing-derived mining"
+            drawer_id.starts_with("drawer_"),
+            "drawer id must start with the 'drawer_' prefix"
         );
     }
 

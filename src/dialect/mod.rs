@@ -339,9 +339,15 @@ mod tests {
     fn detect_emotions_caps_at_three() {
         // detect_emotions must break after collecting 3 distinct emotion codes.
         // This exercises the `detected.len() >= 3` early-exit branch.
+        // Input has 4+ distinct emotion keywords: love→love, excited→excite,
+        // worried→anx, frustrated→frust — only the first 3 unique codes kept.
         let text = "I love this, I'm excited, but worried and frustrated about the deadline";
         let emotions = detect_emotions(text);
-        assert!(emotions.len() <= 3, "emotion count must be capped at 3");
+        assert_eq!(
+            emotions.len(),
+            3,
+            "emotion count must saturate at exactly 3"
+        );
         assert!(
             !emotions.is_empty(),
             "text with emotion keywords must produce at least one"
@@ -352,10 +358,11 @@ mod tests {
     fn detect_flags_caps_at_three() {
         // detect_flags must break after collecting 3 distinct flag codes.
         // This exercises the `detected.len() >= 3` early-exit branch.
-        let text =
-            "We decided to switch the api because the server architecture was launched wrong";
+        // Input has 4+ distinct flag codes: decided→DECISION, first time→ORIGIN,
+        // core→CORE, api→TECHNICAL — only the first 3 unique codes kept.
+        let text = "We decided for the first time that the core api needs a rewrite";
         let flags = detect_flags(text);
-        assert!(flags.len() <= 3, "flag count must be capped at 3");
+        assert_eq!(flags.len(), 3, "flag count must saturate at exactly 3");
         assert!(
             !flags.is_empty(),
             "text with flag keywords must produce at least one"

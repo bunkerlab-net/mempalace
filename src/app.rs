@@ -382,10 +382,10 @@ mod tests {
                     result.is_ok(),
                     "run_status must return Ok when palace.db does not exist"
                 );
-                // Pair assertion: no error variant must be returned.
+                // Pair assertion: the temp directory must not have gained a palace.db.
                 assert!(
-                    result.err().is_none(),
-                    "run_status must not produce any error for a missing palace"
+                    !temp_directory.path().join("palace.db").exists(),
+                    "run_status must not create a palace.db when reporting absence"
                 );
             },
         )

@@ -94,6 +94,29 @@ mod tests {
     }
 
     #[test]
+    fn add_triple_validate_params_rejects_confidence_greater_than_one() {
+        // Confidence above 1.0 is outside the valid [0.0, 1.0] range.
+        let params = TripleParams {
+            subject: "Alice",
+            predicate: "knows",
+            object: "Bob",
+            valid_from: None,
+            valid_to: None,
+            confidence: 1.1,
+            source_closet: None,
+            source_file: None,
+        };
+        let result = add_triple_validate_params(&params);
+        assert!(result.is_err(), "confidence > 1.0 must be rejected");
+        assert!(
+            result
+                .err()
+                .is_some_and(|error| error.to_string().contains("confidence")),
+            "error message must mention confidence"
+        );
+    }
+
+    #[test]
     fn add_triple_validate_params_rejects_invalid_date_format() {
         // A non-ISO date in valid_from must be rejected with a clear error.
         let params = TripleParams {
