@@ -191,7 +191,7 @@ fn sanitize_kg_value(value: &str, field_name: &str) -> Result<String, Value> {
             json!({"success": false, "error": format!("{field_name} must be a non-empty string"), "public": true}),
         );
     }
-    if trimmed.len() > 128 {
+    if trimmed.chars().count() > 128 {
         return Err(
             json!({"success": false, "error": format!("{field_name} exceeds maximum length of 128 characters"), "public": true}),
         );
@@ -1145,7 +1145,7 @@ async fn tool_kg_invalidate(connection: &Connection, args: &Value) -> Value {
 
 async fn tool_kg_timeline(connection: &Connection, args: &Value) -> Value {
     let entity = {
-        let raw_entity = str_arg(args, "entity");
+        let raw_entity = str_arg(args, "entity").trim();
         if raw_entity.is_empty() {
             None
         } else {

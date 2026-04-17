@@ -351,20 +351,24 @@ async fn mine_process_files(
     ))
 }
 
-/// Load project config from `project_dir`, trying `mempalace.yaml` first, then the
-/// legacy `mempal.yaml` name. If neither exists, emits a warning to stderr and
-/// synthesises a default config using the directory basename as the wing name.
+/// Load project config from `project_dir`, trying config file names in precedence
+/// order: `mempalace.yaml`, `mempalace.yml`, `mempal.yaml`, `mempal.yml`. If none
+/// exist, emits a warning to stderr and synthesises a default config using the
+/// directory basename as the wing name.
 ///
 /// This mirrors the Python behaviour introduced in PR #604: directories without a
 /// config file can still be mined instead of aborting with an error.
 fn mine_load_config(project_dir: &Path) -> Result<ProjectConfig> {
-    let primary = project_dir.join("mempalace.yaml");
-    if primary.exists() {
-        return ProjectConfig::load(&primary);
-    }
-    let legacy = project_dir.join("mempal.yaml");
-    if legacy.exists() {
-        return ProjectConfig::load(&legacy);
+    for name in &[
+        "mempalace.yaml",
+        "mempalace.yml",
+        "mempal.yaml",
+        "mempal.yml",
+    ] {
+        let path = project_dir.join(name);
+        if path.exists() {
+            return ProjectConfig::load(&path);
+        }
     }
 
     // Neither config file found — warn and fall back to auto-detected defaults so
@@ -374,12 +378,15 @@ fn mine_load_config(project_dir: &Path) -> Result<ProjectConfig> {
         .unwrap_or_default()
         .to_string_lossy()
         .into_owned();
-    assert!(
-        !wing_name.is_empty(),
-        "mine_load_config: project_dir must have a basename"
-    );
+    if wing_name.is_empty() {
+        return Err(crate::error::Error::Other(format!(
+            "cannot infer wing name: {} has no basename; \
+             add mempalace.yaml with an explicit wing name",
+            project_dir.display()
+        )));
+    }
     eprintln!(
-        "  No mempalace.yaml found in {} \
+        "  No mempalace.yaml/.yml found in {} \
          — using auto-detected defaults (wing='{wing_name}'). \
          Directories with the same basename will share a wing; \
          add mempalace.yaml to disambiguate.",
