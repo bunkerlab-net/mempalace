@@ -157,7 +157,7 @@ pub async fn run(cli: Cli) -> error::Result<()> {
     Ok(())
 }
 
-/// Handle the `status` sub-command — opens the palace read-only if it exists.
+/// Handle the `status` sub-command — opens the palace if it exists.
 async fn run_status() -> error::Result<()> {
     let config = MempalaceConfig::load()?;
     let db_path = config.palace_db_path();
