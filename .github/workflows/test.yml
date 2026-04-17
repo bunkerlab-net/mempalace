@@ -33,7 +33,7 @@ jobs:
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
         with:
           toolchain: stable
-          components: llvm-tools-preview
+          components: llvm-tools
 
       - name: Capture rustc fingerprint
         id: rustc
@@ -74,9 +74,10 @@ jobs:
             -o /tmp/binstall-install.sh
           echo "${BINSTALL_SHA}  /tmp/binstall-install.sh" | shasum -a 256 --check
           bash /tmp/binstall-install.sh
+
       - name: Install Nextest
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: cargo binstall -y --force cargo-nextest cargo-llvm-cov
 
-      - run: cargo nextest run
+      - run: cargo llvm-cov nextest --all-features
