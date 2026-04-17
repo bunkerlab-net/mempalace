@@ -34,15 +34,22 @@ const READABLE_EXTENSIONS: &[&str] = &[
     "lua", "r", "php", "pl", "zig", "nim", "ex", "exs", "erl", "hs", "ml",
 ];
 
-const SKIP_FILES: &[&str] = &[
+/// Config filenames recognised by the miner, in load-precedence order.
+/// Single source of truth: referenced by both `mine_load_config` and `is_skip_file`.
+pub const PROJECT_CONFIG_FILES: &[&str] = &[
     "mempalace.yaml",
     "mempalace.yml",
     "mempal.yaml",
     "mempal.yml",
-    ".gitignore",
-    "package-lock.json",
-    "Cargo.lock",
 ];
+
+/// Non-config files that are always excluded from mining.
+const SKIP_FILES_EXTRA: &[&str] = &[".gitignore", "package-lock.json", "Cargo.lock"];
+
+/// Return `true` if a filename should be excluded from mining.
+fn is_skip_file(name: &str) -> bool {
+    PROJECT_CONFIG_FILES.contains(&name) || SKIP_FILES_EXTRA.contains(&name)
+}
 
 /// Scan a project directory for all readable files.
 pub fn scan_project_with_opts(project_dir: &Path, respect_gitignore: bool) -> Vec<PathBuf> {
@@ -102,7 +109,7 @@ fn walk_dir_gitignore(project_dir: &Path) -> Vec<PathBuf> {
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
-        if SKIP_FILES.contains(&name.as_str()) {
+        if is_skip_file(name.as_str()) {
             continue;
         }
 
@@ -153,7 +160,7 @@ fn walk_dir(directory: &Path, files: &mut Vec<PathBuf>) {
             } else if let Some(extension) = path.extension() {
                 let extension_lower = extension.to_string_lossy().to_lowercase();
                 if READABLE_EXTENSIONS.contains(&extension_lower.as_str())
-                    && !SKIP_FILES.contains(&name.as_str())
+                    && !is_skip_file(name.as_str())
                 {
                     if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_FILE_SIZE) {
                         continue;
@@ -359,12 +366,7 @@ async fn mine_process_files(
 /// This mirrors the Python behaviour introduced in PR #604: directories without a
 /// config file can still be mined instead of aborting with an error.
 fn mine_load_config(project_dir: &Path) -> Result<ProjectConfig> {
-    for name in &[
-        "mempalace.yaml",
-        "mempalace.yml",
-        "mempal.yaml",
-        "mempal.yml",
-    ] {
+    for name in PROJECT_CONFIG_FILES {
         let path = project_dir.join(name);
         if path.exists() {
             return ProjectConfig::load(&path);
@@ -614,6 +616,84 @@ mod tests {
         assert!(
             !names.iter().any(|n| n == "foo.js"),
             "Files inside node_modules should be skipped"
+        );
+    }
+
+    // --- mine_load_config ---
+
+    #[test]
+    fn mine_load_config_loads_primary_yaml() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        std::fs::write(
+            dir.path().join("mempalace.yaml"),
+            "wing: primary\nrooms:\n  - name: main\n    description: ''\n",
+        )
+        .expect("write mempalace.yaml should succeed");
+        let config = mine_load_config(dir.path()).expect("should load primary yaml");
+        assert_eq!(config.wing, "primary");
+        assert_eq!(config.rooms.len(), 1);
+        assert_eq!(config.rooms[0].name, "main");
+    }
+
+    #[test]
+    fn mine_load_config_precedence_yaml_over_yml() {
+        // mempalace.yaml must take precedence over mempalace.yml.
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        std::fs::write(
+            dir.path().join("mempalace.yaml"),
+            "wing: from-yaml\nrooms:\n  - name: r\n    description: ''\n",
+        )
+        .expect("write .yaml should succeed");
+        std::fs::write(
+            dir.path().join("mempalace.yml"),
+            "wing: from-yml\nrooms:\n  - name: r\n    description: ''\n",
+        )
+        .expect("write .yml should succeed");
+        let config = mine_load_config(dir.path()).expect("should load yaml over yml");
+        assert_eq!(config.wing, "from-yaml");
+    }
+
+    #[test]
+    fn mine_load_config_falls_back_to_yml() {
+        // mempalace.yml is used when the .yaml variant is absent.
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        std::fs::write(
+            dir.path().join("mempalace.yml"),
+            "wing: yml-wing\nrooms:\n  - name: r\n    description: ''\n",
+        )
+        .expect("write mempalace.yml should succeed");
+        let config = mine_load_config(dir.path()).expect("should load .yml");
+        assert_eq!(config.wing, "yml-wing");
+    }
+
+    #[test]
+    fn mine_load_config_synthesises_defaults_when_no_config() {
+        // No config files present — defaults use the directory basename as wing.
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let config = mine_load_config(dir.path()).expect("should synthesise defaults");
+        let expected_wing = dir
+            .path()
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        assert_eq!(config.wing, expected_wing);
+        assert_eq!(config.rooms.len(), 1);
+        assert_eq!(config.rooms[0].name, "general");
+    }
+
+    #[test]
+    fn mine_load_config_errors_on_empty_basename() {
+        // Mining a root-like path (no basename) must return Err, not panic.
+        // Use a path whose file_name() is None (e.g. "/").
+        let result = mine_load_config(std::path::Path::new("/"));
+        assert!(result.is_err(), "root path must produce an error");
+        let error_message = result
+            .expect_err("root path must produce an error")
+            .to_string();
+        assert!(
+            error_message.contains("basename"),
+            "error must mention basename: {error_message}"
         );
     }
 

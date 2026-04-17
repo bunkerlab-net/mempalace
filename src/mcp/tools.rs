@@ -2611,6 +2611,82 @@ mod tests {
         .await;
     }
 
+    // --- sanitize_kg_value ---
+
+    #[test]
+    fn sanitize_kg_value_allows_natural_language_punctuation() {
+        // Commas, colons, and parentheses are common in KG entity values.
+        for input in &[
+            "Alice, Bob",
+            "type: Person",
+            "born in (1990)",
+            "co-founder",
+            "O'Brien",
+            "Dr. Smith",
+        ] {
+            let result = sanitize_kg_value(input, "entity");
+            assert!(result.is_ok(), "expected Ok for '{input}', got {result:?}");
+            assert_eq!(
+                result.expect("sanitize_kg_value must accept valid input"),
+                input.trim()
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_kg_value_trims_whitespace() {
+        let result = sanitize_kg_value("  Alice  ", "entity");
+        assert_eq!(result.expect("whitespace trimming must succeed"), "Alice");
+    }
+
+    #[test]
+    fn sanitize_kg_value_unicode_boundary() {
+        // Exactly 128 Unicode characters (each is 3 bytes) must be accepted;
+        // 129 must be rejected.
+        let char_128: String = "あ".repeat(128);
+        let char_129: String = "あ".repeat(129);
+        assert_eq!(char_128.chars().count(), 128);
+        assert_eq!(char_129.chars().count(), 129);
+        assert!(
+            sanitize_kg_value(&char_128, "entity").is_ok(),
+            "128-char Unicode must be accepted"
+        );
+        let err = sanitize_kg_value(&char_129, "entity");
+        assert!(err.is_err(), "129-char Unicode must be rejected");
+        assert!(
+            err.expect_err("129-char input must be rejected")["error"]
+                .as_str()
+                .expect("error must be string")
+                .contains("128"),
+            "error must mention limit"
+        );
+    }
+
+    #[test]
+    fn sanitize_kg_value_rejects_path_traversal_and_null() {
+        let disallowed = [
+            ("..", "dotdot"),
+            ("/", "slash"),
+            ("\\", "backslash"),
+            ("\0", "null"),
+        ];
+        for (input, label) in &disallowed {
+            let result = sanitize_kg_value(&format!("value{input}here"), "entity");
+            assert!(result.is_err(), "expected Err for {label}");
+            let error_json = result.expect_err("disallowed input must be rejected");
+            assert!(
+                error_json["public"].as_bool().unwrap_or(false),
+                "error must be public for {label}"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_kg_value_rejects_empty_and_whitespace_only() {
+        assert!(sanitize_kg_value("", "entity").is_err());
+        assert!(sanitize_kg_value("   ", "entity").is_err());
+    }
+
     // --- get_aaak_spec (via dispatch) ---
 
     #[tokio::test]
