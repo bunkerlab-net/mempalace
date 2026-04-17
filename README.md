@@ -5,6 +5,8 @@ No Python, no ChromaDB, no API keys.
 
 **Drop-in replacement for [MemPalace/mempalace](https://github.com/MemPalace/mempalace) with a ~13MB binary instead of a ~100MB Python environment.**
 
+[![codecov](https://codecov.io/gh/bunkerlab-net/mempalace/graph/badge.svg)](https://codecov.io/gh/bunkerlab-net/mempalace)
+
 ---
 
 ## Why
