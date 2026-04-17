@@ -1749,6 +1749,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_results_include_created_at() {
+        // Each search result must include a non-empty created_at field sourced
+        // from the drawer's filed_at column.
+        with_isolated_env(|connection| async move {
+            seed_drawer(
+                &connection,
+                "tech",
+                "rust",
+                "rust programming language memory safety",
+            )
+            .await;
+
+            let result = tool_search(&connection, &json!({"query": "rust programming"})).await;
+            assert!(result.get("error").is_none(), "search must not error");
+            let results = result["results"].as_array().expect("results must be array");
+            assert!(!results.is_empty(), "must have at least one result");
+            for r in results {
+                let created_at = r["created_at"]
+                    .as_str()
+                    .expect("created_at must be a string");
+                assert!(!created_at.is_empty(), "created_at must not be empty");
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn search_with_wing_filter() {
         with_isolated_env(|connection| async move {
             seed_drawer(

@@ -360,12 +360,15 @@ async fn mine_process_files(
 
 /// Load project config from `project_dir`, trying config file names in precedence
 /// order: `mempalace.yaml`, `mempalace.yml`, `mempal.yaml`, `mempal.yml`. If none
-/// exist, emits a warning to stderr and synthesises a default config using the
-/// directory basename as the wing name.
+/// exist, emits a warning to stderr and synthesises a default config.
+///
+/// `override_wing` is the wing name from `--wing` on the command line. When no
+/// config file is found and the directory has no basename (e.g. `/`), the override
+/// is used instead of failing — so `mempalace mine / --wing myproject` succeeds.
 ///
 /// This mirrors the Python behaviour introduced in PR #604: directories without a
 /// config file can still be mined instead of aborting with an error.
-fn mine_load_config(project_dir: &Path) -> Result<ProjectConfig> {
+fn mine_load_config(project_dir: &Path, override_wing: Option<&str>) -> Result<ProjectConfig> {
     for name in PROJECT_CONFIG_FILES {
         let path = project_dir.join(name);
         if path.exists() {
@@ -375,18 +378,25 @@ fn mine_load_config(project_dir: &Path) -> Result<ProjectConfig> {
 
     // Neither config file found — warn and fall back to auto-detected defaults so
     // mining can proceed without requiring an explicit `mempalace init` step.
-    let wing_name = project_dir
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .into_owned();
-    if wing_name.is_empty() {
-        return Err(crate::error::Error::Other(format!(
-            "cannot infer wing name: {} has no basename; \
-             add mempalace.yaml with an explicit wing name",
-            project_dir.display()
-        )));
-    }
+    //
+    // Wing resolution order: explicit --wing override, then directory basename.
+    let wing_name = if let Some(wing) = override_wing {
+        wing.to_string()
+    } else {
+        let inferred = project_dir
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        if inferred.is_empty() {
+            return Err(crate::error::Error::Other(format!(
+                "cannot infer wing name: {} has no basename; \
+                 add mempalace.yaml with an explicit wing name",
+                project_dir.display()
+            )));
+        }
+        inferred
+    };
     eprintln!(
         "  No mempalace.yaml/.yml found in {} \
          — using auto-detected defaults (wing='{wing_name}'). \
@@ -420,7 +430,7 @@ pub async fn mine(connection: &Connection, project_dir: &Path, opts: &MineParams
         ))
     })?;
 
-    let config = mine_load_config(&project_dir)?;
+    let config = mine_load_config(&project_dir, opts.wing.as_deref())?;
 
     let wing = opts.wing.as_deref().unwrap_or(&config.wing);
     let mut rooms = config.rooms;
@@ -629,7 +639,7 @@ mod tests {
             "wing: primary\nrooms:\n  - name: main\n    description: ''\n",
         )
         .expect("write mempalace.yaml should succeed");
-        let config = mine_load_config(dir.path()).expect("should load primary yaml");
+        let config = mine_load_config(dir.path(), None).expect("should load primary yaml");
         assert_eq!(config.wing, "primary");
         assert_eq!(config.rooms.len(), 1);
         assert_eq!(config.rooms[0].name, "main");
@@ -649,7 +659,7 @@ mod tests {
             "wing: from-yml\nrooms:\n  - name: r\n    description: ''\n",
         )
         .expect("write .yml should succeed");
-        let config = mine_load_config(dir.path()).expect("should load yaml over yml");
+        let config = mine_load_config(dir.path(), None).expect("should load yaml over yml");
         assert_eq!(config.wing, "from-yaml");
     }
 
@@ -662,7 +672,7 @@ mod tests {
             "wing: yml-wing\nrooms:\n  - name: r\n    description: ''\n",
         )
         .expect("write mempalace.yml should succeed");
-        let config = mine_load_config(dir.path()).expect("should load .yml");
+        let config = mine_load_config(dir.path(), None).expect("should load .yml");
         assert_eq!(config.wing, "yml-wing");
     }
 
@@ -670,7 +680,7 @@ mod tests {
     fn mine_load_config_synthesises_defaults_when_no_config() {
         // No config files present — defaults use the directory basename as wing.
         let dir = tempfile::tempdir().expect("tempdir should be created");
-        let config = mine_load_config(dir.path()).expect("should synthesise defaults");
+        let config = mine_load_config(dir.path(), None).expect("should synthesise defaults");
         let expected_wing = dir
             .path()
             .file_name()
@@ -686,7 +696,7 @@ mod tests {
     fn mine_load_config_errors_on_empty_basename() {
         // Mining a root-like path (no basename) must return Err, not panic.
         // Use a path whose file_name() is None (e.g. "/").
-        let result = mine_load_config(std::path::Path::new("/"));
+        let result = mine_load_config(std::path::Path::new("/"), None);
         assert!(result.is_err(), "root path must produce an error");
         let error_message = result
             .expect_err("root path must produce an error")
@@ -695,6 +705,16 @@ mod tests {
             error_message.contains("basename"),
             "error must mention basename: {error_message}"
         );
+    }
+
+    #[test]
+    fn mine_load_config_override_wing_succeeds_on_empty_basename() {
+        // --wing override must be used instead of the basename when the directory
+        // has no basename (e.g. "/"), so `mempalace mine / --wing myproject` succeeds.
+        let config = mine_load_config(std::path::Path::new("/"), Some("myproject"))
+            .expect("override_wing must prevent error on root path");
+        assert_eq!(config.wing, "myproject");
+        assert_eq!(config.rooms[0].name, "general");
     }
 
     #[test]
