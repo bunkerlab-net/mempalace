@@ -43,7 +43,13 @@ fn expand_tilde(path: &std::path::Path) -> std::path::PathBuf {
 async fn open_palace() -> error::Result<(turso::Database, turso::Connection, std::path::PathBuf)> {
     let config = MempalaceConfig::init()?;
     let db_path = config.palace_db_path();
-    let (db, connection) = db::open_db(db_path.to_str().unwrap_or(":memory:")).await?;
+    let db_path_str = db_path.to_str().ok_or_else(|| {
+        error::Error::Other(format!(
+            "database path is not valid UTF-8: {}",
+            db_path.display()
+        ))
+    })?;
+    let (db, connection) = db::open_db(db_path_str).await?;
     schema::ensure_schema(&connection).await?;
     Ok((db, connection, db_path))
 }
@@ -162,7 +168,13 @@ async fn run_status() -> error::Result<()> {
         return Ok(());
     }
 
-    let (_db, connection) = db::open_db(db_path.to_str().unwrap_or(":memory:")).await?;
+    let db_path_str = db_path.to_str().ok_or_else(|| {
+        error::Error::Other(format!(
+            "database path is not valid UTF-8: {}",
+            db_path.display()
+        ))
+    })?;
+    let (_db, connection) = db::open_db(db_path_str).await?;
     cli::status::run(&connection).await
 }
 
@@ -173,13 +185,16 @@ async fn run_compress(
     config: Option<std::path::PathBuf>,
 ) -> error::Result<()> {
     let (_db, connection, _path) = open_palace().await?;
-    cli::compress::run(
-        &connection,
-        wing.as_deref(),
-        dry_run,
-        config.as_ref().and_then(|p| p.to_str()),
-    )
-    .await
+    let config_str = match config.as_ref() {
+        Some(path) => Some(path.to_str().ok_or_else(|| {
+            error::Error::Other(format!(
+                "config path is not valid UTF-8: {}",
+                path.display()
+            ))
+        })?),
+        None => None,
+    };
+    cli::compress::run(&connection, wing.as_deref(), dry_run, config_str).await
 }
 
 /// Handle the `mine` sub-command — delegates to the correct miner by mode.
@@ -212,8 +227,9 @@ async fn run_mine(
             palace::convo_miner::mine_convos(&connection, &directory, &extract_mode, &opts).await?;
         }
         other => {
-            eprintln!("unknown mine mode: {other} (expected 'projects' or 'convos')");
-            std::process::exit(1);
+            return Err(error::Error::Other(format!(
+                "unknown mine mode: {other} (expected 'projects' or 'convos')"
+            )));
         }
     }
     Ok(())
