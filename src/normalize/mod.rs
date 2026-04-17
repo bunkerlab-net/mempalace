@@ -225,27 +225,24 @@ mod tests {
         // exercise distinct code paths (.json extension vs content-sniffing).
         let temp_directory = tempfile::tempdir()
             .expect("failed to create temporary directory for unrecognized-JSON test");
-        let cases: &[(&str, &str, &str)] = &[
+        let cases: &[(&str, &str)] = &[
             // (.json extension — triggers extension-based JSON path)
             (
                 "unknown.json",
                 r#"{"unknown_key": "value", "data": [1, 2, 3]}"#,
-                "unknown_key",
             ),
             // (.json extension — different JSON shape)
             (
                 "weather.json",
                 r#"{"weather": "sunny", "temperature": 72, "units": "fahrenheit"}"#,
-                "weather",
             ),
             // (non-.json extension — triggers content-sniffing via `content.starts_with('{')`)
             (
                 "config.txt",
                 r#"{"sniffed_key": "detected by content start", "value": true}"#,
-                "sniffed_key",
             ),
         ];
-        for &(filename, json_content, expected_key) in cases {
+        for &(filename, json_content) in cases {
             let filepath = temp_directory.path().join(filename);
             std::fs::write(&filepath, json_content)
                 .expect("failed to write unrecognized JSON test file");
@@ -255,9 +252,10 @@ mod tests {
                 !result.is_empty(),
                 "result must not be empty for {filename}"
             );
-            assert!(
-                result.contains(expected_key),
-                "raw JSON content must be preserved when no format matches ({filename})"
+            assert_eq!(
+                result.trim(),
+                json_content.trim(),
+                "unrecognized JSON must be returned as raw content unchanged ({filename})"
             );
         }
     }
