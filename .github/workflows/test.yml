@@ -12,6 +12,7 @@ jobs:
 
     permissions:
       contents: read
+      id-token: write
 
     strategy:
       matrix:
@@ -33,7 +34,7 @@ jobs:
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
         with:
           toolchain: stable
-          components: llvm-tools-preview
+          components: llvm-tools
 
       - name: Capture rustc fingerprint
         id: rustc
@@ -61,7 +62,7 @@ jobs:
 
       - name: Install Binstall
         env:
-          BINSTALL_VERSION: v1.17.9 # https://github.com/cargo-bins/cargo-binstall/releases/latest
+          BINSTALL_VERSION: v1.18.1 # https://github.com/cargo-bins/cargo-binstall/releases/latest
           BINSTALL_SHA: c2e963fbab3bdd8653b59c28d349bf85740cf4998e5e398d250dcd2884cd667d
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -74,9 +75,21 @@ jobs:
             -o /tmp/binstall-install.sh
           echo "${BINSTALL_SHA}  /tmp/binstall-install.sh" | shasum -a 256 --check
           bash /tmp/binstall-install.sh
+
       - name: Install Nextest
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: cargo binstall -y --force cargo-nextest cargo-llvm-cov
 
-      - run: cargo nextest run
+      - if: matrix.runs-on != 'ubuntu-24.04'
+        run: cargo llvm-cov --all-features nextest
+      - if: matrix.runs-on == 'ubuntu-24.04'
+        run: cargo llvm-cov --all-features --lcov --output-path lcov.info nextest
+
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2 # v6.0.0
+        if: matrix.runs-on == 'ubuntu-24.04'
+        with:
+          fail_ci_if_error: true
+          files: lcov.info
+          use_oidc: true

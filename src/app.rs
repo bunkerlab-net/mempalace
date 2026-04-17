@@ -1,0 +1,236 @@
+use crate::cli::{self, Cli, Command};
+use crate::config::MempalaceConfig;
+use crate::{db, error, mcp, palace, schema};
+
+/// Expand a leading `~` to the user's home directory.
+///
+/// Resolves the home directory by trying `HOME`, then `USERPROFILE`, then
+/// `HOMEDRIVE` + `HOMEPATH` (Windows fallback). Uses `OsStr`-based path
+/// component inspection to avoid lossy UTF-8 conversion.
+fn expand_tilde(path: &std::path::Path) -> std::path::PathBuf {
+    use std::ffi::OsStr;
+    use std::path::Component;
+
+    let mut components = path.components();
+    let first = components.next();
+
+    if first != Some(Component::Normal(OsStr::new("~"))) {
+        return path.to_path_buf();
+    }
+
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .or_else(|| {
+            let drive = std::env::var_os("HOMEDRIVE")?;
+            let home_path = std::env::var_os("HOMEPATH")?;
+            Some(
+                std::path::PathBuf::from(drive)
+                    .join(home_path)
+                    .into_os_string(),
+            )
+        });
+
+    match home {
+        Some(h) => {
+            let rest: std::path::PathBuf = components.collect();
+            std::path::PathBuf::from(h).join(rest)
+        }
+        None => path.to_path_buf(),
+    }
+}
+
+/// Open the palace DB, ensuring schema exists. Returns `(db, connection, path)`.
+async fn open_palace() -> error::Result<(turso::Database, turso::Connection, std::path::PathBuf)> {
+    let config = MempalaceConfig::init()?;
+    let db_path = config.palace_db_path();
+    let db_path_str = db_path.to_str().ok_or_else(|| {
+        error::Error::Other(format!(
+            "database path is not valid UTF-8: {}",
+            db_path.display()
+        ))
+    })?;
+    let (db, connection) = db::open_db(db_path_str).await?;
+    schema::ensure_schema(&connection).await?;
+    Ok((db, connection, db_path))
+}
+
+// Each match arm is a single CLI subcommand — splitting this into separate
+// functions would not reduce complexity, only scatter the dispatch logic.
+#[allow(clippy::too_many_lines)]
+pub async fn run(cli: Cli) -> error::Result<()> {
+    match cli.command {
+        Command::Status => {
+            run_status().await?;
+        }
+
+        Command::Init {
+            directory,
+            yes,
+            no_gitignore,
+        } => {
+            cli::init::run(&directory, yes, no_gitignore)?;
+        }
+
+        Command::Mine {
+            directory,
+            mode,
+            extract_mode,
+            wing,
+            agent,
+            limit,
+            dry_run,
+            no_gitignore,
+        } => {
+            run_mine(
+                directory,
+                mode,
+                extract_mode,
+                wing,
+                agent,
+                limit,
+                dry_run,
+                no_gitignore,
+            )
+            .await?;
+        }
+
+        Command::Search {
+            query,
+            wing,
+            room,
+            results,
+        } => {
+            let (_db, connection, _path) = open_palace().await?;
+            cli::search::run(
+                &connection,
+                &query,
+                wing.as_deref(),
+                room.as_deref(),
+                results,
+            )
+            .await?;
+        }
+
+        Command::WakeUp { wing } => {
+            let (_db, connection, _path) = open_palace().await?;
+            cli::wakeup::run(&connection, wing.as_deref()).await?;
+        }
+
+        Command::Compress {
+            wing,
+            dry_run,
+            config,
+        } => {
+            run_compress(wing, dry_run, config).await?;
+        }
+
+        Command::Split {
+            directory,
+            output_dir,
+            dry_run,
+            min_sessions,
+            no_gitignore,
+        } => {
+            // Expand ~ so that `mempalace split ~/convos` works as expected.
+            let directory = expand_tilde(&directory);
+            let output_dir = output_dir.as_deref().map(expand_tilde);
+            cli::split::run(
+                &directory,
+                output_dir.as_deref(),
+                dry_run,
+                min_sessions,
+                !no_gitignore,
+            )?;
+        }
+
+        Command::Repair => {
+            let (_db, connection, palace_path) = open_palace().await?;
+            cli::repair::run(&connection, &palace_path).await?;
+        }
+
+        Command::Mcp => {
+            let (_db, connection, _path) = open_palace().await?;
+            mcp::run(&connection).await?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Handle the `status` sub-command — opens the palace if it exists.
+async fn run_status() -> error::Result<()> {
+    let config = MempalaceConfig::load()?;
+    let db_path = config.palace_db_path();
+
+    if !db_path.exists() {
+        println!("No palace found at {}", db_path.display());
+        println!("Run `mempalace init <dir>` to get started.");
+        return Ok(());
+    }
+
+    let db_path_str = db_path.to_str().ok_or_else(|| {
+        error::Error::Other(format!(
+            "database path is not valid UTF-8: {}",
+            db_path.display()
+        ))
+    })?;
+    let (_db, connection) = db::open_db(db_path_str).await?;
+    cli::status::run(&connection).await
+}
+
+/// Handle the `compress` sub-command — compresses drawers into AAAK dialect format.
+async fn run_compress(
+    wing: Option<String>,
+    dry_run: bool,
+    config: Option<std::path::PathBuf>,
+) -> error::Result<()> {
+    let (_db, connection, _path) = open_palace().await?;
+    let config_str = match config.as_ref() {
+        Some(path) => Some(path.to_str().ok_or_else(|| {
+            error::Error::Other(format!(
+                "config path is not valid UTF-8: {}",
+                path.display()
+            ))
+        })?),
+        None => None,
+    };
+    cli::compress::run(&connection, wing.as_deref(), dry_run, config_str).await
+}
+
+/// Handle the `mine` sub-command — delegates to the correct miner by mode.
+// Arguments mirror the CLI fields 1:1 — no meaningful grouping exists.
+#[allow(clippy::too_many_arguments)]
+async fn run_mine(
+    directory: std::path::PathBuf,
+    mode: String,
+    extract_mode: String,
+    wing: Option<String>,
+    agent: String,
+    limit: usize,
+    dry_run: bool,
+    no_gitignore: bool,
+) -> error::Result<()> {
+    let opts = palace::miner::MineParams {
+        wing,
+        agent,
+        limit,
+        dry_run,
+        respect_gitignore: !no_gitignore,
+    };
+    match mode.as_str() {
+        "projects" => {
+            let (_db, connection, _path) = open_palace().await?;
+            palace::miner::mine(&connection, &directory, &opts).await?;
+        }
+        "convos" => {
+            let (_db, connection, _path) = open_palace().await?;
+            palace::convo_miner::mine_convos(&connection, &directory, &extract_mode, &opts).await?;
+        }
+        other => {
+            return Err(error::Error::Other(format!(
+                "unknown mine mode: {other} (expected 'projects' or 'convos')"
+            )));
+        }
+    }
+    Ok(())
+}
