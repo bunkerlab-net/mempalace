@@ -61,7 +61,7 @@ jobs:
 
       - name: Install Binstall
         env:
-          BINSTALL_VERSION: v1.17.9 # https://github.com/cargo-bins/cargo-binstall/releases/latest
+          BINSTALL_VERSION: v1.18.1 # https://github.com/cargo-bins/cargo-binstall/releases/latest
           BINSTALL_SHA: c2e963fbab3bdd8653b59c28d349bf85740cf4998e5e398d250dcd2884cd667d
           GH_TOKEN: ${{ github.token }}
         run: |
