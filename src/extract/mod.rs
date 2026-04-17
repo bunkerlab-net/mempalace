@@ -597,6 +597,11 @@ mod tests {
         // Extracted memories must have sequential chunk_index values starting at 0.
         let text = "> What do you prefer?\nI prefer tabs over spaces always.\n\n> Any milestones?\nWe finally shipped version 2.0 and deployed it successfully.";
         let memories = extract_memories(text, 0.1);
+        // Guard: at least one memory must be produced for the loop to be meaningful.
+        assert!(
+            !memories.is_empty(),
+            "text with preference and milestone markers must produce at least one memory"
+        );
         // Verify sequential indexing for however many memories are extracted.
         for (index, memory) in memories.iter().enumerate() {
             assert_eq!(

@@ -1272,19 +1272,29 @@ mod tests {
             .await
             .expect("mine_convos with derived wing should succeed");
 
-        // A drawer must exist; the wing is whatever the temp directory's last component is.
-        let rows = crate::db::query_all(&connection, "SELECT id FROM drawers", ())
+        // Compute the expected wing from the temp directory's last path component.
+        let expected_wing = temp_directory
+            .path()
+            .canonicalize()
+            .expect("temp directory must be canonicalizable")
+            .file_name()
+            .expect("canonicalized temp directory must have a file name")
+            .to_string_lossy()
+            .to_lowercase()
+            .replace([' ', '-'], "_");
+
+        let rows = crate::db::query_all(&connection, "SELECT wing FROM drawers", ())
             .await
-            .expect("query for all drawers should succeed");
+            .expect("query for drawer wing should succeed");
         assert!(
             !rows.is_empty(),
             "mine_convos with None wing must file at least one drawer"
         );
-        // Pair assertion: the drawer id must follow the expected prefix format.
-        let drawer_id: String = rows[0].get(0).expect("drawer id column must be readable");
-        assert!(
-            drawer_id.starts_with("drawer_"),
-            "drawer id must start with the 'drawer_' prefix"
+        // Verify the wing was actually derived from the directory name.
+        let actual_wing: String = rows[0].get(0).expect("wing column must be readable");
+        assert_eq!(
+            actual_wing, expected_wing,
+            "wing must be derived from the temp directory name"
         );
     }
 
@@ -1313,14 +1323,15 @@ mod tests {
             .await
             .expect("mine_convos with limit=1 should succeed");
 
-        // Only one file should have been processed; compare against unlimited run.
-        let limited_count = crate::db::query_all(
+        // Count distinct source files processed, not individual drawers (a single
+        // file may produce multiple drawers via chunking).
+        let limited_file_count = crate::db::query_all(
             &connection,
-            "SELECT id FROM drawers WHERE wing = 'limit_wing'",
+            "SELECT DISTINCT source_file FROM drawers WHERE wing = 'limit_wing'",
             (),
         )
         .await
-        .expect("query for limited drawers should succeed")
+        .expect("query for limited distinct source files should succeed")
         .len();
 
         let (_db2, connection2) = crate::test_helpers::test_db().await;
@@ -1334,19 +1345,22 @@ mod tests {
         mine_convos(&connection2, temp_directory.path(), "full", &opts_unlimited)
             .await
             .expect("mine_convos with limit=0 should succeed");
-        let unlimited_count = crate::db::query_all(
+        let unlimited_file_count = crate::db::query_all(
             &connection2,
-            "SELECT id FROM drawers WHERE wing = 'unlimited_wing'",
+            "SELECT DISTINCT source_file FROM drawers WHERE wing = 'unlimited_wing'",
             (),
         )
         .await
-        .expect("query for unlimited drawers should succeed")
+        .expect("query for unlimited distinct source files should succeed")
         .len();
 
-        assert!(limited_count >= 1, "limit=1 must file at least one drawer");
+        assert_eq!(
+            limited_file_count, 1,
+            "limit=1 must process exactly one source file"
+        );
         assert!(
-            limited_count <= unlimited_count,
-            "limited run must not exceed unlimited run's drawer count"
+            limited_file_count <= unlimited_file_count,
+            "limited run must not process more files than unlimited run"
         );
     }
 

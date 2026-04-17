@@ -318,9 +318,9 @@ mod tests {
                 let path = std::path::Path::new("~/no/home");
                 let result = expand_tilde(path);
                 // With no home env vars the expansion falls back to returning path as-is.
-                assert!(
-                    !result.to_string_lossy().is_empty(),
-                    "result must not be empty"
+                assert_eq!(
+                    result, path,
+                    "expand_tilde must return the original path unchanged when HOME is unresolvable"
                 );
                 assert!(
                     !result.is_absolute(),

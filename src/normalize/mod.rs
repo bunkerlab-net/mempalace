@@ -172,8 +172,11 @@ mod tests {
     #[test]
     fn normalize_file_not_found_returns_error() {
         // normalize must return Err when the file does not exist.
-        let path = std::path::Path::new("/nonexistent/path/no_such_file.txt");
-        let result = normalize(path);
+        // Use a temp directory to produce a deterministic nonexistent path.
+        let temp_directory =
+            tempfile::tempdir().expect("failed to create temporary directory for not-found test");
+        let nonexistent_path = temp_directory.path().join("no_such_file.txt");
+        let result = normalize(&nonexistent_path);
         assert!(result.is_err(), "missing file must return Err");
         assert!(
             result
@@ -205,28 +208,52 @@ mod tests {
         let content = "This is just plain text content.\nNo JSON, no > markers here at all.\n";
         std::fs::write(&path, content).expect("write plain text file");
         let result = normalize(&path).expect("plain text must return Ok");
-        assert!(!result.is_empty(), "plain text result must not be empty");
-        assert!(
-            result.contains("plain text"),
-            "plain text content must be preserved"
+        // Exact equality after trim: normalize trims whitespace but must not alter content.
+        assert_eq!(
+            result.trim(),
+            content.trim(),
+            "normalized plain text must exactly equal the original trimmed content"
         );
+        assert!(!result.is_empty(), "plain text result must not be empty");
     }
 
     #[test]
-    fn normalize_json_with_no_known_format_returns_content() {
-        // JSON that doesn't match any known format must be returned as-is.
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
-        let path = temp_dir.path().join("unknown.json");
-        // Valid JSON but not Claude AI, ChatGPT, Slack, or Codex format.
-        std::fs::write(&path, r#"{"unknown_key": "value", "data": [1, 2, 3]}"#)
-            .expect("write unknown json");
-        let result = normalize(&path).expect("unknown JSON must return Ok");
-        assert!(!result.is_empty(), "result must not be empty");
-        // The raw JSON content must be returned since no format matched.
-        assert!(
-            result.contains("unknown_key") || result.contains("data"),
-            "original JSON content must be returned when no format matches"
-        );
+    fn normalize_unrecognized_json_returns_raw_content() {
+        // Valid JSON that does not match any known chat format (Claude Code, Codex,
+        // Claude AI, ChatGPT, Slack) must fall through and return the raw content.
+        // Table-driven: each case uses a different JSON shape and file extension to
+        // exercise distinct code paths (.json extension vs content-sniffing).
+        let temp_directory = tempfile::tempdir()
+            .expect("failed to create temporary directory for unrecognized-JSON test");
+        let cases: &[(&str, &str, &str)] = &[
+            // (.json extension — triggers extension-based JSON path)
+            (
+                "unknown.json",
+                r#"{"unknown_key": "value", "data": [1, 2, 3]}"#,
+                "unknown_key",
+            ),
+            // (.json extension — different JSON shape)
+            (
+                "weather.json",
+                r#"{"weather": "sunny", "temperature": 72, "units": "fahrenheit"}"#,
+                "weather",
+            ),
+        ];
+        for &(filename, json_content, expected_key) in cases {
+            let filepath = temp_directory.path().join(filename);
+            std::fs::write(&filepath, json_content)
+                .expect("failed to write unrecognized JSON test file");
+            let result =
+                normalize(&filepath).expect("normalize must succeed for unrecognized JSON");
+            assert!(
+                !result.is_empty(),
+                "result must not be empty for {filename}"
+            );
+            assert!(
+                result.contains(expected_key),
+                "raw JSON content must be preserved when no format matches ({filename})"
+            );
+        }
     }
 
     #[test]
@@ -261,33 +288,6 @@ mod tests {
         assert!(
             result.contains("reply from assistant"),
             "assistant turn must appear in transcript"
-        );
-    }
-
-    #[test]
-    fn try_normalize_json_no_match_returns_content_as_is() {
-        // A .json file containing valid JSON that does not match any known format
-        // (Claude Code, Codex, Claude AI, ChatGPT, Slack) must fall through
-        // try_normalize_json and return the raw content. This exercises the None
-        // return path of try_normalize_json.
-        let temp_directory =
-            tempfile::tempdir().expect("failed to create temporary directory for normalize test");
-        let filepath = temp_directory.path().join("unrecognized.json");
-        // Valid JSON but matches no known chat format — no "mapping", no "messages",
-        // no JSONL structure, no Slack array-of-messages.
-        let json_content = r#"{"weather": "sunny", "temperature": 72, "units": "fahrenheit"}"#;
-        std::fs::write(&filepath, json_content)
-            .expect("failed to write unrecognized JSON test file");
-        let result = normalize(&filepath).expect("normalize must succeed for unrecognized JSON");
-        // try_normalize_json returns None, so normalize falls through to the final
-        // Ok(content) which returns the trimmed raw content.
-        assert!(
-            result.contains("weather"),
-            "raw JSON content must be preserved when no format matches"
-        );
-        assert!(
-            result.contains("sunny"),
-            "raw JSON values must be preserved when no format matches"
         );
     }
 
