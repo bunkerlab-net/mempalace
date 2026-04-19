@@ -164,6 +164,12 @@ pub async fn query_entity(
 
 /// Get chronological timeline of facts.
 pub async fn timeline(connection: &Connection, entity: Option<&str>) -> Result<Vec<Fact>> {
+    // Precondition: when provided, the entity filter must be a non-empty, trimmed name.
+    if let Some(name) = entity {
+        assert!(!name.is_empty(), "timeline: entity name must not be empty");
+        assert!(name == name.trim(), "timeline: entity name must be trimmed");
+    }
+
     let (sql, params) = if let Some(name) = entity {
         let entity_identifier = entity_id(name);
         (

@@ -99,6 +99,10 @@ const TOPIC_KEYWORDS: &[(&str, &[&str])] = &[
     ),
 ];
 
+/// Classify conversation content into the best-matching topic room.
+///
+/// Scans the first 3000 characters for keyword matches across the `TOPIC_KEYWORDS`
+/// table and returns the room name with the highest score, defaulting to `"general"`.
 fn detect_convo_room(content: &str) -> String {
     assert!(
         !content.is_empty(),
@@ -122,6 +126,8 @@ fn detect_convo_room(content: &str) -> String {
     best.0.to_string()
 }
 
+/// Split conversation content into chunks, routing to `chunk_by_exchange` or
+/// `chunk_by_paragraph` depending on whether the content uses the quoted-turn format.
 fn chunk_exchanges(content: &str) -> Vec<Chunk> {
     assert!(
         !content.is_empty(),
@@ -171,15 +177,111 @@ fn chunk_by_exchange_floor_char_boundary(text: &str, index: usize) -> usize {
     i
 }
 
+/// Drain AI response lines from `lines` starting at `start_index`.
+///
+/// Collects non-empty lines until a new user turn (`>`) or separator (`---`)
+/// is found.  Returns the collected lines and the updated index, which points
+/// to the first line of the next exchange or past the end of the slice.
+fn chunk_by_exchange_drain_ai_lines<'a>(
+    lines: &[&'a str],
+    start_index: usize,
+) -> (Vec<&'a str>, usize) {
+    assert!(
+        start_index <= lines.len(),
+        "chunk_by_exchange_drain_ai_lines: start_index out of range"
+    );
+    let mut ai_lines = Vec::new();
+    let mut i = start_index;
+    let mut exchange_count: usize = 0;
+    while i < lines.len() {
+        exchange_count += 1;
+        assert!(
+            exchange_count <= LINES_MAX,
+            "chunk_by_exchange_drain_ai_lines: exceeded LINES_MAX ({LINES_MAX}) iterations"
+        );
+        // Upper bound: i strictly increases each iteration, bounded by lines.len().
+        debug_assert!(i < lines.len());
+        let next = lines[i].trim();
+        if next.starts_with('>') || next.starts_with("---") {
+            break;
+        }
+        if !next.is_empty() {
+            ai_lines.push(next);
+        }
+        i += 1;
+    }
+    // Postcondition: returned index is within bounds or at the end.
+    debug_assert!(i <= lines.len());
+    (ai_lines, i)
+}
+
+/// Flush an assembled exchange into `chunks`, splitting on `CHUNK_SIZE` boundaries.
+///
+/// When content fits in one chunk it is pushed as-is (guarded by `CHUNK_SIZE_MIN`).
+/// When it overflows, the first `CHUNK_SIZE` bytes form the head chunk and the
+/// remainder is split into continuation drawers — always pushed regardless of
+/// `CHUNK_SIZE_MIN` to prevent silent data loss.
+fn chunk_by_exchange_flush(content: String, chunks: &mut Vec<Chunk>) {
+    assert!(
+        !content.is_empty(),
+        "chunk_by_exchange_flush: content must not be empty"
+    );
+    if content.len() > CHUNK_SIZE {
+        // First chunk: user turn + as much response as fits.
+        // Use char-boundary-safe slicing: a raw byte offset can land
+        // mid-codepoint for multi-byte chars (emoji, CJK, accents).
+        let first_end = chunk_by_exchange_floor_char_boundary(&content, CHUNK_SIZE);
+        let first = &content[..first_end];
+        // Guard first chunk to avoid nearly-empty starts.
+        if first.trim().len() > CHUNK_SIZE_MIN {
+            chunks.push(Chunk {
+                content: first.to_string(),
+                chunk_index: chunks.len(),
+            });
+        }
+        // Remaining response in CHUNK_SIZE continuation drawers.
+        // Continuation fragments are always pushed (no CHUNK_SIZE_MIN filter)
+        // to prevent silent data loss once we've committed to multi-chunk output.
+        let mut remainder = &content[first_end..];
+        let mut chunk_accumulation_count: usize = 0;
+        while !remainder.is_empty() {
+            chunk_accumulation_count += 1;
+            assert!(
+                chunk_accumulation_count <= LINES_MAX,
+                "chunk_by_exchange_flush: exceeded LINES_MAX ({LINES_MAX}) chunk-accumulation iterations"
+            );
+            let end = chunk_by_exchange_floor_char_boundary(remainder, CHUNK_SIZE);
+            // If floor_char_boundary returned 0 (edge case for corrupted input),
+            // advance by the first character's UTF-8 byte length to maintain
+            // boundary safety and prevent infinite loops.
+            let end = if end == 0 {
+                // Invariant: remainder is non-empty (guarded by while condition),
+                // so chars().next() always returns Some.
+                remainder.chars().next().map_or(1, char::len_utf8)
+            } else {
+                end
+            };
+            let part = &remainder[..end];
+            remainder = &remainder[end..];
+            chunks.push(Chunk {
+                content: part.to_string(),
+                chunk_index: chunks.len(),
+            });
+        }
+    } else if content.trim().len() > CHUNK_SIZE_MIN {
+        chunks.push(Chunk {
+            content,
+            chunk_index: chunks.len(),
+        });
+    }
+}
+
 /// One user turn (>) + the full AI response that follows = one or more chunks.
 ///
 /// Each line is whitespace-trimmed and empty lines are dropped; the remaining
 /// lines are joined with a single space.  When the combined content exceeds
 /// `CHUNK_SIZE` bytes, it is split across consecutive drawers so nothing is
 /// silently discarded (fixes the prior 8-line cap).
-// TigerStyle exemption: sequential loop structure with three bounded loops and
-// explicit upper-bound assertions; extracting helpers would obscure the control flow.
-#[allow(clippy::too_many_lines)]
 fn chunk_by_exchange(lines: &[&str]) -> Vec<Chunk> {
     let mut chunks = Vec::new();
     let mut i = 0;
@@ -197,27 +299,8 @@ fn chunk_by_exchange(lines: &[&str]) -> Vec<Chunk> {
         if line.starts_with('>') {
             let user_turn = line;
             i += 1;
-
-            let mut ai_lines = Vec::new();
-            let mut exchange_count: usize = 0;
-            while i < lines.len() {
-                exchange_count += 1;
-                assert!(
-                    exchange_count <= LINES_MAX,
-                    "chunk_by_exchange: exceeded LINES_MAX ({LINES_MAX}) inner (exchange-drain) iterations"
-                );
-                // Upper bound: i strictly increases each inner iteration, bounded by lines.len().
-                debug_assert!(i < lines.len());
-                let next = lines[i].trim();
-                if next.starts_with('>') || next.starts_with("---") {
-                    break;
-                }
-                if !next.is_empty() {
-                    ai_lines.push(next);
-                }
-                i += 1;
-            }
-
+            let (ai_lines, new_i) = chunk_by_exchange_drain_ai_lines(lines, i);
+            i = new_i;
             // Full response — no truncation.
             let ai_response = ai_lines.join(" ");
             let content = if ai_response.is_empty() {
@@ -225,55 +308,7 @@ fn chunk_by_exchange(lines: &[&str]) -> Vec<Chunk> {
             } else {
                 format!("{user_turn}\n{ai_response}")
             };
-
-            if content.len() > CHUNK_SIZE {
-                // First chunk: user turn + as much response as fits.
-                // Use char-boundary-safe slicing: a raw byte offset can land
-                // mid-codepoint for multi-byte chars (emoji, CJK, accents).
-                let first_end = chunk_by_exchange_floor_char_boundary(&content, CHUNK_SIZE);
-                let first = &content[..first_end];
-                // Guard first chunk to avoid nearly-empty starts.
-                if first.trim().len() > CHUNK_SIZE_MIN {
-                    chunks.push(Chunk {
-                        content: first.to_string(),
-                        chunk_index: chunks.len(),
-                    });
-                }
-                // Remaining response in CHUNK_SIZE continuation drawers.
-                // Continuation fragments are always pushed (no CHUNK_SIZE_MIN filter)
-                // to prevent silent data loss once we've committed to multi-chunk output.
-                let mut remainder = &content[first_end..];
-                let mut chunk_accumulation_count: usize = 0;
-                while !remainder.is_empty() {
-                    chunk_accumulation_count += 1;
-                    assert!(
-                        chunk_accumulation_count <= LINES_MAX,
-                        "chunk_by_exchange: exceeded LINES_MAX ({LINES_MAX}) chunk-accumulation iterations"
-                    );
-                    let end = chunk_by_exchange_floor_char_boundary(remainder, CHUNK_SIZE);
-                    // If floor_char_boundary returned 0 (edge case for corrupted input),
-                    // advance by the first character's UTF-8 byte length to maintain
-                    // boundary safety and prevent infinite loops.
-                    let end = if end == 0 {
-                        // Invariant: remainder is non-empty (guarded by while condition),
-                        // so chars().next() always returns Some.
-                        remainder.chars().next().map_or(1, char::len_utf8)
-                    } else {
-                        end
-                    };
-                    let part = &remainder[..end];
-                    remainder = &remainder[end..];
-                    chunks.push(Chunk {
-                        content: part.to_string(),
-                        chunk_index: chunks.len(),
-                    });
-                }
-            } else if content.trim().len() > CHUNK_SIZE_MIN {
-                chunks.push(Chunk {
-                    content,
-                    chunk_index: chunks.len(),
-                });
-            }
+            chunk_by_exchange_flush(content, &mut chunks);
         } else {
             i += 1;
         }
@@ -282,6 +317,10 @@ fn chunk_by_exchange(lines: &[&str]) -> Vec<Chunk> {
     chunks
 }
 
+/// Split content into chunks by paragraph (blank-line boundary) or line groups.
+///
+/// Falls back to 25-line groups when the content has only one paragraph but more
+/// than 20 lines, which prevents the entire file from becoming a single oversized chunk.
 fn chunk_by_paragraph(content: &str) -> Vec<Chunk> {
     let paragraphs: Vec<&str> = content
         .split("\n\n")
@@ -319,6 +358,8 @@ fn chunk_by_paragraph(content: &str) -> Vec<Chunk> {
         .collect()
 }
 
+/// Return a flat list of all conversation files under `directory`.
+/// Delegates the actual traversal to `walk_convos`.
 fn scan_convos(directory: &Path) -> Vec<PathBuf> {
     assert!(
         directory.is_dir(),
@@ -329,6 +370,10 @@ fn scan_convos(directory: &Path) -> Vec<PathBuf> {
     files
 }
 
+/// Iteratively walk `directory` (depth-limited DFS) and collect conversation files.
+///
+/// Symlinks are skipped; directories named `tool-results` or `memory` are excluded;
+/// files larger than `FILE_SIZE_MAX` are silently skipped.
 fn walk_convos(directory: &Path, files: &mut Vec<PathBuf>) {
     // Iterative DFS with explicit depth tracking — no recursion.
     let mut stack: Vec<(PathBuf, usize)> = vec![(directory.to_path_buf(), 0)];
@@ -381,6 +426,7 @@ fn walk_convos(directory: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
+/// Print the mine-convos progress header to stdout.
 fn mine_convos_print_header(
     wing: &str,
     directory: &Path,
@@ -402,6 +448,7 @@ fn mine_convos_print_header(
     println!("-------------------------------------------------------\n");
 }
 
+/// Print the mine-convos completion summary (file counts, drawer counts, room breakdown) to stdout.
 // Eight independent summary counters; a dedicated struct would be over-engineered for a single private call site.
 #[allow(clippy::too_many_arguments)]
 fn mine_convos_print_summary(
@@ -509,14 +556,91 @@ async fn mine_convos_write_chunks(
     Ok(())
 }
 
-// Sequential file-scan loop with per-file counters mutated via continue/+=; no clean extraction boundary within 70 lines.
-#[allow(clippy::too_many_lines)]
-pub async fn mine_convos(
+/// Per-file outcome returned by `mine_convos_scan_file`.
+enum MineConvosFileOutcome {
+    /// File was already mined in a previous run; skip without writing.
+    AlreadyMined,
+    /// File could not be read or its mtime is unavailable.
+    Unreadable,
+    /// File content is below `CHUNK_SIZE_MIN`; not worth indexing.
+    TooShort,
+    /// Content parsed to zero chunks (e.g. no qualifying exchanges or paragraphs).
+    EmptyChunks,
+    /// File processed successfully; carry the room name and drawer count.
+    Processed { room: String, drawers_added: usize },
+}
+
+/// Read one conversation file and, unless `dry_run`, write its chunks to the
+/// palace.  Returns a `MineConvosFileOutcome` describing what happened so the
+/// caller can update its summary counters.
+async fn mine_convos_scan_file(
+    filepath: &Path,
     connection: &Connection,
-    directory: &Path,
-    extract_mode: &str,
+    wing: &str,
     opts: &MineParams,
-) -> Result<()> {
+) -> Result<MineConvosFileOutcome> {
+    assert!(
+        !wing.is_empty(),
+        "mine_convos_scan_file: wing must not be empty"
+    );
+    let source_file = filepath.to_string_lossy().to_string();
+    // Always check for duplicates so dry runs report accurate skip counts.
+    // Only the write path below is gated on !opts.dry_run.
+    if drawer::file_already_mined(connection, &source_file).await? {
+        return Ok(MineConvosFileOutcome::AlreadyMined);
+    }
+    let Ok(content) = normalize::normalize(filepath) else {
+        return Ok(MineConvosFileOutcome::Unreadable);
+    };
+    if content.trim().len() < CHUNK_SIZE_MIN {
+        return Ok(MineConvosFileOutcome::TooShort);
+    }
+    let chunks = chunk_exchanges(&content);
+    if chunks.is_empty() {
+        return Ok(MineConvosFileOutcome::EmptyChunks);
+    }
+    let room = detect_convo_room(&content);
+    let drawers_added = chunks.len();
+    // Mtime is required: None conflates "no on-disk source" with
+    // "unreadable filesystem", causing file_already_mined() to miss
+    // duplicates on reruns and producing stale duplicate chunks.
+    let Some(source_mtime) = std::fs::metadata(filepath)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|system_time| {
+            system_time
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .ok()
+        })
+        .map(|duration| duration.as_secs_f64())
+    else {
+        return Ok(MineConvosFileOutcome::Unreadable);
+    };
+    if !opts.dry_run {
+        mine_convos_write_chunks(
+            connection,
+            &chunks,
+            wing,
+            &room,
+            &source_file,
+            source_mtime,
+            opts,
+        )
+        .await?;
+    }
+    Ok(MineConvosFileOutcome::Processed {
+        room,
+        drawers_added,
+    })
+}
+
+/// Canonicalize `directory` and resolve the wing name.
+///
+/// Returns `(canonical_path, wing_name)` where `wing_name` is either the
+/// explicit override from `opts.wing` or derived from the directory's last
+/// path component.  Errors when the path cannot be canonicalized, is not a
+/// directory, or has no file-name component and no explicit wing override.
+fn mine_convos_resolve_wing(directory: &Path, opts: &MineParams) -> Result<(PathBuf, String)> {
     let directory = directory.canonicalize().map_err(|e| {
         crate::error::Error::Other(format!("directory not found: {}: {e}", directory.display()))
     })?;
@@ -526,28 +650,47 @@ pub async fn mine_convos(
             directory.display()
         )));
     }
-
+    if let Some(wing_name) = opts.wing.as_deref() {
+        assert!(
+            !wing_name.is_empty(),
+            "mine_convos_resolve_wing: explicit wing must not be empty"
+        );
+        return Ok((directory, wing_name.to_string()));
+    }
+    // file_name() returns None for filesystem roots (e.g. `/`), producing an empty
+    // dir_name.  An empty wing triggers the assert in drawer::add_drawer, so surface
+    // a clear error here instead.
     let dir_name = directory
         .file_name()
         .unwrap_or_default()
         .to_string_lossy()
         .to_lowercase()
         .replace([' ', '-'], "_");
-    // file_name() returns None for filesystem roots (e.g. `/`), producing an empty
-    // dir_name. An empty wing triggers the assert in drawer::add_drawer, so surface
-    // a clear error here instead.
-    let wing = if let Some(wing_name) = opts.wing.as_deref() {
-        wing_name
-    } else if dir_name.is_empty() {
+    if dir_name.is_empty() {
         return Err(crate::error::Error::Other(
             "mine convos: cannot determine wing name — directory is a filesystem root; \
              pass --wing to specify one explicitly"
                 .to_string(),
         ));
-    } else {
-        &dir_name
-    };
+    }
+    assert!(
+        !dir_name.is_empty(),
+        "mine_convos_resolve_wing: derived wing must not be empty"
+    );
+    Ok((directory, dir_name))
+}
 
+/// Mine all conversation files in `directory`, filing chunks as drawers in the palace.
+///
+/// Resolves the wing name, walks for eligible files, and delegates per-file
+/// processing to `mine_convos_scan_file`.
+pub async fn mine_convos(
+    connection: &Connection,
+    directory: &Path,
+    extract_mode: &str,
+    opts: &MineParams,
+) -> Result<()> {
+    let (directory, wing) = mine_convos_resolve_wing(directory, opts)?;
     let mut all_files = scan_convos(&directory);
     // Sort for deterministic ordering before applying any limit.
     all_files.sort_unstable();
@@ -556,84 +699,42 @@ pub async fn mine_convos(
     } else {
         all_files.into_iter().take(opts.limit).collect()
     };
-
-    mine_convos_print_header(wing, &directory, files.len(), extract_mode, opts.dry_run);
-
+    mine_convos_print_header(&wing, &directory, files.len(), extract_mode, opts.dry_run);
     let mut drawers_total: usize = 0;
     let mut files_skipped: usize = 0;
     let mut files_unreadable: usize = 0;
     let mut files_too_short: usize = 0;
     let mut files_empty_chunks: usize = 0;
     let mut room_counts: HashMap<String, usize> = HashMap::new();
-
     for (i, filepath) in files.iter().enumerate() {
-        let source_file = filepath.to_string_lossy().to_string();
-
-        // Always check for duplicates so dry runs report accurate skip counts.
-        // Only the write path below is gated on !opts.dry_run.
-        if drawer::file_already_mined(connection, &source_file).await? {
-            files_skipped += 1;
-            continue;
+        match mine_convos_scan_file(filepath, connection, &wing, opts).await? {
+            MineConvosFileOutcome::AlreadyMined => {
+                files_skipped += 1;
+            }
+            MineConvosFileOutcome::Unreadable => {
+                files_unreadable += 1;
+            }
+            MineConvosFileOutcome::TooShort => {
+                files_too_short += 1;
+            }
+            MineConvosFileOutcome::EmptyChunks => {
+                files_empty_chunks += 1;
+            }
+            MineConvosFileOutcome::Processed {
+                room,
+                drawers_added,
+            } => {
+                drawers_total += drawers_added;
+                *room_counts.entry(room).or_insert(0) += 1;
+                println!(
+                    "  [{:4}/{}] {:50} +{drawers_added}",
+                    i + 1,
+                    files.len(),
+                    filepath.file_name().unwrap_or_default().to_string_lossy(),
+                );
+            }
         }
-
-        let Ok(content) = normalize::normalize(filepath) else {
-            files_unreadable += 1;
-            continue;
-        };
-        if content.trim().len() < CHUNK_SIZE_MIN {
-            files_too_short += 1;
-            continue;
-        }
-
-        let chunks = chunk_exchanges(&content);
-        if chunks.is_empty() {
-            files_empty_chunks += 1;
-            continue;
-        }
-
-        let room = detect_convo_room(&content);
-        let drawers_added = chunks.len();
-
-        // Mtime is required: None conflates "no on-disk source" with
-        // "unreadable filesystem", causing file_already_mined() to miss
-        // duplicates on reruns and producing stale duplicate chunks.
-        let Some(source_mtime) = std::fs::metadata(filepath)
-            .ok()
-            .and_then(|metadata| metadata.modified().ok())
-            .and_then(|system_time| {
-                system_time
-                    .duration_since(std::time::SystemTime::UNIX_EPOCH)
-                    .ok()
-            })
-            .map(|duration| duration.as_secs_f64())
-        else {
-            files_unreadable += 1;
-            continue;
-        };
-
-        if !opts.dry_run {
-            mine_convos_write_chunks(
-                connection,
-                &chunks,
-                wing,
-                &room,
-                &source_file,
-                source_mtime,
-                opts,
-            )
-            .await?;
-        }
-
-        drawers_total += drawers_added;
-        *room_counts.entry(room.clone()).or_insert(0) += 1;
-        println!(
-            "  [{:4}/{}] {:50} +{drawers_added}",
-            i + 1,
-            files.len(),
-            filepath.file_name().unwrap_or_default().to_string_lossy(),
-        );
     }
-
     mine_convos_print_summary(
         opts.dry_run,
         files.len(),

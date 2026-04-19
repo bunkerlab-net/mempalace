@@ -469,30 +469,20 @@ mod async_tests {
     }
 }
 
-/// Add a drawer and index its words.
-///
-/// Returns `true` when the drawer was inserted, `false` when a drawer with the
-/// same `id` already exists (idempotent — no error is raised).
-///
-/// The INSERT and word indexing are wrapped in a savepoint so that a failed
-/// `index_words` call rolls back the drawer too, leaving no unsearchable
-/// orphans.  Savepoints nest correctly if the caller is already inside a
-/// transaction.
-pub async fn add_drawer(connection: &Connection, params: &DrawerParams<'_>) -> Result<bool> {
-    // Preconditions: all required fields must be non-empty.
+/// Execute the INSERT OR IGNORE for a drawer inside the `add_drawer` savepoint.
+/// On SQL error, rolls back and releases the savepoint before returning `Err`.
+/// Returns the number of rows affected (0 or 1).
+/// Called by `add_drawer` to keep that function within the 70-line limit.
+async fn add_drawer_insert(
+    connection: &Connection,
+    params: &DrawerParams<'_>,
+    chunk_index_sql: i32,
+) -> Result<u64> {
     assert!(!params.id.is_empty(), "drawer id must not be empty");
-    assert!(!params.wing.is_empty(), "drawer wing must not be empty");
-    assert!(!params.room.is_empty(), "drawer room must not be empty");
     assert!(
         !params.content.is_empty(),
         "drawer content must not be empty"
     );
-
-    // SQLite only has i64 integers, so we cast chunk_index (usize) to i32 at the SQL boundary.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let chunk_index_sql = params.chunk_index as i32;
-
-    connection.execute("SAVEPOINT add_drawer", ()).await?;
 
     let rows_affected = connection
         .execute(
@@ -529,21 +519,26 @@ pub async fn add_drawer(connection: &Connection, params: &DrawerParams<'_>) -> R
         rows_affected <= 1,
         "INSERT OR IGNORE must affect 0 or 1 rows, got {rows_affected}"
     );
+    Ok(rows_affected)
+}
 
-    if rows_affected == 0 {
-        // Already exists — nothing was written; release the savepoint and report.
-        connection
-            .execute("RELEASE SAVEPOINT add_drawer", ())
-            .await?;
-        return Ok(false);
-    }
+/// Index a drawer's words inside the `add_drawer` savepoint, releasing or
+/// rolling back the savepoint depending on whether indexing succeeds.
+/// Called by `add_drawer` to keep that function within the 70-line limit.
+async fn add_drawer_index_words(
+    connection: &Connection,
+    drawer_id: &str,
+    content: &str,
+) -> Result<()> {
+    assert!(!drawer_id.is_empty(), "drawer_id must not be empty");
+    assert!(!content.is_empty(), "content must not be empty");
 
-    match index_words(connection, params.id, params.content).await {
+    match index_words(connection, drawer_id, content).await {
         Ok(()) => {
             connection
                 .execute("RELEASE SAVEPOINT add_drawer", ())
                 .await?;
-            Ok(true)
+            Ok(())
         }
         Err(e) => {
             let _ = connection
@@ -553,4 +548,43 @@ pub async fn add_drawer(connection: &Connection, params: &DrawerParams<'_>) -> R
             Err(e)
         }
     }
+}
+
+/// Add a drawer and index its words.
+///
+/// Returns `true` when the drawer was inserted, `false` when a drawer with the
+/// same `id` already exists (idempotent — no error is raised).
+///
+/// The INSERT and word indexing are wrapped in a savepoint so that a failed
+/// `index_words` call rolls back the drawer too, leaving no unsearchable
+/// orphans.  Savepoints nest correctly if the caller is already inside a
+/// transaction.
+pub async fn add_drawer(connection: &Connection, params: &DrawerParams<'_>) -> Result<bool> {
+    // Preconditions: all required fields must be non-empty.
+    assert!(!params.id.is_empty(), "drawer id must not be empty");
+    assert!(!params.wing.is_empty(), "drawer wing must not be empty");
+    assert!(!params.room.is_empty(), "drawer room must not be empty");
+    assert!(
+        !params.content.is_empty(),
+        "drawer content must not be empty"
+    );
+
+    // SQLite only has i64 integers, so we cast chunk_index (usize) to i32 at the SQL boundary.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let chunk_index_sql = params.chunk_index as i32;
+
+    connection.execute("SAVEPOINT add_drawer", ()).await?;
+
+    let rows_affected = add_drawer_insert(connection, params, chunk_index_sql).await?;
+
+    if rows_affected == 0 {
+        // Already exists — nothing was written; release the savepoint and report.
+        connection
+            .execute("RELEASE SAVEPOINT add_drawer", ())
+            .await?;
+        return Ok(false);
+    }
+
+    add_drawer_index_words(connection, params.id, params.content).await?;
+    Ok(true)
 }

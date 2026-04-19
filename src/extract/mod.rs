@@ -22,11 +22,23 @@ pub struct Memory {
     pub chunk_index: usize,
 }
 
+/// Result of scoring a single segment: the winning memory type and its confidence.
+struct ScoredSegment {
+    /// The winning memory type (e.g. `"decision"`, `"problem"`).
+    memory_type: String,
+    /// Confidence in [0.0, 1.0].
+    confidence: f64,
+}
+
 /// Extract memories from text, classifying into 5 types:
 /// decision, preference, milestone, problem, emotional.
 pub fn extract_memories(text: &str, min_confidence: f64) -> Vec<Memory> {
-    let segments = split_into_segments(text);
-    let mut memories = Vec::new();
+    // Preconditions: text must be non-empty and confidence threshold must be valid.
+    assert!(!text.is_empty(), "extract_memories: text must not be empty");
+    assert!(
+        (0.0..=1.0).contains(&min_confidence),
+        "extract_memories: min_confidence must be in [0.0, 1.0]"
+    );
 
     let all_markers: &[(&str, &[Regex])] = &[
         ("decision", DECISION_REGEXES.as_slice()),
@@ -36,61 +48,25 @@ pub fn extract_memories(text: &str, min_confidence: f64) -> Vec<Memory> {
         ("emotional", EMOTION_REGEXES.as_slice()),
     ];
 
+    let segments = split_into_segments(text);
+    let mut memories = Vec::new();
+
     for para in &segments {
         if para.trim().len() < 20 {
             continue;
         }
 
-        let prose = extract_prose(para);
-        // Lowercase once here so score_markers can skip the allocation on each of its 5 calls.
-        let prose_lower = prose.to_lowercase();
-
-        // Score against all types.
-        let mut scores: Vec<(&str, f64)> = Vec::new();
-        for &(mem_type, markers) in all_markers {
-            let score = score_markers(&prose_lower, markers);
-            if score > 0.0 {
-                scores.push((mem_type, score));
-            }
-        }
-
-        if scores.is_empty() {
-            continue;
-        }
-
-        // Length bonus.
-        let length_bonus = if para.len() > 500 {
-            2.0
-        } else if para.len() > 200 {
-            1.0
-        } else {
-            0.0
-        };
-
-        // f64 scores come from integer match counts (count as f64); partial_cmp
-        // only returns None for NaN, which cannot arise here.
-        let Some(&(type_max, score_max)) = scores
-            .iter()
-            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-        else {
-            // Unreachable: scores is non-empty (checked above at `if scores.is_empty()`).
+        let Some(scored) = extract_memories_score_segment(para, all_markers) else {
             continue;
         };
-        let score_max = score_max + length_bonus;
 
-        // Disambiguate.
-        let scores_by_type: std::collections::HashMap<&str, f64> = scores.iter().copied().collect();
-        let final_type = disambiguate(type_max, &prose, &scores_by_type);
-
-        // Confidence.
-        let confidence = (score_max / 5.0).min(1.0);
-        if confidence < min_confidence {
+        if scored.confidence < min_confidence {
             continue;
         }
 
         memories.push(Memory {
             content: para.trim().to_string(),
-            kind: final_type.to_string(),
+            kind: scored.memory_type,
             chunk_index: memories.len(),
         });
     }
@@ -100,6 +76,58 @@ pub fn extract_memories(text: &str, min_confidence: f64) -> Vec<Memory> {
     debug_assert!(memories.iter().all(|m| !m.kind.is_empty()));
 
     memories
+}
+
+/// Score a single segment against all marker types, returning the winning type
+/// and confidence. Returns `None` if no markers match or the segment has no prose.
+fn extract_memories_score_segment(
+    para: &str,
+    all_markers: &[(&str, &[Regex])],
+) -> Option<ScoredSegment> {
+    let prose = extract_prose(para);
+    // Lowercase once here so score_markers can skip the allocation on each of its 5 calls.
+    let prose_lower = prose.to_lowercase();
+
+    // Score against all types.
+    let mut scores: Vec<(&str, f64)> = Vec::new();
+    for &(mem_type, markers) in all_markers {
+        let score = score_markers(&prose_lower, markers);
+        if score > 0.0 {
+            scores.push((mem_type, score));
+        }
+    }
+
+    if scores.is_empty() {
+        return None;
+    }
+
+    // Length bonus.
+    let length_bonus = if para.len() > 500 {
+        2.0
+    } else if para.len() > 200 {
+        1.0
+    } else {
+        0.0
+    };
+
+    // f64 scores come from integer match counts (count as f64); partial_cmp
+    // only returns None for NaN, which cannot arise here.
+    let &(type_max, score_max) = scores
+        .iter()
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))?;
+    let score_max = score_max + length_bonus;
+
+    // Disambiguate.
+    let scores_by_type: std::collections::HashMap<&str, f64> = scores.iter().copied().collect();
+    let final_type = disambiguate(type_max, &prose, &scores_by_type);
+
+    // Confidence: normalise to [0.0, 1.0] with a divisor of 5.0.
+    let confidence = (score_max / 5.0).min(1.0);
+
+    Some(ScoredSegment {
+        memory_type: final_type.to_string(),
+        confidence,
+    })
 }
 
 /// Score pre-lowercased text against pre-compiled regex markers.
@@ -242,6 +270,7 @@ static TURN_REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     ])
 });
 
+/// Classify `text` as `"positive"`, `"negative"`, or `"neutral"` using word lists.
 fn get_sentiment(text: &str) -> &'static str {
     let words: HashSet<String> = text
         .split(|c: char| !c.is_alphanumeric())
@@ -272,6 +301,7 @@ fn get_sentiment(text: &str) -> &'static str {
     result
 }
 
+/// Return `true` if `text` contains any resolution phrase (e.g. "fixed", "solved").
 fn has_resolution(text: &str) -> bool {
     let text_lower = text.to_lowercase();
     RESOLUTION_REGEXES.iter().any(|re| re.is_match(&text_lower))
@@ -304,7 +334,7 @@ fn extract_prose(text: &str) -> String {
     }
 }
 
-/// Split text into segments for memory extraction.
+/// Split `text` into segments for memory extraction.
 fn split_into_segments(text: &str) -> Vec<String> {
     let lines: Vec<&str> = text.lines().collect();
 
@@ -340,6 +370,7 @@ fn split_into_segments(text: &str) -> Vec<String> {
     paragraphs
 }
 
+/// Group `lines` into segments by splitting on conversation-turn markers.
 fn split_by_turns(lines: &[&str], turn_patterns: &[Regex]) -> Vec<String> {
     let mut segments = Vec::new();
     let mut current: Vec<&str> = Vec::new();

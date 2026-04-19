@@ -69,6 +69,8 @@ pub async fn dispatch(connection: &Connection, name: &str, args: &Value) -> Valu
     }
 }
 
+/// Extract a string argument from the tool args JSON object.
+/// Returns an empty string when the key is absent or the value is not a string.
 fn str_arg<'a>(args: &'a Value, key: &str) -> &'a str {
     args.get(key)
         .and_then(|arg_val| arg_val.as_str())
@@ -371,6 +373,7 @@ async fn wal_log(operation: &str, params: Value) {
     .await;
 }
 
+/// Return a summary of all wings, rooms, and total drawer count.
 async fn tool_status(connection: &Connection) -> Value {
     let rows = query_all(
         connection,
@@ -406,6 +409,7 @@ async fn tool_status(connection: &Connection) -> Value {
     })
 }
 
+/// Return all wings with their drawer counts.
 async fn tool_list_wings(connection: &Connection) -> Value {
     let rows = query_all(
         connection,
@@ -428,6 +432,7 @@ async fn tool_list_wings(connection: &Connection) -> Value {
     }
 }
 
+/// Return rooms and their drawer counts, optionally filtered by wing.
 async fn tool_list_rooms(connection: &Connection, args: &Value) -> Value {
     let wing = match sanitize_opt_name(str_arg(args, "wing"), "wing") {
         Ok(value) => value,
@@ -464,6 +469,7 @@ async fn tool_list_rooms(connection: &Connection, args: &Value) -> Value {
     }
 }
 
+/// Return the full wing → room → drawer-count taxonomy tree.
 async fn tool_get_taxonomy(connection: &Connection) -> Value {
     let rows = query_all(
         connection,
@@ -487,6 +493,7 @@ async fn tool_get_taxonomy(connection: &Connection) -> Value {
     }
 }
 
+/// Full-text search the palace, returning ranked drawer results.
 async fn tool_search(connection: &Connection, args: &Value) -> Value {
     let raw_query = str_arg(args, "query").trim();
     if raw_query.is_empty() {
@@ -549,6 +556,7 @@ async fn tool_search(connection: &Connection, args: &Value) -> Value {
     }
 }
 
+/// Check whether content is a near-duplicate of an existing drawer.
 async fn tool_check_duplicate(connection: &Connection, args: &Value) -> Value {
     let content = str_arg(args, "content");
     // Simple keyword overlap check since we don't have vector similarity.
@@ -579,6 +587,7 @@ async fn tool_check_duplicate(connection: &Connection, args: &Value) -> Value {
     }
 }
 
+/// Insert a new drawer into the palace, computing a deterministic SHA256-based ID.
 async fn tool_add_drawer(connection: &Connection, args: &Value) -> Value {
     let wing = str_arg(args, "wing");
     let room = str_arg(args, "room");
@@ -680,6 +689,7 @@ async fn tool_add_drawer_insert(
     }
 }
 
+/// Delete a drawer and its inverted-index entries by ID.
 async fn tool_delete_drawer(connection: &Connection, args: &Value) -> Value {
     let drawer_id = match sanitize_name(str_arg(args, "drawer_id"), "drawer_id") {
         Ok(value) => value,
@@ -826,25 +836,27 @@ async fn tool_list_drawers_query(
     }
 }
 
-/// Update an existing drawer's content and/or location (wing/room).
+/// Parsed and validated arguments for `tool_update_drawer`.
+struct UpdateDrawerArgs {
+    drawer_id: String,
+    content_new: Option<String>,
+    wing_new: Option<String>,
+    room_new: Option<String>,
+}
+
+/// Parse and validate all input args for `tool_update_drawer`.
 ///
-/// Recomputes the deterministic SHA256 ID after any change to keep it
-/// consistent with `tool_add_drawer`.  Rejects updates that would collide
-/// with an existing drawer.
-// The complexity comes from: ID recomputation, duplicate detection, conditional
-// reindex, and error propagation — each a distinct correctness concern that
-// cannot be collapsed without obscuring the logic.
-#[allow(clippy::too_many_lines)]
-async fn tool_update_drawer(connection: &Connection, args: &Value) -> Value {
-    let drawer_id = match sanitize_name(str_arg(args, "drawer_id"), "drawer_id") {
-        Ok(value) => value,
-        Err(error) => return error,
-    };
+/// Returns `Ok(UpdateDrawerArgs)` on success.  Returns `Err(Value)` on
+/// validation failure **or** when no fields were supplied (noop), so the
+/// caller can return the value directly in both cases.
+fn tool_update_drawer_validate_args(args: &Value) -> Result<UpdateDrawerArgs, Value> {
+    let drawer_id = sanitize_name(str_arg(args, "drawer_id"), "drawer_id")?;
     // Diary entries use UUID IDs; they must not be mutated via this handler.
     if !drawer_id.starts_with("drawer_") {
-        return json!({"success": false, "error": "drawer_id has invalid format", "public": true});
+        return Err(
+            json!({"success": false, "error": "drawer_id has invalid format", "public": true}),
+        );
     }
-
     let content_new = {
         let content_raw = str_arg(args, "content");
         if content_raw.is_empty() {
@@ -852,155 +864,185 @@ async fn tool_update_drawer(connection: &Connection, args: &Value) -> Value {
         } else {
             match sanitize_content(content_raw) {
                 Ok(value) => Some(value),
-                Err(error) => return error,
+                Err(error) => return Err(error),
             }
         }
     };
-    let wing_new = match sanitize_opt_name(str_arg(args, "wing"), "wing") {
-        Ok(value) => value,
-        Err(error) => return error,
-    };
-    let room_new = match sanitize_opt_name(str_arg(args, "room"), "room") {
-        Ok(value) => value,
-        Err(error) => return error,
-    };
-
-    // No-op: nothing to change.
+    let wing_new = sanitize_opt_name(str_arg(args, "wing"), "wing")?;
+    let room_new = sanitize_opt_name(str_arg(args, "room"), "room")?;
+    // No-op: nothing to change.  Return as Err so the caller can return early.
     if content_new.is_none() && wing_new.is_none() && room_new.is_none() {
-        return json!({"success": true, "drawer_id": drawer_id, "noop": true});
+        return Err(json!({"success": true, "drawer_id": drawer_id, "noop": true}));
     }
+    Ok(UpdateDrawerArgs {
+        drawer_id,
+        content_new,
+        wing_new,
+        room_new,
+    })
+}
 
-    // Fetch existing drawer.
-    let rows = query_all(
-        connection,
-        "SELECT wing, room, content FROM drawers WHERE id = ?",
-        [drawer_id.as_str()],
-    )
-    .await;
-
-    let rows = match rows {
-        Ok(rows) => rows,
-        Err(error) => return json!({"success": false, "error": error.to_string()}),
-    };
-
-    if rows.is_empty() {
-        return json!({"success": false, "error": format!("Drawer not found: {drawer_id}"), "public": true});
-    }
-
-    let wing_old: String = rows[0].get(0).unwrap_or_default();
-    let room_old: String = rows[0].get(1).unwrap_or_default();
-    let content_old: String = rows[0].get(2).unwrap_or_default();
-
-    let final_wing = wing_new.as_deref().unwrap_or(&wing_old);
-    let final_room = room_new.as_deref().unwrap_or(&room_old);
-    let final_content = content_new.as_deref().unwrap_or(&content_old);
-
-    // Recompute the deterministic ID to keep it consistent with tool_add_drawer.
-    // wing/room/content are all baked into the ID, so any change means a new ID.
-    let hash = sha2::Sha256::digest(
-        format!("{final_wing}\u{1f}{final_room}\u{1f}{final_content}").as_bytes(),
-    );
+/// Compute the deterministic SHA256-based drawer ID from wing, room, and content.
+///
+/// Mirrors the ID computation in `tool_add_drawer` so that IDs stay consistent
+/// across add and update operations.
+fn tool_update_drawer_recompute_id(wing: &str, room: &str, content: &str) -> String {
+    let hash = sha2::Sha256::digest(format!("{wing}\u{1f}{room}\u{1f}{content}").as_bytes());
     let hex: String = hash.iter().fold(String::new(), |mut hex_string, byte| {
         use std::fmt::Write as _;
         let _ = write!(hex_string, "{byte:02x}");
         hex_string
     });
-    let id_new = format!("drawer_{final_wing}_{final_room}_{}", &hex[..24]);
+    format!("drawer_{wing}_{room}_{}", &hex[..24])
+}
 
+/// Check whether `new_id` already belongs to a different drawer, rejecting
+/// updates that would silently duplicate an existing entry.
+///
+/// Returns `Some(error_json)` if the update must be rejected, `None` if safe.
+async fn tool_update_drawer_check_duplicate(
+    connection: &Connection,
+    old_id: &str,
+    new_id: &str,
+) -> Option<Value> {
+    if new_id == old_id {
+        return None;
+    }
+    let existing = query_all(connection, "SELECT id FROM drawers WHERE id = ?", [new_id]).await;
+    match existing {
+        Ok(rows) if !rows.is_empty() => Some(json!({
+            "success": false,
+            "error": "A drawer with this wing/room/content already exists",
+            "existing_drawer_id": new_id,
+            "public": true,
+        })),
+        Err(error) => Some(json!({"success": false, "error": error.to_string()})),
+        Ok(_) => None,
+    }
+}
+
+/// Execute the transactional reindex: update the drawers row to its new ID,
+/// wing, room, and content, then rebuild the `drawer_words` full-text index.
+///
+/// Wraps all mutations in BEGIN/COMMIT so drawers and `drawer_words` cannot
+/// diverge if any step fails mid-flight.
+async fn tool_update_drawer_reindex(
+    connection: &Connection,
+    old_id: &str,
+    new_id: &str,
+    final_wing: &str,
+    final_room: &str,
+    final_content: &str,
+) -> Result<(), Value> {
+    if let Err(e) = connection.execute("BEGIN", ()).await {
+        return Err(json!({"success": false, "error": e.to_string()}));
+    }
+    if let Err(e) = connection
+        .execute(
+            "UPDATE drawers SET id = ?1, wing = ?2, room = ?3, content = ?4 WHERE id = ?5",
+            turso::params![new_id, final_wing, final_room, final_content, old_id],
+        )
+        .await
+    {
+        let _ = connection.execute("ROLLBACK", ()).await;
+        return Err(json!({"success": false, "error": e.to_string()}));
+    }
+    // Re-index words: always needed when the ID changes or content changes.
+    if let Err(e) = connection
+        .execute("DELETE FROM drawer_words WHERE drawer_id = ?", [old_id])
+        .await
+    {
+        let _ = connection.execute("ROLLBACK", ()).await;
+        return Err(json!({"success": false, "error": e.to_string()}));
+    }
+    if new_id != old_id {
+        // drawer_words rows for old_id were deleted above; if new_id already
+        // had entries (shouldn't happen — we checked above), clean those too.
+        let _ = connection
+            .execute("DELETE FROM drawer_words WHERE drawer_id = ?", [new_id])
+            .await;
+    }
+    if let Err(e) = drawer::index_words(connection, new_id, final_content).await {
+        let _ = connection.execute("ROLLBACK", ()).await;
+        return Err(json!({"success": false, "error": e.to_string()}));
+    }
+    if let Err(e) = connection.execute("COMMIT", ()).await {
+        let _ = connection.execute("ROLLBACK", ()).await;
+        return Err(json!({"success": false, "error": e.to_string()}));
+    }
+    Ok(())
+}
+
+/// Update an existing drawer's content and/or location (wing/room).
+///
+/// Recomputes the deterministic SHA256 ID after any change to keep it
+/// consistent with `tool_add_drawer`.  Rejects updates that would collide
+/// with an existing drawer.
+async fn tool_update_drawer(connection: &Connection, args: &Value) -> Value {
+    let parsed = match tool_update_drawer_validate_args(args) {
+        Ok(parsed) => parsed,
+        Err(early) => return early,
+    };
+
+    // Fetch existing drawer to resolve final wing, room, and content values.
+    let rows = query_all(
+        connection,
+        "SELECT wing, room, content FROM drawers WHERE id = ?",
+        [parsed.drawer_id.as_str()],
+    )
+    .await;
+    let rows = match rows {
+        Ok(rows) => rows,
+        Err(error) => return json!({"success": false, "error": error.to_string()}),
+    };
+    if rows.is_empty() {
+        return json!({"success": false, "error": format!("Drawer not found: {}", parsed.drawer_id), "public": true});
+    }
+
+    let wing_old: String = rows[0].get(0).unwrap_or_default();
+    let room_old: String = rows[0].get(1).unwrap_or_default();
+    let content_old: String = rows[0].get(2).unwrap_or_default();
+    let final_wing = parsed.wing_new.as_deref().unwrap_or(&wing_old);
+    let final_room = parsed.room_new.as_deref().unwrap_or(&room_old);
+    let final_content = parsed.content_new.as_deref().unwrap_or(&content_old);
+
+    // Recompute the deterministic ID to keep it consistent with tool_add_drawer.
+    // wing/room/content are all baked into the ID, so any change means a new ID.
+    let id_new = tool_update_drawer_recompute_id(final_wing, final_room, final_content);
     wal_log(
         "update_drawer",
         json!({
-            "drawer_id": drawer_id,
+            "drawer_id": parsed.drawer_id,
             "new_drawer_id": id_new,
             "old_wing": wing_old,
             "old_room": room_old,
             "new_wing": final_wing,
             "new_room": final_room,
-            "content_changed": content_new.is_some(),
+            "content_changed": parsed.content_new.is_some(),
         }),
     )
     .await;
 
     // If the recomputed ID already exists (and differs), the new wing+room+content
     // is a duplicate of another drawer — reject to prevent silent duplication.
-    if id_new != drawer_id {
-        let existing = query_all(
-            connection,
-            "SELECT id FROM drawers WHERE id = ?",
-            [id_new.as_str()],
-        )
-        .await;
-        match existing {
-            Ok(rows) if !rows.is_empty() => {
-                return json!({
-                    "success": false,
-                    "error": "A drawer with this wing/room/content already exists",
-                    "existing_drawer_id": id_new,
-                    "public": true,
-                });
-            }
-            Err(error) => return json!({"success": false, "error": error.to_string()}),
-            Ok(_) => {}
-        }
-    }
-
-    // Wrap the row update and index rebuild in a transaction so drawers and
-    // drawer_words cannot diverge if any step fails mid-flight.
-    if let Err(e) = connection.execute("BEGIN", ()).await {
-        return json!({"success": false, "error": e.to_string()});
-    }
-
-    if let Err(e) = connection
-        .execute(
-            "UPDATE drawers SET id = ?1, wing = ?2, room = ?3, content = ?4 WHERE id = ?5",
-            turso::params![
-                id_new.as_str(),
-                final_wing,
-                final_room,
-                final_content,
-                drawer_id.as_str()
-            ],
-        )
-        .await
+    if let Some(error) =
+        tool_update_drawer_check_duplicate(connection, &parsed.drawer_id, &id_new).await
     {
-        let _ = connection.execute("ROLLBACK", ()).await;
-        return json!({"success": false, "error": e.to_string()});
+        return error;
     }
 
-    // Re-index words: always needed when the ID changes or content changes.
-    if let Err(e) = connection
-        .execute(
-            "DELETE FROM drawer_words WHERE drawer_id = ?",
-            [drawer_id.as_str()],
-        )
-        .await
+    if let Err(error) = tool_update_drawer_reindex(
+        connection,
+        &parsed.drawer_id,
+        &id_new,
+        final_wing,
+        final_room,
+        final_content,
+    )
+    .await
     {
-        let _ = connection.execute("ROLLBACK", ()).await;
-        return json!({"success": false, "error": e.to_string()});
+        return error;
     }
-
-    if id_new != drawer_id {
-        // drawer_words rows for the old ID were deleted above; if the new
-        // ID already had entries (shouldn't happen — we checked above),
-        // clean those too.
-        let _ = connection
-            .execute(
-                "DELETE FROM drawer_words WHERE drawer_id = ?",
-                [id_new.as_str()],
-            )
-            .await;
-    }
-
-    if let Err(e) = drawer::index_words(connection, &id_new, final_content).await {
-        let _ = connection.execute("ROLLBACK", ()).await;
-        return json!({"success": false, "error": e.to_string()});
-    }
-
-    if let Err(e) = connection.execute("COMMIT", ()).await {
-        let _ = connection.execute("ROLLBACK", ()).await;
-        return json!({"success": false, "error": e.to_string()});
-    }
-
     json!({
         "success": true,
         "drawer_id": id_new,
@@ -1009,6 +1051,7 @@ async fn tool_update_drawer(connection: &Connection, args: &Value) -> Value {
     })
 }
 
+/// Query all knowledge-graph facts for an entity, with optional direction and as-of filters.
 async fn tool_kg_query(connection: &Connection, args: &Value) -> Value {
     let entity = match sanitize_kg_value(str_arg(args, "entity"), "entity") {
         Ok(value) => value,
@@ -1043,6 +1086,7 @@ async fn tool_kg_query(connection: &Connection, args: &Value) -> Value {
     }
 }
 
+/// Add a subject–predicate–object triple to the knowledge graph.
 async fn tool_kg_add(connection: &Connection, args: &Value) -> Value {
     let subject = str_arg(args, "subject");
     let predicate = str_arg(args, "predicate");
@@ -1113,6 +1157,7 @@ async fn tool_kg_add(connection: &Connection, args: &Value) -> Value {
     }
 }
 
+/// End-date a knowledge-graph triple by setting its `valid_to` field.
 async fn tool_kg_invalidate(connection: &Connection, args: &Value) -> Value {
     let subject = str_arg(args, "subject");
     let predicate = str_arg(args, "predicate");
@@ -1159,6 +1204,7 @@ async fn tool_kg_invalidate(connection: &Connection, args: &Value) -> Value {
     }
 }
 
+/// Return all knowledge-graph facts sorted by validity date, optionally filtered by entity.
 async fn tool_kg_timeline(connection: &Connection, args: &Value) -> Value {
     let entity = {
         let raw_entity = str_arg(args, "entity").trim();
@@ -1185,6 +1231,7 @@ async fn tool_kg_timeline(connection: &Connection, args: &Value) -> Value {
     }
 }
 
+/// Return aggregate statistics for the knowledge graph (entity count, triple count, etc.).
 async fn tool_kg_stats(connection: &Connection) -> Value {
     match kg::query::stats(connection).await {
         Ok(stats) => json!(stats),
@@ -1192,6 +1239,7 @@ async fn tool_kg_stats(connection: &Connection) -> Value {
     }
 }
 
+/// BFS-traverse the palace graph from a starting room up to `max_hops` hops.
 async fn tool_traverse(connection: &Connection, args: &Value) -> Value {
     let start_room = match sanitize_name(str_arg(args, "start_room"), "start_room") {
         Ok(value) => value,
@@ -1205,6 +1253,7 @@ async fn tool_traverse(connection: &Connection, args: &Value) -> Value {
     }
 }
 
+/// Find rooms that bridge two wings, optionally filtering by wing names.
 async fn tool_find_tunnels(connection: &Connection, args: &Value) -> Value {
     let wing_a = match sanitize_opt_name(str_arg(args, "wing_a"), "wing_a") {
         Ok(value) => value,
@@ -1221,6 +1270,7 @@ async fn tool_find_tunnels(connection: &Connection, args: &Value) -> Value {
     }
 }
 
+/// Return aggregate statistics about the palace graph (room count, tunnel count, etc.).
 async fn tool_graph_stats(connection: &Connection) -> Value {
     match graph::graph_stats(connection).await {
         Ok(stats) => json!(stats),
@@ -1228,6 +1278,7 @@ async fn tool_graph_stats(connection: &Connection) -> Value {
     }
 }
 
+/// Create an explicit (agent-annotated) tunnel linking two palace locations.
 async fn tool_create_tunnel(connection: &Connection, args: &Value) -> Value {
     let source_wing = match sanitize_name(str_arg(args, "source_wing"), "source_wing") {
         Ok(value) => value,
@@ -1295,6 +1346,7 @@ async fn tool_create_tunnel(connection: &Connection, args: &Value) -> Value {
     }
 }
 
+/// Return all explicit tunnels, optionally filtered to those involving a specific wing.
 async fn tool_list_tunnels(connection: &Connection, args: &Value) -> Value {
     let wing = match sanitize_opt_name(str_arg(args, "wing"), "wing") {
         Ok(value) => value,
@@ -1307,6 +1359,7 @@ async fn tool_list_tunnels(connection: &Connection, args: &Value) -> Value {
     }
 }
 
+/// Delete an explicit tunnel by its 16-character hex ID.
 async fn tool_delete_tunnel(connection: &Connection, args: &Value) -> Value {
     // Trim before validation to avoid spurious failures from surrounding whitespace.
     let tunnel_id = str_arg(args, "tunnel_id").trim();
@@ -1327,6 +1380,7 @@ async fn tool_delete_tunnel(connection: &Connection, args: &Value) -> Value {
     }
 }
 
+/// Return all explicit tunnel connections from a given wing and room.
 async fn tool_follow_tunnels(connection: &Connection, args: &Value) -> Value {
     let wing = match sanitize_name(str_arg(args, "wing"), "wing") {
         Ok(value) => value,
@@ -1343,6 +1397,7 @@ async fn tool_follow_tunnels(connection: &Connection, args: &Value) -> Value {
     }
 }
 
+/// Append a diary entry for an agent in its personal wing.
 async fn tool_diary_write(connection: &Connection, args: &Value) -> Value {
     let agent_name = str_arg(args, "agent_name");
     let entry = str_arg(args, "entry");
@@ -1404,6 +1459,7 @@ async fn tool_diary_write(connection: &Connection, args: &Value) -> Value {
     }
 }
 
+/// Read the most recent diary entries for an agent, newest first.
 async fn tool_diary_read(connection: &Connection, args: &Value) -> Value {
     let agent_name = str_arg(args, "agent_name");
     let last_n = int_arg(args, "last_n", 10).clamp(1, 100);
@@ -1457,6 +1513,7 @@ async fn tool_diary_read(connection: &Connection, args: &Value) -> Value {
 mod tests {
     use super::*;
 
+    /// Open an in-memory test palace database and return the database + connection pair.
     async fn test_conn() -> (turso::Database, turso::Connection) {
         crate::test_helpers::test_db().await
     }
@@ -1590,9 +1647,9 @@ mod tests {
 
     // --- Helper: isolated WAL dir + env override + fresh connection ---
 
-    // Wraps the three-line test setup (tempdir, async_with_vars, test_conn) so
-    // callers only express what is under test.  The connection is passed by value
-    // so the closure can borrow it as `&connection` without lifetime complications.
+    /// Wraps the three-line test setup (tempdir, `async_with_vars`, `test_conn`) so
+    /// callers only express what is under test.  The connection is passed by value
+    /// so the closure can borrow it as `&connection` without lifetime complications.
     async fn with_isolated_env<F, Fut>(test: F)
     where
         F: FnOnce(turso::Connection) -> Fut,

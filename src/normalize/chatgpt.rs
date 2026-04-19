@@ -12,8 +12,27 @@ use super::messages_to_transcript;
 /// — one-sided transcripts (e.g. system-prompt-only files) are rejected.
 pub fn try_parse(data: &serde_json::Value) -> Option<String> {
     let mapping = data.as_object()?.get("mapping")?.as_object()?;
+    let root = try_parse_find_root(mapping)?;
+    let messages = try_parse_walk_tree(root, mapping)?;
 
-    // Find root node (parent=null, no message)
+    // Require at least one user turn AND at least one assistant turn so we
+    // never store a one-sided transcript (e.g. a file with only system prompts).
+    let has_user = messages.iter().any(|(role, _)| role == "user");
+    let has_assistant = messages.iter().any(|(role, _)| role == "assistant");
+    if has_user && has_assistant {
+        let refs: Vec<(&str, &str)> = messages
+            .iter()
+            .map(|(role, text)| (role.as_str(), text.as_str()))
+            .collect();
+        Some(messages_to_transcript(&refs))
+    } else {
+        None
+    }
+}
+
+/// Find the root node ID in a `ChatGPT` mapping — the node with `parent=null`
+/// and no message body. Falls back to the first null-parent node with a message.
+fn try_parse_find_root(mapping: &serde_json::Map<String, serde_json::Value>) -> Option<&str> {
     let mut root_id: Option<&str> = None;
     let mut fallback_root: Option<&str> = None;
 
@@ -28,7 +47,17 @@ pub fn try_parse(data: &serde_json::Value) -> Option<String> {
         }
     }
 
-    let root = root_id.or(fallback_root)?;
+    root_id.or(fallback_root)
+}
+
+/// Walk the linear path of the message tree from `root`, collecting (role, text) pairs.
+///
+/// Returns `None` if any node lookup fails (malformed export). Always follows the
+/// first child so branching edits are ignored — see the comment in `try_parse`.
+fn try_parse_walk_tree(
+    root: &str,
+    mapping: &serde_json::Map<String, serde_json::Value>,
+) -> Option<Vec<(String, String)>> {
     let mut messages: Vec<(String, String)> = Vec::new();
     let mut id_current = root.to_string();
     let mut visited = HashSet::new();
@@ -87,19 +116,7 @@ pub fn try_parse(data: &serde_json::Value) -> Option<String> {
         }
     }
 
-    // Require at least one user turn AND at least one assistant turn so we
-    // never store a one-sided transcript (e.g. a file with only system prompts).
-    let has_user = messages.iter().any(|(role, _)| role == "user");
-    let has_assistant = messages.iter().any(|(role, _)| role == "assistant");
-    if has_user && has_assistant {
-        let refs: Vec<(&str, &str)> = messages
-            .iter()
-            .map(|(role, text)| (role.as_str(), text.as_str()))
-            .collect();
-        Some(messages_to_transcript(&refs))
-    } else {
-        None
-    }
+    Some(messages)
 }
 
 #[cfg(test)]

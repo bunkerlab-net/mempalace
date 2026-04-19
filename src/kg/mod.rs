@@ -415,11 +415,63 @@ fn add_triple_validate_params(params: &TripleParams<'_>) -> Result<()> {
     Ok(())
 }
 
+/// Upsert subject and object entities into the graph (INSERT OR IGNORE).
+/// Called by `add_triple` to keep that function within the 70-line limit.
+async fn add_triple_ensure_entities(
+    connection: &Connection,
+    subject_id: &str,
+    subject_name: &str,
+    object_id: &str,
+    object_name: &str,
+) -> Result<()> {
+    assert!(!subject_id.is_empty(), "subject_id must not be empty");
+    assert!(!object_id.is_empty(), "object_id must not be empty");
+
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO entities (id, name) VALUES (?1, ?2)",
+            turso::params![subject_id, subject_name],
+        )
+        .await?;
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO entities (id, name) VALUES (?1, ?2)",
+            turso::params![object_id, object_name],
+        )
+        .await?;
+    Ok(())
+}
+
+/// Check whether an active triple already exists and return its ID if so.
+/// Called by `add_triple` to keep that function within the 70-line limit.
+async fn add_triple_check_duplicate(
+    connection: &Connection,
+    subject_id: &str,
+    predicate: &str,
+    object_id: &str,
+) -> Result<Option<String>> {
+    assert!(!subject_id.is_empty(), "subject_id must not be empty");
+    assert!(!predicate.is_empty(), "predicate must not be empty");
+    assert!(!object_id.is_empty(), "object_id must not be empty");
+
+    let existing = db::query_all(
+        connection,
+        "SELECT id FROM triples WHERE subject=?1 AND predicate=?2 AND object=?3 AND valid_to IS NULL",
+        turso::params![subject_id, predicate, object_id],
+    )
+    .await?;
+
+    if let Some(row) = existing.first()
+        && let Ok(val) = row.get_value(0)
+        && let Some(id) = val.as_text()
+    {
+        return Ok(Some(id.clone()));
+    }
+    Ok(None)
+}
+
 /// Add a relationship triple. Auto-creates entities if they don't exist.
 /// Returns the triple ID.
-// Descriptive variable names for subject_id, object_id, predicate, and four turso::Value
-// bindings produce a line count just over 70; the logic itself is not complex.
-#[allow(clippy::too_many_lines)]
 pub async fn add_triple(connection: &Connection, params: &TripleParams<'_>) -> Result<String> {
     // Preconditions: subject, predicate, and object must all be non-empty.
     assert!(
@@ -453,33 +505,19 @@ pub async fn add_triple(connection: &Connection, params: &TripleParams<'_>) -> R
         "triple predicate normalizes to empty ID"
     );
 
-    // Auto-create entities.
-    connection
-        .execute(
-            "INSERT OR IGNORE INTO entities (id, name) VALUES (?1, ?2)",
-            turso::params![subject_id.as_str(), params.subject],
-        )
-        .await?;
-    connection
-        .execute(
-            "INSERT OR IGNORE INTO entities (id, name) VALUES (?1, ?2)",
-            turso::params![object_id.as_str(), params.object],
-        )
-        .await?;
-
-    // Check for existing identical active triple.
-    let existing = db::query_all(
+    add_triple_ensure_entities(
         connection,
-        "SELECT id FROM triples WHERE subject=?1 AND predicate=?2 AND object=?3 AND valid_to IS NULL",
-        turso::params![subject_id.as_str(), predicate.as_str(), object_id.as_str()],
+        &subject_id,
+        params.subject,
+        &object_id,
+        params.object,
     )
     .await?;
 
-    if let Some(row) = existing.first()
-        && let Ok(val) = row.get_value(0)
-        && let Some(id) = val.as_text()
+    if let Some(existing_id) =
+        add_triple_check_duplicate(connection, &subject_id, &predicate, &object_id).await?
     {
-        return Ok(id.clone());
+        return Ok(existing_id);
     }
 
     let triple_id = format!(
@@ -487,25 +525,21 @@ pub async fn add_triple(connection: &Connection, params: &TripleParams<'_>) -> R
         &uuid::Uuid::new_v4().to_string().replace('-', "")[..8]
     );
 
-    let valid_from_value: turso::Value = match params.valid_from {
-        Some(value) => turso::Value::from(value),
-        None => turso::Value::Null,
-    };
-    let valid_to_value: turso::Value = match params.valid_to {
-        Some(value) => turso::Value::from(value),
-        None => turso::Value::Null,
-    };
-    let source_closet_value: turso::Value = match params.source_closet {
-        Some(value) => turso::Value::from(value),
-        None => turso::Value::Null,
-    };
-    let source_file_value: turso::Value = match params.source_file {
-        Some(value) => turso::Value::from(value),
-        None => turso::Value::Null,
-    };
-
     // Postcondition: triple ID follows naming convention.
     assert!(triple_id.starts_with("t_"), "triple_id must start with t_");
+
+    let valid_from_value: turso::Value = params
+        .valid_from
+        .map_or(turso::Value::Null, turso::Value::from);
+    let valid_to_value: turso::Value = params
+        .valid_to
+        .map_or(turso::Value::Null, turso::Value::from);
+    let source_closet_value: turso::Value = params
+        .source_closet
+        .map_or(turso::Value::Null, turso::Value::from);
+    let source_file_value: turso::Value = params
+        .source_file
+        .map_or(turso::Value::Null, turso::Value::from);
 
     connection.execute(
         "INSERT INTO triples (id, subject, predicate, object, valid_from, valid_to, confidence, source_closet, source_file) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",

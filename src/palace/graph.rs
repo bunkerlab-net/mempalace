@@ -173,34 +173,15 @@ pub async fn traverse(
         if depth >= hops_max {
             continue;
         }
-
-        let wings_current: HashSet<String> = nodes
-            .get(&room_current)
-            .map(|n| n.wings.iter().cloned().collect())
-            .unwrap_or_default();
-
-        for (room, node) in &nodes {
-            if visited.contains(room) {
-                continue;
-            }
-            let node_wings: HashSet<String> = node.wings.iter().cloned().collect();
-            let shared: Vec<String> = wings_current.intersection(&node_wings).cloned().collect();
-            if !shared.is_empty() {
-                visited.insert(room.clone());
-                let mut sorted_shared = shared;
-                sorted_shared.sort();
-                results.push(TraversalResult {
-                    room: room.clone(),
-                    wings: node.wings.clone(),
-                    count: node.count,
-                    hop: depth + 1,
-                    connected_via: Some(sorted_shared),
-                });
-                if depth + 1 < hops_max {
-                    frontier.push_back((room.clone(), depth + 1));
-                }
-            }
-        }
+        traverse_expand_frontier(
+            &room_current,
+            depth,
+            hops_max,
+            &nodes,
+            &mut visited,
+            &mut frontier,
+            &mut results,
+        );
     }
 
     // Sort by hop first so callers see the closest rooms first; break ties by
@@ -213,6 +194,52 @@ pub async fn traverse(
     debug_assert!(results.len() <= GRAPH_RESULT_CAP);
 
     Ok((results, truncated))
+}
+
+/// Called by `traverse` to keep that function within the 70-line limit.
+///
+/// For one BFS frontier node at `room_current`/`depth`, find all unvisited rooms
+/// that share at least one wing with it, record them in `results`, mark them
+/// `visited`, and push them onto `frontier` if they are below `hops_max`.
+fn traverse_expand_frontier(
+    room_current: &str,
+    depth: usize,
+    hops_max: usize,
+    nodes: &HashMap<String, RoomNode>,
+    visited: &mut HashSet<String>,
+    frontier: &mut VecDeque<(String, usize)>,
+    results: &mut Vec<TraversalResult>,
+) {
+    assert!(!room_current.is_empty(), "room_current must not be empty");
+    assert!(depth < hops_max, "depth must be below hops_max on entry");
+
+    let wings_current: HashSet<String> = nodes
+        .get(room_current)
+        .map(|n| n.wings.iter().cloned().collect())
+        .unwrap_or_default();
+
+    for (room, node) in nodes {
+        if visited.contains(room) {
+            continue;
+        }
+        let node_wings: HashSet<String> = node.wings.iter().cloned().collect();
+        let shared: Vec<String> = wings_current.intersection(&node_wings).cloned().collect();
+        if !shared.is_empty() {
+            visited.insert(room.clone());
+            let mut sorted_shared = shared;
+            sorted_shared.sort();
+            results.push(TraversalResult {
+                room: room.clone(),
+                wings: node.wings.clone(),
+                count: node.count,
+                hop: depth + 1,
+                connected_via: Some(sorted_shared),
+            });
+            if depth + 1 < hops_max {
+                frontier.push_back((room.clone(), depth + 1));
+            }
+        }
+    }
 }
 
 /// Find rooms that connect two wings (tunnels).

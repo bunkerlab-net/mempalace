@@ -10,7 +10,13 @@ use crate::palace::drawer;
 
 /// Backup the palace database and rebuild the inverted word index.
 pub async fn run(connection: &Connection, palace_path: &Path) -> Result<()> {
-    // Backup: checkpoint WAL to ensure backup is self-contained.
+    run_create_backup(connection, palace_path).await?;
+    run_rebuild_index(connection).await
+}
+
+/// Checkpoint the WAL and copy the palace database (plus sidecar files) to `.db.bak`.
+async fn run_create_backup(connection: &Connection, palace_path: &Path) -> Result<()> {
+    // Checkpoint WAL to ensure backup is self-contained.
     // wal_checkpoint returns rows (busy, log, checkpointed) — must use query_all.
     query_all(connection, "PRAGMA wal_checkpoint(TRUNCATE)", ()).await?;
 
@@ -38,10 +44,14 @@ pub async fn run(connection: &Connection, palace_path: &Path) -> Result<()> {
     }
 
     println!("Backup created: {}", backup_path.display());
+    Ok(())
+}
 
-    // Clear and rebuild within a transaction for atomicity.
-    // BEGIN IMMEDIATE is taken before the SELECT so the snapshot is protected
-    // by the same exclusive lock that performs the delete and rebuild.
+/// Clear and rebuild the inverted word index within a transaction.
+///
+/// BEGIN IMMEDIATE is taken before the SELECT so the snapshot is protected
+/// by the same exclusive lock that performs the delete and rebuild.
+async fn run_rebuild_index(connection: &Connection) -> Result<()> {
     connection.execute("BEGIN IMMEDIATE", ()).await?;
 
     if let Err(e) = async {
@@ -83,7 +93,6 @@ pub async fn run(connection: &Connection, palace_path: &Path) -> Result<()> {
     }
 
     connection.execute("COMMIT", ()).await?;
-
     Ok(())
 }
 

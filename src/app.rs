@@ -54,8 +54,9 @@ async fn open_palace() -> error::Result<(turso::Database, turso::Connection, std
     Ok((database, connection, db_path))
 }
 
-// Each match arm is a single CLI subcommand — splitting this into separate
-// functions would not reduce complexity, only scatter the dispatch logic.
+/// Dispatch a parsed CLI command to the appropriate subcommand handler.
+// Each match arm dispatches a single CLI subcommand — splitting further would
+// only scatter the top-level dispatch logic without reducing complexity.
 #[allow(clippy::too_many_lines)]
 pub async fn run(cli: Cli) -> error::Result<()> {
     match cli.command {
@@ -100,20 +101,11 @@ pub async fn run(cli: Cli) -> error::Result<()> {
             room,
             results,
         } => {
-            let (_db, connection, _path) = open_palace().await?;
-            cli::search::run(
-                &connection,
-                &query,
-                wing.as_deref(),
-                room.as_deref(),
-                results,
-            )
-            .await?;
+            run_search(query, wing, room, results).await?;
         }
 
         Command::WakeUp { wing } => {
-            let (_db, connection, _path) = open_palace().await?;
-            cli::wakeup::run(&connection, wing.as_deref()).await?;
+            run_wakeup(wing).await?;
         }
 
         Command::Compress {
@@ -131,30 +123,81 @@ pub async fn run(cli: Cli) -> error::Result<()> {
             sessions_min,
             no_gitignore,
         } => {
-            // Expand ~ so that `mempalace split ~/convos` works as expected.
-            let directory = expand_tilde(&directory);
-            let output_dir = output_dir.as_deref().map(expand_tilde);
-            cli::split::run(
+            run_split(
                 &directory,
                 output_dir.as_deref(),
                 dry_run,
                 sessions_min,
-                !no_gitignore,
+                no_gitignore,
             )?;
         }
 
         Command::Repair => {
-            let (_db, connection, palace_path) = open_palace().await?;
-            cli::repair::run(&connection, &palace_path).await?;
+            run_repair().await?;
         }
 
         Command::Mcp => {
-            let (_db, connection, _path) = open_palace().await?;
-            mcp::run(&connection).await?;
+            run_mcp().await?;
         }
     }
 
     Ok(())
+}
+
+/// Handle the `search` sub-command — opens the palace and runs the search.
+async fn run_search(
+    query: String,
+    wing: Option<String>,
+    room: Option<String>,
+    results: usize,
+) -> error::Result<()> {
+    let (_db, connection, _path) = open_palace().await?;
+    cli::search::run(
+        &connection,
+        &query,
+        wing.as_deref(),
+        room.as_deref(),
+        results,
+    )
+    .await
+}
+
+/// Handle the `wakeup` sub-command — opens the palace and runs wake-up.
+async fn run_wakeup(wing: Option<String>) -> error::Result<()> {
+    let (_db, connection, _path) = open_palace().await?;
+    cli::wakeup::run(&connection, wing.as_deref()).await
+}
+
+/// Handle the `split` sub-command — expands `~` then delegates to the splitter.
+fn run_split(
+    directory: &std::path::Path,
+    output_dir: Option<&std::path::Path>,
+    dry_run: bool,
+    sessions_min: usize,
+    no_gitignore: bool,
+) -> error::Result<()> {
+    // Expand ~ so that `mempalace split ~/convos` works as expected.
+    let directory = expand_tilde(directory);
+    let output_dir = output_dir.map(expand_tilde);
+    cli::split::run(
+        &directory,
+        output_dir.as_deref(),
+        dry_run,
+        sessions_min,
+        !no_gitignore,
+    )
+}
+
+/// Handle the `repair` sub-command — opens the palace and runs repair.
+async fn run_repair() -> error::Result<()> {
+    let (_db, connection, palace_path) = open_palace().await?;
+    cli::repair::run(&connection, &palace_path).await
+}
+
+/// Handle the `mcp` sub-command — opens the palace and starts the MCP server.
+async fn run_mcp() -> error::Result<()> {
+    let (_db, connection, _path) = open_palace().await?;
+    mcp::run(&connection).await
 }
 
 /// Handle the `status` sub-command — opens the palace if it exists.

@@ -247,6 +247,20 @@ async fn mine_write_chunks(
     source_mtime: Option<f64>,
     opts: &MineParams,
 ) -> Result<()> {
+    // Preconditions: callers must supply at least one chunk and a non-empty destination.
+    assert!(
+        !chunks.is_empty(),
+        "mine_write_chunks: chunks must not be empty"
+    );
+    assert!(
+        !wing.is_empty(),
+        "mine_write_chunks: wing must not be empty"
+    );
+    assert!(
+        !room.is_empty(),
+        "mine_write_chunks: room must not be empty"
+    );
+
     for chunk in chunks {
         let id = format!(
             "drawer_{wing}_{room}_{}",

@@ -54,10 +54,7 @@ pub async fn run(connection: &Connection) -> Result<()> {
                     "id": null,
                     "error": {"code": -32700, "message": "Request exceeds maximum frame size"}
                 });
-                let serialized_response = serde_json::to_string(&err_response).unwrap_or_default();
-                stdout.write_all(serialized_response.as_bytes()).await?;
-                stdout.write_all(b"\n").await?;
-                stdout.flush().await?;
+                run_write_response(&mut stdout, &err_response).await?;
                 continue;
             }
             Ok(LineRead::Invalid) => {
@@ -66,10 +63,7 @@ pub async fn run(connection: &Connection) -> Result<()> {
                     "id": null,
                     "error": {"code": -32700, "message": "Request contains invalid UTF-8"}
                 });
-                let serialized_response = serde_json::to_string(&err_response).unwrap_or_default();
-                stdout.write_all(serialized_response.as_bytes()).await?;
-                stdout.write_all(b"\n").await?;
-                stdout.flush().await?;
+                run_write_response(&mut stdout, &err_response).await?;
                 continue;
             }
             Err(e) => return Err(e.into()),
@@ -81,18 +75,10 @@ pub async fn run(connection: &Connection) -> Result<()> {
             continue;
         }
 
-        let request: Value = match serde_json::from_str(trimmed) {
+        let request = match run_parse_request(trimmed) {
             Ok(parsed) => parsed,
-            Err(e) => {
-                let err_response = json!({
-                    "jsonrpc": "2.0",
-                    "id": null,
-                    "error": {"code": -32700, "message": format!("Parse error: {e}")}
-                });
-                let serialized_response = serde_json::to_string(&err_response).unwrap_or_default();
-                stdout.write_all(serialized_response.as_bytes()).await?;
-                stdout.write_all(b"\n").await?;
-                stdout.flush().await?;
+            Err(err_response) => {
+                run_write_response(&mut stdout, &err_response).await?;
                 continue;
             }
         };
@@ -100,14 +86,37 @@ pub async fn run(connection: &Connection) -> Result<()> {
         let response = handle_request(connection, &request).await;
 
         if let Some(response_body) = response {
-            let serialized_response = serde_json::to_string(&response_body).unwrap_or_default();
-            stdout.write_all(serialized_response.as_bytes()).await?;
-            stdout.write_all(b"\n").await?;
-            stdout.flush().await?;
+            run_write_response(&mut stdout, &response_body).await?;
         }
     }
 
     Ok(())
+}
+
+/// Parse a JSON-RPC request from a trimmed line of text.
+///
+/// Returns `Ok(Value)` on success, or `Err(Value)` containing a JSON-RPC
+/// parse-error response ready to send to the client.
+fn run_parse_request(trimmed: &str) -> std::result::Result<Value, Value> {
+    assert!(!trimmed.is_empty());
+    serde_json::from_str(trimmed).map_err(|e| {
+        json!({
+            "jsonrpc": "2.0",
+            "id": null,
+            "error": {"code": -32700, "message": format!("Parse error: {e}")}
+        })
+    })
+}
+
+/// Serialize `response` and write it as a newline-terminated frame to `stdout`.
+async fn run_write_response(
+    stdout: &mut tokio::io::Stdout,
+    response: &Value,
+) -> std::io::Result<()> {
+    let serialized_response = serde_json::to_string(response).unwrap_or_default();
+    stdout.write_all(serialized_response.as_bytes()).await?;
+    stdout.write_all(b"\n").await?;
+    stdout.flush().await
 }
 
 /// Read one newline-delimited line from stdin, enforcing a hard byte limit.
@@ -226,6 +235,9 @@ async fn run_read_line_drain<R: AsyncBufRead + Unpin>(reader: &mut R) -> std::io
     }
 }
 
+/// Validate request shape and dispatch to `handle_request_dispatch`.
+///
+/// Returns `None` for notifications (no response required per JSON-RPC 2.0).
 async fn handle_request(connection: &Connection, request: &Value) -> Option<Value> {
     // Malformed (non-object) requests get a JSON-RPC error rather than a panic;
     // the MCP server must stay alive for subsequent well-formed requests.
@@ -248,30 +260,21 @@ async fn handle_request(connection: &Connection, request: &Value) -> Option<Valu
     let params = request.get("params").cloned().unwrap_or(json!({}));
     let req_id = request.get("id").cloned().unwrap_or(Value::Null);
 
+    handle_request_dispatch(connection, method, &params, req_id).await
+}
+
+/// Dispatch a validated JSON-RPC method to the appropriate handler.
+///
+/// Called after `handle_request` has confirmed the request is a well-formed object
+/// with a string `method` field.
+async fn handle_request_dispatch(
+    connection: &Connection,
+    method: &str,
+    params: &Value,
+    req_id: Value,
+) -> Option<Value> {
     match method {
-        "initialize" => {
-            let client_version = params
-                .get("protocolVersion")
-                .and_then(|proto_val| proto_val.as_str());
-            let negotiated = if let Some(cv) = client_version {
-                if SUPPORTED_PROTOCOL_VERSIONS.contains(&cv) {
-                    cv
-                } else {
-                    SUPPORTED_PROTOCOL_VERSIONS[0]
-                }
-            } else {
-                SUPPORTED_PROTOCOL_VERSIONS[0]
-            };
-            Some(json!({
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "result": {
-                    "protocolVersion": negotiated,
-                    "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "mempalace", "version": env!("CARGO_PKG_VERSION")},
-                }
-            }))
-        }
+        "initialize" => Some(handle_request_initialize(params, &req_id)),
 
         "ping" => Some(json!({
             "jsonrpc": "2.0",
@@ -290,7 +293,7 @@ async fn handle_request(connection: &Connection, request: &Value) -> Option<Valu
             }))
         }
 
-        "tools/call" => Some(handle_request_tools_call(connection, &params, req_id).await),
+        "tools/call" => Some(handle_request_tools_call(connection, params, req_id).await),
 
         _ => Some(json!({
             "jsonrpc": "2.0",
@@ -298,6 +301,31 @@ async fn handle_request(connection: &Connection, request: &Value) -> Option<Valu
             "error": {"code": -32601, "message": format!("Unknown method: {method}")}
         })),
     }
+}
+
+/// Handle the `initialize` method: negotiate protocol version and return server info.
+fn handle_request_initialize(params: &Value, req_id: &Value) -> Value {
+    let client_version = params
+        .get("protocolVersion")
+        .and_then(|proto_val| proto_val.as_str());
+    let negotiated = if let Some(cv) = client_version {
+        if SUPPORTED_PROTOCOL_VERSIONS.contains(&cv) {
+            cv
+        } else {
+            SUPPORTED_PROTOCOL_VERSIONS[0]
+        }
+    } else {
+        SUPPORTED_PROTOCOL_VERSIONS[0]
+    };
+    json!({
+        "jsonrpc": "2.0",
+        "id": req_id,
+        "result": {
+            "protocolVersion": negotiated,
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "mempalace", "version": env!("CARGO_PKG_VERSION")},
+        }
+    })
 }
 
 /// Dispatch a `tools/call` request and return a sanitized JSON-RPC response.
@@ -309,41 +337,62 @@ async fn handle_request_tools_call(
     // Validate params shape before dispatch — reject non-object params, a
     // missing or non-string name, and non-object arguments with Invalid Params
     // (-32602) rather than letting malformed input reach tools::dispatch.
+    let (tool_name, tool_args) = match handle_request_tools_call_validate(params, &req_id) {
+        Ok(validated) => validated,
+        Err(err_response) => return err_response,
+    };
+
+    let result = tools::dispatch(connection, tool_name, &tool_args).await;
+
+    handle_request_tools_call_respond(tool_name, result, &req_id)
+}
+
+/// Validate `tools/call` params and extract `(tool_name, tool_args)`.
+///
+/// Returns `Ok((name, args))` when the params are well-formed, or `Err(response)`
+/// with a ready-to-send JSON-RPC Invalid Params error when they are not.
+fn handle_request_tools_call_validate<'a>(
+    params: &'a Value,
+    req_id: &Value,
+) -> std::result::Result<(&'a str, Value), Value> {
     if !params.is_object() {
-        return json!({
+        return Err(json!({
             "jsonrpc": "2.0",
             "id": req_id,
             "error": {"code": -32602, "message": "Invalid params: expected object"}
-        });
+        }));
     }
     let Some(tool_name) = params
         .get("name")
         .and_then(|name_value| name_value.as_str())
     else {
-        return json!({
+        return Err(json!({
             "jsonrpc": "2.0",
             "id": req_id,
             "error": {"code": -32602, "message": "Invalid params: missing or non-string 'name'"}
-        });
+        }));
     };
     let arguments_value = params.get("arguments");
     if arguments_value.is_some_and(|arguments| !arguments.is_null() && !arguments.is_object()) {
-        return json!({
+        return Err(json!({
             "jsonrpc": "2.0",
             "id": req_id,
             "error": {"code": -32602, "message": "Invalid params: 'arguments' must be an object or null"}
-        });
+        }));
     }
     let tool_args = arguments_value
         .filter(|arguments| !arguments.is_null())
         .cloned()
         .unwrap_or(json!({}));
+    Ok((tool_name, tool_args))
+}
 
-    let result = tools::dispatch(connection, tool_name, &tool_args).await;
-
-    // Sanitize: only expose errors that tools explicitly mark as public.
-    // All other errors are masked so internal paths and database details
-    // are never leaked over the protocol.
+/// Build a sanitized JSON-RPC response from a raw tool dispatch result.
+///
+/// Sanitize: only expose errors that tools explicitly mark as public.
+/// All other errors are masked so internal paths and database details
+/// are never leaked over the protocol.
+fn handle_request_tools_call_respond(tool_name: &str, result: Value, req_id: &Value) -> Value {
     let sanitized = if let Some(error_val) = result.get("error") {
         let is_public = result
             .get("public")
