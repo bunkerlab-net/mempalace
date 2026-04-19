@@ -35,7 +35,7 @@ pub fn extract_topics(text: &str, topics_max: usize) -> Vec<String> {
     let stops = stop_words();
     let words: Vec<&str> = WORD_RE.find_iter(text).map(|m| m.as_str()).collect();
 
-    // Count frequency, skip stop words
+    // Count frequency, skip stop words.
     let mut freq: HashMap<String, i32> = HashMap::new();
     for w in &words {
         let lower = w.to_lowercase();
@@ -45,18 +45,18 @@ pub fn extract_topics(text: &str, topics_max: usize) -> Vec<String> {
         *freq.entry(lower).or_insert(0) += 1;
     }
 
-    // Boost proper nouns and technical terms
+    // Boost proper nouns and technical terms.
     for w in &words {
         let lower = w.to_lowercase();
         if stops.contains(lower.as_str()) {
             continue;
         }
         if let Some(count) = freq.get_mut(&lower) {
-            // Capitalized word (proper noun)
+            // Capitalized word (proper noun).
             if w.chars().next().is_some_and(char::is_uppercase) {
                 *count += 2;
             }
-            // CamelCase, underscore, or hyphen → technical term
+            // CamelCase, underscore, or hyphen → technical term.
             if w.contains('_') || w.contains('-') || w[1..].chars().any(char::is_uppercase) {
                 *count += 2;
             }

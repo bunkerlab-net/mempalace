@@ -551,7 +551,7 @@ async fn tool_search(connection: &Connection, args: &Value) -> Value {
 
 async fn tool_check_duplicate(connection: &Connection, args: &Value) -> Value {
     let content = str_arg(args, "content");
-    // Simple keyword overlap check since we don't have vector similarity
+    // Simple keyword overlap check since we don't have vector similarity.
     match search::search_memories(connection, content, None, None, 5).await {
         Ok(results) => {
             let matches: Vec<Value> = results
@@ -696,7 +696,7 @@ async fn tool_delete_drawer(connection: &Connection, args: &Value) -> Value {
         .await
     {
         Ok(_) => {
-            // Also clean up inverted index
+            // Also clean up inverted index.
             let _ = connection
                 .execute(
                     "DELETE FROM drawer_words WHERE drawer_id = ?",
@@ -865,12 +865,12 @@ async fn tool_update_drawer(connection: &Connection, args: &Value) -> Value {
         Err(error) => return error,
     };
 
-    // No-op: nothing to change
+    // No-op: nothing to change.
     if content_new.is_none() && wing_new.is_none() && room_new.is_none() {
         return json!({"success": true, "drawer_id": drawer_id, "noop": true});
     }
 
-    // Fetch existing drawer
+    // Fetch existing drawer.
     let rows = query_all(
         connection,
         "SELECT wing, room, content FROM drawers WHERE id = ?",
@@ -1382,7 +1382,7 @@ async fn tool_diary_write(connection: &Connection, args: &Value) -> Value {
     )
     .await;
 
-    // Use direct SQL to also set extract_mode (topic) which DrawerParams doesn't support
+    // Use direct SQL to also set extract_mode (topic) which DrawerParams doesn't support.
     match connection
         .execute(
             "INSERT OR IGNORE INTO drawers (id, wing, room, content, source_file, chunk_index, added_by, ingest_mode, extract_mode) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
@@ -1556,11 +1556,11 @@ mod tests {
     #[tokio::test]
     async fn add_drawer_missing_required_fields_returns_error() {
         with_isolated_env(|connection| async move {
-            // Missing content
+            // Missing content.
             let result = tool_add_drawer(&connection, &json!({"wing": "w", "room": "r"})).await;
             assert_eq!(result["success"], false);
 
-            // Missing wing
+            // Missing wing.
             let result = tool_add_drawer(
                 &connection,
                 &json!({"room": "r", "content": "some text here for testing"}),
@@ -1568,7 +1568,7 @@ mod tests {
             .await;
             assert_eq!(result["success"], false);
 
-            // Missing room
+            // Missing room.
             let result = tool_add_drawer(
                 &connection,
                 &json!({"wing": "w", "content": "some text here for testing"}),
@@ -1861,7 +1861,7 @@ mod tests {
 
             let result = tool_search(&connection, &json!({"query": "rust", "wing": "tech"})).await;
             assert!(result.get("error").is_none(), "search must not error");
-            // All returned results should be from the "tech" wing
+            // All returned results should be from the "tech" wing.
             let results = result["results"].as_array().expect("results must be array");
             for r in results {
                 assert_eq!(r["wing"], "tech");
@@ -1902,14 +1902,14 @@ mod tests {
             )
             .await;
 
-            // Check with very similar content — duplicate detection uses word overlap
+            // Check with very similar content — duplicate detection uses word overlap.
             let result = tool_check_duplicate(
                 &connection,
                 &json!({"content": "rust programming language memory safety ownership borrowing lifetimes"}),
             )
             .await;
             assert!(result.get("error").is_none(), "must not error");
-            // is_duplicate is present regardless
+            // is_duplicate is present regardless.
             assert!(
                 result.get("is_duplicate").is_some(),
                 "is_duplicate key must exist"
@@ -2013,12 +2013,12 @@ mod tests {
             seed_drawer(&connection, "w", "r", "second content for pagination test").await;
             seed_drawer(&connection, "w", "r", "third content for pagination test").await;
 
-            // Limit to 2
+            // Limit to 2.
             let result = tool_list_drawers(&connection, &json!({"limit": 2})).await;
             assert_eq!(result["count"], 2);
             assert_eq!(result["limit"], 2);
 
-            // Offset to get the third
+            // Offset to get the third.
             let result2 = tool_list_drawers(&connection, &json!({"limit": 2, "offset": 2})).await;
             assert_eq!(result2["count"], 1);
             assert_eq!(result2["offset"], 2);
@@ -2063,7 +2063,7 @@ mod tests {
             )
             .await;
             assert_eq!(result["success"], true);
-            // ID changes because content changed (deterministic ID includes content)
+            // ID changes because content changed (deterministic ID includes content).
             assert_ne!(
                 result["drawer_id"].as_str().expect("new id"),
                 old_id,
@@ -2104,7 +2104,7 @@ mod tests {
                 .as_str()
                 .expect("drawer_id must be string");
 
-            // Send update with no actual changes
+            // Send update with no actual changes.
             let result = tool_update_drawer(&connection, &json!({"drawer_id": drawer_id})).await;
             assert_eq!(result["success"], true);
             assert_eq!(result["noop"], true);
@@ -2138,7 +2138,7 @@ mod tests {
     #[tokio::test]
     async fn kg_add_missing_field_returns_error() {
         with_isolated_env(|connection| async move {
-            // Missing object
+            // Missing object.
             let result =
                 tool_kg_add(&connection, &json!({"subject": "Rust", "predicate": "is"})).await;
             assert_eq!(result["success"], false);
@@ -2152,7 +2152,7 @@ mod tests {
     #[tokio::test]
     async fn kg_query_entity() {
         with_isolated_env(|connection| async move {
-            // Add a triple first
+            // Add a triple first.
             tool_kg_add(
                 &connection,
                 &json!({"subject": "Rust", "predicate": "compilesTo", "object": "binary"}),
@@ -2400,7 +2400,7 @@ mod tests {
     #[tokio::test]
     async fn delete_tunnel_nonexistent_returns_false() {
         with_isolated_env(|connection| async move {
-            // Valid 16-char hex that doesn't exist
+            // Valid 16-char hex that doesn't exist.
             let result =
                 tool_delete_tunnel(&connection, &json!({"tunnel_id": "0000000000000000"})).await;
             assert!(result.get("error").is_none(), "must not error");
@@ -2436,7 +2436,7 @@ mod tests {
                 tool_follow_tunnels(&connection, &json!({"wing": "alpha", "room": "code"})).await;
             assert!(result.get("error").is_none(), "must not error");
             assert_eq!(result["wing"], "alpha");
-            // Should find at least one connection from the seeded tunnel
+            // Should find at least one connection from the seeded tunnel.
             let conns = result["connections"]
                 .as_array()
                 .expect("connections must be array");
@@ -2463,7 +2463,7 @@ mod tests {
     #[tokio::test]
     async fn traverse_with_shared_room() {
         with_isolated_env(|connection| async move {
-            // Two wings sharing the same room name creates a graph edge
+            // Two wings sharing the same room name creates a graph edge.
             seed_drawer(
                 &connection,
                 "alpha",
@@ -2505,7 +2505,7 @@ mod tests {
     #[tokio::test]
     async fn find_tunnels_between_wings() {
         with_isolated_env(|connection| async move {
-            // Create drawers in two wings sharing a room name
+            // Create drawers in two wings sharing a room name.
             seed_drawer(&connection, "alpha", "shared", "alpha shared content here").await;
             seed_drawer(&connection, "beta", "shared", "beta shared content here").await;
 
@@ -2691,7 +2691,7 @@ mod tests {
     async fn dispatch_routes_to_correct_tool() {
         with_isolated_env(|connection| async move {
             let result = dispatch(&connection, "mempalace_status", &json!({})).await;
-            // tool_status returns total_drawers, proving it was routed correctly
+            // tool_status returns total_drawers, proving it was routed correctly.
             assert!(
                 result.get("total_drawers").is_some(),
                 "must route to tool_status"

@@ -57,7 +57,7 @@ pub fn chunk_text(content: &str) -> Vec<Chunk> {
     while start < content.len() {
         let mut end = snap_backward(content, (start + CHUNK_SIZE).min(content.len()));
 
-        // Try to break at paragraph boundary, then line boundary
+        // Try to break at paragraph boundary, then line boundary.
         if end < content.len() {
             if let Some(pos) = content[start..end].rfind("\n\n") {
                 let abs_pos = start + pos;
@@ -107,7 +107,7 @@ mod tests {
 
     #[test]
     fn short_string_below_min_size_returns_no_chunks() {
-        // Below CHUNK_SIZE_MIN (50)
+        // Below CHUNK_SIZE_MIN (50).
         assert!(chunk_text("too short").is_empty());
     }
 
@@ -122,13 +122,13 @@ mod tests {
 
     #[test]
     fn breaks_at_paragraph_boundary() {
-        // Single paragraph break within CHUNK_SIZE window (second half)
+        // Single paragraph break within CHUNK_SIZE window (second half).
         let before_break = "x".repeat(600);
         let after_break = "y".repeat(500);
         let text = format!("{before_break}\n\n{after_break}");
         let chunks = chunk_text(&text);
         assert!(chunks.len() >= 2);
-        // First chunk should end at the paragraph boundary (all x's)
+        // First chunk should end at the paragraph boundary (all x's).
         assert!(
             chunks[0].content.ends_with('x'),
             "first chunk should end with 'x' but was: ...{}",
@@ -158,11 +158,11 @@ mod tests {
 
     #[test]
     fn multibyte_utf8_does_not_panic() {
-        // Mix of ASCII, emoji, and CJK to stress char boundary snapping
+        // Mix of ASCII, emoji, and CJK to stress char boundary snapping.
         let text = "Hello \u{1F600} world! ".repeat(100) + &"\u{4E16}\u{754C}".repeat(200);
         let chunks = chunk_text(&text);
         assert!(!chunks.is_empty());
-        // Verify all chunks are valid UTF-8 (implicit — String guarantees this)
+        // Verify all chunks are valid UTF-8 (implicit — String guarantees this).
         for chunk in &chunks {
             assert!(chunk.content.len() >= CHUNK_SIZE_MIN);
         }
@@ -185,14 +185,14 @@ mod tests {
     #[test]
     fn snap_forward_finds_next_char_boundary() {
         let text = "\u{1F600}end"; // 4-byte emoji then ASCII
-        // Byte offset 1 is mid-emoji, should snap to 4
+        // Byte offset 1 is mid-emoji, should snap to 4.
         assert_eq!(snap_forward(text, 1), 4);
     }
 
     #[test]
     fn snap_backward_finds_prev_char_boundary() {
         let text = "\u{1F600}end"; // 4-byte emoji then ASCII
-        // Byte offset 3 is mid-emoji, should snap to 0
+        // Byte offset 3 is mid-emoji, should snap to 0.
         assert_eq!(snap_backward(text, 3), 0);
     }
 }

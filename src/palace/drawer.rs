@@ -196,7 +196,7 @@ mod tests {
     #[test]
     fn tokenize_filters_short_words() {
         let tokens = tokenize("I am OK hi no");
-        // All words are < 3 chars
+        // All words are < 3 chars.
         assert!(tokens.is_empty());
     }
 
@@ -321,7 +321,7 @@ mod async_tests {
     #[tokio::test]
     async fn index_words_creates_entries() {
         let (_db, connection) = crate::test_helpers::test_db().await;
-        // Insert a drawer first
+        // Insert a drawer first.
         connection
             .execute(
                 "INSERT INTO drawers (id, wing, room, content) VALUES ('iw1', 'w', 'r', 'test')",

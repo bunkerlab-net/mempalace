@@ -177,7 +177,7 @@ impl Dialect {
         let text_lower = text.to_lowercase();
         let mut found = Vec::new();
 
-        // Check known entities
+        // Check known entities.
         for (name, code) in &self.entity_codes {
             if !name.chars().next().is_some_and(char::is_lowercase)
                 && text_lower.contains(&name.to_lowercase())
@@ -190,7 +190,7 @@ impl Dialect {
             return found;
         }
 
-        // Fallback: capitalized words that look like names
+        // Fallback: capitalized words that look like names.
         let stops = stop_words();
         let words: Vec<&str> = text.split_whitespace().collect();
         for (i, w) in words.iter().enumerate() {
@@ -236,7 +236,7 @@ impl Dialect {
 
         let mut lines = Vec::new();
 
-        // Header line (if metadata available)
+        // Header line (if metadata available).
         if let Some(meta) = metadata
             && (!meta.source_file.is_empty() || !meta.wing.is_empty())
         {
@@ -258,7 +258,7 @@ impl Dialect {
             lines.push(header);
         }
 
-        // Content line
+        // Content line.
         let mut parts = vec![format!("0:{entity_str}"), topic_str];
         if !quote.is_empty() {
             parts.push(format!("\"{quote}\""));

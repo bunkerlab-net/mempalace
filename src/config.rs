@@ -1006,7 +1006,7 @@ rooms:
         assert_eq!(config.rooms[0].name, "backend");
         assert!(config.rooms[0].keywords.contains(&"api".to_string()));
 
-        // Serialize back and deserialize to verify round-trip
+        // Serialize back and deserialize to verify round-trip.
         let serialized = serde_yaml::to_string(&config).expect("serialize yaml");
         let config_roundtrip: ProjectConfig =
             serde_yaml::from_str(&serialized).expect("parse roundtrip yaml");

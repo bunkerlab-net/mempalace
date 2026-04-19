@@ -46,7 +46,7 @@ pub fn run(directory: &Path, yes: bool, no_gitignore: bool) -> Result<()> {
         }
     }
 
-    // Save config
+    // Save config.
     let config = ProjectConfig {
         wing: project_name.clone(),
         rooms,

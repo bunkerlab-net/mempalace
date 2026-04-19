@@ -67,7 +67,7 @@ pub async fn search_memories(
         param_offset + 1
     );
 
-    // Build params
+    // Build params.
     let mut params: Vec<turso::Value> = words
         .iter()
         .map(|w| turso::Value::from(w.as_str()))
@@ -205,7 +205,7 @@ mod async_tests {
     use super::*;
 
     async fn seed_drawers(connection: &Connection) {
-        // Insert two drawers with indexed words
+        // Insert two drawers with indexed words.
         crate::palace::drawer::add_drawer(
             connection,
             &crate::palace::drawer::DrawerParams {

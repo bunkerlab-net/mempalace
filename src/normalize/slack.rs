@@ -143,7 +143,7 @@ mod tests {
         let result = try_parse(&data).expect("should parse");
         let lines: Vec<&str> = result.lines().collect();
 
-        // Filter out empty lines to check role markers
+        // Filter out empty lines to check role markers.
         let non_empty_lines: Vec<&str> = lines.iter().copied().filter(|l| !l.is_empty()).collect();
         assert!(
             non_empty_lines.len() >= 5,
@@ -151,24 +151,24 @@ mod tests {
             non_empty_lines.len()
         );
 
-        // Verify role alternation by checking > markers
-        // U1 is "user" (has > marker)
+        // Verify role alternation by checking > markers.
+        // U1 is "user" (has > marker).
         assert!(
             non_empty_lines[0].starts_with('>') && non_empty_lines[0].contains("first message")
         );
-        // U2 is "assistant" (no > marker)
+        // U2 is "assistant" (no > marker).
         assert!(
             !non_empty_lines[1].starts_with('>') && non_empty_lines[1].contains("second message")
         );
-        // U3 is "user" (has > marker)
+        // U3 is "user" (has > marker).
         assert!(
             non_empty_lines[2].starts_with('>') && non_empty_lines[2].contains("third message")
         );
-        // U1 remains "user" (has > marker)
+        // U1 remains "user" (has > marker).
         assert!(
             non_empty_lines[3].starts_with('>') && non_empty_lines[3].contains("back to first")
         );
-        // U2 remains "assistant" (no > marker)
+        // U2 remains "assistant" (no > marker).
         assert!(
             !non_empty_lines[4].starts_with('>') && non_empty_lines[4].contains("back to second")
         );

@@ -125,7 +125,7 @@ pub fn detect_rooms_from_folders(project_dir: &Path) -> Vec<RoomConfig> {
         return vec![general_room()];
     };
 
-    // Top-level directories
+    // Top-level directories.
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_dir() {
@@ -144,7 +144,7 @@ pub fn detect_rooms_from_folders(project_dir: &Path) -> Vec<RoomConfig> {
             found.entry(clean).or_insert(name.clone());
         }
 
-        // One level deeper
+        // One level deeper.
         if let Ok(sub_entries) = std::fs::read_dir(&path) {
             for sub_entry in sub_entries.flatten() {
                 if !sub_entry.path().is_dir() {
@@ -217,7 +217,7 @@ pub fn detect_room(
         .to_string_lossy()
         .to_lowercase();
 
-    // Priority 1: folder path contains room name
+    // Priority 1: folder path contains room name.
     let path_parts: Vec<&str> = relative.split(['/', '\\']).collect();
     for part in &path_parts[..path_parts.len().saturating_sub(1)] {
         for room in rooms {
@@ -228,7 +228,7 @@ pub fn detect_room(
         }
     }
 
-    // Priority 2: filename matches room name
+    // Priority 2: filename matches room name.
     for room in rooms {
         let room_name_lower = room.name.to_lowercase();
         if room_name_lower.contains(&filename) || filename.contains(&room_name_lower) {
@@ -236,7 +236,7 @@ pub fn detect_room(
         }
     }
 
-    // Priority 3: keyword scoring
+    // Priority 3: keyword scoring.
     let content_lower = content
         .chars()
         .take(2000)
@@ -330,7 +330,7 @@ mod tests {
             keywords: vec!["testing".to_string()],
         }];
         let project = PathBuf::from("/project");
-        // File at root (no folder match), but filename contains room name
+        // File at root (no folder match), but filename contains room name.
         let filepath = PathBuf::from("/project/testing_utils.rs");
         assert_eq!(detect_room(&filepath, "", &rooms, &project), "testing");
     }
@@ -396,7 +396,7 @@ mod tests {
         assert!(names.contains(&"backend"));
         assert!(names.contains(&"documentation"));
         assert!(names.contains(&"general"));
-        // TempDir auto-cleans up when dropped
+        // TempDir auto-cleans up when dropped.
     }
 
     #[test]

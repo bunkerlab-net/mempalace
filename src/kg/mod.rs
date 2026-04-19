@@ -250,7 +250,7 @@ mod async_tests {
         .await
         .expect("add_triple should succeed for valid subject/predicate/object params");
 
-        // Both entities should exist
+        // Both entities should exist.
         let entities = crate::db::query_all(&connection, "SELECT id FROM entities ORDER BY id", ())
             .await
             .expect(
@@ -450,7 +450,7 @@ pub async fn add_triple(connection: &Connection, params: &TripleParams<'_>) -> R
         "triple predicate normalizes to empty ID"
     );
 
-    // Auto-create entities
+    // Auto-create entities.
     connection
         .execute(
             "INSERT OR IGNORE INTO entities (id, name) VALUES (?1, ?2)",
@@ -464,7 +464,7 @@ pub async fn add_triple(connection: &Connection, params: &TripleParams<'_>) -> R
         )
         .await?;
 
-    // Check for existing identical active triple
+    // Check for existing identical active triple.
     let existing = db::query_all(
         connection,
         "SELECT id FROM triples WHERE subject=?1 AND predicate=?2 AND object=?3 AND valid_to IS NULL",

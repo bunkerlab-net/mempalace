@@ -78,7 +78,7 @@ pub async fn build_graph(
     )
     .await?;
 
-    // Aggregate room data across wings
+    // Aggregate room data across wings.
     let mut room_data: HashMap<String, (HashSet<String>, usize)> = HashMap::new();
     for row in &rows {
         let room: String = row.get(0)?;
@@ -89,7 +89,7 @@ pub async fn build_graph(
         entry.1 += usize::try_from(count).unwrap_or(0);
     }
 
-    // Build nodes
+    // Build nodes.
     let mut nodes = HashMap::new();
     for (room, (wings, count)) in &room_data {
         let mut wing_list: Vec<String> = wings.iter().cloned().collect();
@@ -104,7 +104,7 @@ pub async fn build_graph(
         );
     }
 
-    // Build edges from rooms spanning multiple wings
+    // Build edges from rooms spanning multiple wings.
     let mut edges = Vec::new();
     for (room, (wings, count)) in &room_data {
         let mut wing_list: Vec<&String> = wings.iter().collect();
@@ -664,7 +664,7 @@ mod tests {
     use super::*;
 
     async fn seed_graph(connection: &Connection) {
-        // Create drawers across wings and rooms to build a graph
+        // Create drawers across wings and rooms to build a graph.
         for (id, wing, room) in [
             ("g1", "proj_a", "backend"),
             ("g2", "proj_a", "frontend"),
@@ -703,12 +703,12 @@ mod tests {
             .await
             .expect("traverse");
         assert!(!truncated);
-        // frontend (hop 0) → backend (hop 1, shared proj_a) → database (hop 2, shared proj_b)
+        // frontend (hop 0) → backend (hop 1, shared proj_a) → database (hop 2, shared proj_b).
         assert!(!results.is_empty());
         assert_eq!(results[0].room, "frontend");
         assert_eq!(results[0].hop, 0);
 
-        // Verify hop 1: backend reached via shared proj_a wing
+        // Verify hop 1: backend reached via shared proj_a wing.
         let hop1 = results
             .iter()
             .find(|r| r.room == "backend" && r.hop == 1)
@@ -717,7 +717,7 @@ mod tests {
         assert!(hop1.wings.contains(&"proj_b".to_string()));
         assert_eq!(hop1.connected_via, Some(vec!["proj_a".to_string()]));
 
-        // Verify hop 2: database reached via shared proj_b wing
+        // Verify hop 2: database reached via shared proj_b wing.
         let hop2 = results
             .iter()
             .find(|r| r.room == "database" && r.hop == 2)

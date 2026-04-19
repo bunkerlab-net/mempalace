@@ -17,7 +17,7 @@ pub async fn run(connection: &Connection, palace_path: &Path) -> Result<()> {
     let backup_path = palace_path.with_extension("db.bak");
     std::fs::copy(palace_path, &backup_path)?;
 
-    // Build backup sidecar names from backup_path to avoid overwriting source files
+    // Build backup sidecar names from backup_path to avoid overwriting source files.
     let backup_filename = backup_path
         .file_name()
         .and_then(|n| n.to_str())
@@ -63,7 +63,7 @@ pub async fn run(connection: &Connection, palace_path: &Path) -> Result<()> {
         connection.execute("DELETE FROM drawer_words", ()).await?;
         println!("Cleared existing index");
 
-        // Rebuild
+        // Rebuild.
         for (i, (id, content)) in drawers.iter().enumerate() {
             drawer::index_words(connection, id, content).await?;
             if (i + 1) % 100 == 0 || i + 1 == total {
@@ -75,7 +75,7 @@ pub async fn run(connection: &Connection, palace_path: &Path) -> Result<()> {
     }
     .await
     {
-        // Attempt rollback and preserve the original error
+        // Attempt rollback and preserve the original error.
         if let Err(rollback_err) = connection.execute("ROLLBACK", ()).await {
             eprintln!("Rollback failed: {rollback_err}");
         }

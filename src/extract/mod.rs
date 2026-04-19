@@ -45,7 +45,7 @@ pub fn extract_memories(text: &str, min_confidence: f64) -> Vec<Memory> {
         // Lowercase once here so score_markers can skip the allocation on each of its 5 calls.
         let prose_lower = prose.to_lowercase();
 
-        // Score against all types
+        // Score against all types.
         let mut scores: Vec<(&str, f64)> = Vec::new();
         for &(mem_type, markers) in all_markers {
             let score = score_markers(&prose_lower, markers);
@@ -58,7 +58,7 @@ pub fn extract_memories(text: &str, min_confidence: f64) -> Vec<Memory> {
             continue;
         }
 
-        // Length bonus
+        // Length bonus.
         let length_bonus = if para.len() > 500 {
             2.0
         } else if para.len() > 200 {
@@ -78,11 +78,11 @@ pub fn extract_memories(text: &str, min_confidence: f64) -> Vec<Memory> {
         };
         let score_max = score_max + length_bonus;
 
-        // Disambiguate
+        // Disambiguate.
         let scores_by_type: std::collections::HashMap<&str, f64> = scores.iter().copied().collect();
         let final_type = disambiguate(type_max, &prose, &scores_by_type);
 
-        // Confidence
+        // Confidence.
         let confidence = (score_max / 5.0).min(1.0);
         if confidence < min_confidence {
             continue;
@@ -109,7 +109,7 @@ fn score_markers(text: &str, markers: &[Regex]) -> f64 {
     let mut score = 0.0;
     for re in markers {
         let count = re.find_iter(text).count();
-        // Regex match count; always small enough for exact f64 representation
+        // Regex match count; always small enough for exact f64 representation.
         #[allow(clippy::cast_precision_loss)]
         {
             score += count as f64;
@@ -133,7 +133,7 @@ fn disambiguate<'a>(
     let sentiment = get_sentiment(text);
     let has_res = has_resolution(text);
 
-    // Resolved problems are milestones
+    // Resolved problems are milestones.
     if has_res {
         if *scores.get("emotional").unwrap_or(&0.0) > 0.0 && sentiment == "positive" {
             return "emotional";
@@ -141,7 +141,7 @@ fn disambiguate<'a>(
         return "milestone";
     }
 
-    // Problem + positive sentiment => milestone or emotional
+    // Problem + positive sentiment => milestone or emotional.
     if sentiment == "positive" {
         if *scores.get("milestone").unwrap_or(&0.0) > 0.0 {
             return "milestone";
@@ -316,19 +316,19 @@ fn split_into_segments(text: &str) -> Vec<String> {
         })
         .count();
 
-    // If enough turn markers, split by turns
+    // If enough turn markers, split by turns.
     if turn_count >= 3 {
         return split_by_turns(&lines, TURN_REGEXES.as_slice());
     }
 
-    // Fallback: paragraph splitting
+    // Fallback: paragraph splitting.
     let paragraphs: Vec<String> = text
         .split("\n\n")
         .map(|p| p.trim().to_string())
         .filter(|p| !p.is_empty())
         .collect();
 
-    // If single giant block, chunk by line groups
+    // If single giant block, chunk by line groups.
     if paragraphs.len() <= 1 && lines.len() > 20 {
         return lines
             .chunks(25)
@@ -380,7 +380,7 @@ mod tests {
         let text = "The bug was that the database connection was timing out. After investigation, we fixed it by increasing the pool size.";
         let memories = extract_memories(text, 0.1);
         assert!(!memories.is_empty());
-        // Resolved problem should be reclassified as milestone
+        // Resolved problem should be reclassified as milestone.
         assert_eq!(memories[0].kind, "milestone");
     }
 

@@ -95,7 +95,7 @@ fn walk_dir_gitignore(project_dir: &Path) -> Vec<PathBuf> {
         }
         let path = entry.path();
 
-        // Check all path components against SKIP_DIRS
+        // Check all path components against SKIP_DIRS.
         let skip = path.components().any(|component| {
             let component_name = component.as_os_str().to_string_lossy();
             is_skip_dir(component_name.as_ref())

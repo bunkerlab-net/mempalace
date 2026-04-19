@@ -74,20 +74,20 @@ pub fn normalize(filepath: &Path) -> Result<String> {
 }
 
 fn try_normalize_json(content: &str) -> Option<String> {
-    // Try Claude Code JSONL first
+    // Try Claude Code JSONL first.
     if let Some(result) = claude_code::try_parse(content) {
         return Some(result);
     }
 
-    // Try Codex CLI JSONL
+    // Try Codex CLI JSONL.
     if let Some(result) = codex::try_parse(content) {
         return Some(result);
     }
 
-    // Try parsing as JSON
+    // Try parsing as JSON.
     let data: serde_json::Value = serde_json::from_str(content).ok()?;
 
-    // Try each format
+    // Try each format.
     for parser in [claude_ai::try_parse, chatgpt::try_parse, slack::try_parse] {
         if let Some(result) = parser(&data) {
             return Some(result);
@@ -156,7 +156,7 @@ mod tests {
 
     #[test]
     fn normalize_passthrough_with_markers() {
-        // Text with >= 3 lines starting with > should pass through
+        // Text with >= 3 lines starting with > should pass through.
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         let path = temp_dir.path().join("test.txt");
         std::fs::write(
@@ -166,7 +166,7 @@ mod tests {
         .expect("write test file");
         let result = normalize(&path).expect("normalize");
         assert!(result.contains("> hello"));
-        // TempDir auto-cleans up when dropped
+        // TempDir auto-cleans up when dropped.
     }
 
     #[test]
