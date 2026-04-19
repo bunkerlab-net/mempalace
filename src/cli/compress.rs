@@ -24,16 +24,7 @@ fn run_load_dialect(config_path: Option<&str>) -> Result<Dialect> {
                 .collect()
         })
         .unwrap_or_default();
-    let skip = config
-        .get("skip_names")
-        .and_then(|skip_val| skip_val.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|item| item.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-    Ok(Dialect::new(&entities, skip))
+    Ok(Dialect::new(&entities))
 }
 
 /// Compress one drawer row and persist or preview it. Returns `(original_len, compressed_len)`.

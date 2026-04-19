@@ -56,6 +56,7 @@ static NOISE_TAG_RES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         .collect()
 });
 
+// Regex literals are compile-time constants; cannot fail to compile.
 #[allow(clippy::expect_used)]
 static NOISE_LINE_RES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     NOISE_LINE_PREFIXES

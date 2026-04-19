@@ -7,7 +7,7 @@ pub const WALK_DEPTH_LIMIT: usize = 64;
 pub mod chunker;
 pub mod convo_miner;
 pub mod drawer;
-#[allow(dead_code)]
+#[cfg(test)]
 pub mod entity_detect;
 pub mod graph;
 pub mod layers;

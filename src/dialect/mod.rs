@@ -12,16 +12,18 @@ use regex::Regex;
 use emotions::{emotion_signals, flag_signals};
 use topics::{extract_topics, stop_words};
 
+// Regex literal is a compile-time constant; cannot fail to compile.
 #[allow(clippy::expect_used)]
-// Splits text into sentences on punctuation or newlines.
 static SENTENCE_SPLIT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    // Splits text into sentences on punctuation or newlines.
     Regex::new(r"[.!?\n]+")
         .expect("sentence-split regex is a compile-time literal and cannot fail to compile")
 });
 
+// Regex literal is a compile-time constant; cannot fail to compile.
 #[allow(clippy::expect_used)]
-// Strips non-alphabetic characters when extracting entity codes from words.
 static NON_ALPHA_RE: LazyLock<Regex> = LazyLock::new(|| {
+    // Strips non-alphabetic characters when extracting entity codes from words.
     Regex::new(r"[^a-zA-Z]")
         .expect("non-alpha strip regex is a compile-time literal and cannot fail to compile")
 });
@@ -30,8 +32,6 @@ static NON_ALPHA_RE: LazyLock<Regex> = LazyLock::new(|| {
 pub struct Dialect {
     /// Known entity name → short code mappings.
     entity_codes: HashMap<String, String>,
-    #[allow(dead_code)]
-    skip_names: Vec<String>,
 }
 
 /// Optional metadata attached to the AAAK header line.
@@ -150,22 +150,18 @@ fn extract_key_sentence(text: &str) -> String {
 }
 
 impl Dialect {
-    pub fn new(entities: &HashMap<String, String>, skip_names: Vec<String>) -> Self {
+    pub fn new(entities: &HashMap<String, String>) -> Self {
         let mut entity_codes = HashMap::new();
         for (name, code) in entities {
             entity_codes.insert(name.clone(), code.clone());
             entity_codes.insert(name.to_lowercase(), code.clone());
         }
-        Self {
-            entity_codes,
-            skip_names: skip_names.into_iter().map(|n| n.to_lowercase()).collect(),
-        }
+        Self { entity_codes }
     }
 
     pub fn empty() -> Self {
         Self {
             entity_codes: HashMap::new(),
-            skip_names: Vec::new(),
         }
     }
 
@@ -329,7 +325,7 @@ mod tests {
         let mut entities = HashMap::new();
         entities.insert("Alice".to_string(), "ALC".to_string());
         entities.insert("Bob".to_string(), "BOB".to_string());
-        let dialect = Dialect::new(&entities, vec![]);
+        let dialect = Dialect::new(&entities);
         let found = dialect.detect_entities("Alice told Bob about the new architecture");
         assert!(found.contains(&"ALC".to_string()));
         assert!(found.contains(&"BOB".to_string()));

@@ -326,6 +326,7 @@ mod async_tests {
 }
 
 /// Add or update an entity node.
+// Used by `kg::query` tests to seed entities; not called from binary code paths.
 #[allow(dead_code)]
 pub async fn add_entity(
     connection: &Connection,
