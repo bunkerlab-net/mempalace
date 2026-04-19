@@ -921,6 +921,141 @@ mod tests {
     }
 
     #[test]
+    fn split_collect_txt_files_non_dir_returns_error() {
+        // A non-directory path must return Err rather than panic.
+        let result =
+            split_collect_txt_files(std::path::Path::new("/nonexistent/path/to/no_dir"), false);
+        assert!(result.is_err(), "non-directory path must return Err");
+        assert!(
+            result
+                .err()
+                .is_some_and(|error| error.to_string().contains("not an existing directory")),
+            "error message must mention 'not an existing directory'"
+        );
+    }
+
+    #[test]
+    fn split_file_non_dir_output_dir_returns_error() {
+        // Passing a non-directory as output_dir must return Err.
+        let temp_directory =
+            tempfile::tempdir().expect("failed to create temporary directory for output-dir test");
+        let mega_file_path = temp_directory.path().join("mega.txt");
+        fs::write(&mega_file_path, make_mega_file(3))
+            .expect("failed to write three-session mega file");
+
+        let result = split_file(
+            &mega_file_path,
+            std::path::Path::new("/nonexistent/output"),
+            false,
+        );
+        assert!(
+            result.is_err(),
+            "non-directory output_dir must return Err from split_file"
+        );
+        assert!(
+            result
+                .err()
+                .is_some_and(|error| error.to_string().contains("not an existing directory")),
+            "error message must mention 'not an existing directory'"
+        );
+    }
+
+    #[test]
+    fn split_file_write_session_cap_subject_truncates_long_subject() {
+        // A subject longer than byte_cap must be truncated to fit within the cap.
+        let long_subject = "a".repeat(300);
+        let cap = 50usize;
+        let result = split_file_write_session_cap_subject(long_subject.clone(), cap);
+        assert!(
+            result.len() <= cap,
+            "truncated subject must not exceed byte cap (got {} bytes)",
+            result.len()
+        );
+        assert!(
+            !result.is_empty(),
+            "truncated subject must not be empty when input is non-empty"
+        );
+        assert!(
+            long_subject.starts_with(&result),
+            "truncated subject must be a prefix of the original"
+        );
+    }
+
+    #[test]
+    fn split_file_write_session_cap_subject_short_subject_unchanged() {
+        // A subject that fits within byte_cap must be returned unchanged.
+        let short = "hello_world".to_string();
+        let cap = 100usize;
+        let result = split_file_write_session_cap_subject(short.clone(), cap);
+        assert_eq!(
+            result, short,
+            "subject within cap must be returned unchanged"
+        );
+        assert!(result.len() <= cap, "result must not exceed cap");
+    }
+
+    #[test]
+    fn split_file_extract_timestamps_with_valid_timestamp() {
+        // Lines containing a valid timestamp must produce Some with non-empty strings.
+        let lines = &[
+            "╭──── Claude Code v1.0.0",
+            "⏺ 2:30 PM Monday, January 15, 2025",
+            "some content line here",
+        ];
+        let result = split_file_extract_timestamps(lines);
+        assert!(
+            result.is_some(),
+            "lines with a valid timestamp must produce Some"
+        );
+        let (start, end) = result.expect("timestamp must be parseable");
+        assert!(!start.is_empty(), "start timestamp must not be empty");
+        assert!(!end.is_empty(), "end timestamp must not be empty");
+        assert!(
+            start.contains("2025"),
+            "start timestamp must include the year 2025"
+        );
+    }
+
+    #[test]
+    fn run_non_dry_run_writes_and_renames_mega_file() {
+        // run with dry_run=false must write session files and rename the original.
+        let temp_directory =
+            tempfile::tempdir().expect("failed to create temporary directory for non-dry-run test");
+        let mega_file_path = temp_directory.path().join("mega.txt");
+        fs::write(&mega_file_path, make_mega_file(3))
+            .expect("failed to write three-session mega file for non-dry-run test");
+        let output_directory =
+            tempfile::tempdir().expect("failed to create output directory for non-dry-run test");
+
+        run(
+            temp_directory.path(),
+            Some(output_directory.path()),
+            false, // non-dry-run: must write files
+            2,
+            false,
+        )
+        .expect("non-dry-run with qualifying mega file must succeed");
+
+        // Original must be renamed to .mega_backup.
+        assert!(
+            !mega_file_path.exists(),
+            "original mega file must be renamed away after non-dry-run split"
+        );
+        assert!(
+            mega_file_path.with_extension("mega_backup").exists(),
+            "backup file must exist at .mega_backup extension"
+        );
+        // Output directory must contain session files.
+        let output_count = fs::read_dir(output_directory.path())
+            .expect("failed to read output directory after non-dry-run split")
+            .count();
+        assert!(
+            output_count >= 2,
+            "non-dry-run must write at least two session files (got {output_count})"
+        );
+    }
+
+    #[test]
     fn split_collect_txt_files_respect_gitignore_filters_and_caps_depth() {
         // Verify that when respect_gitignore=true, .gitignore-excluded files are
         // omitted and nested files beyond depth=1 are excluded.

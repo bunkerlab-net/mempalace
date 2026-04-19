@@ -2916,4 +2916,136 @@ mod tests {
         })
         .await;
     }
+
+    // --- sanitize_name ---
+
+    #[test]
+    fn sanitize_name_rejects_too_long_string() {
+        // A string longer than 128 characters must be rejected with a public error.
+        let long = "a".repeat(129);
+        let result = sanitize_name(&long, "field");
+        assert!(result.is_err(), "string > 128 chars must be rejected");
+        let error_json = result.expect_err("long string must fail");
+        assert!(
+            error_json["error"]
+                .as_str()
+                .expect("error must be string")
+                .contains("128"),
+            "error must mention the 128-char limit"
+        );
+        assert!(
+            error_json["public"].as_bool().unwrap_or(false),
+            "error must be public"
+        );
+    }
+
+    #[test]
+    fn sanitize_name_rejects_path_traversal_and_null() {
+        // Path-traversal sequences and null bytes are always invalid.
+        for input in &["a..b", "a/b", "a\\b", "a\x00b"] {
+            let result = sanitize_name(input, "field");
+            assert!(result.is_err(), "'{input}' must be rejected");
+            assert!(
+                result.expect_err("path traversal must fail")["public"]
+                    .as_bool()
+                    .unwrap_or(false),
+                "error must be public for '{input}'"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_name_rejects_non_alphanumeric_first_char() {
+        // Names must start with an ASCII alphanumeric character.
+        // Note: leading spaces are stripped by trim(), so they are not tested here.
+        for input in &["_leading", "-leading", ".leading"] {
+            let result = sanitize_name(input, "field");
+            assert!(
+                result.is_err(),
+                "name starting with non-alphanumeric '{input}' must be rejected"
+            );
+            assert!(
+                result.expect_err("invalid start must fail")["public"]
+                    .as_bool()
+                    .unwrap_or(false),
+                "error must be public for '{input}'"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_name_rejects_invalid_chars() {
+        // Characters outside [a-zA-Z0-9_ .'-] must be rejected.
+        for input in &["foo@bar", "foo!bar", "foo#bar", "foo$bar"] {
+            let result = sanitize_name(input, "field");
+            assert!(
+                result.is_err(),
+                "name with invalid character '{input}' must be rejected"
+            );
+            assert!(
+                result.expect_err("invalid char must fail")["public"]
+                    .as_bool()
+                    .unwrap_or(false),
+                "error must be public for '{input}'"
+            );
+        }
+    }
+
+    // --- sanitize_label ---
+
+    #[test]
+    fn sanitize_label_rejects_too_long_string() {
+        // A label longer than LABEL_LEN_MAX (255) bytes must be rejected.
+        let long = "a".repeat(LABEL_LEN_MAX + 1);
+        let result = sanitize_label(&long);
+        assert!(result.is_err(), "label > LABEL_LEN_MAX must be rejected");
+        assert!(
+            result.expect_err("long label must fail")["public"]
+                .as_bool()
+                .unwrap_or(false),
+            "error must be public"
+        );
+    }
+
+    #[test]
+    fn sanitize_label_rejects_null_bytes() {
+        // A label containing a null byte must be rejected.
+        let result = sanitize_label("valid\x00but_null");
+        assert!(result.is_err(), "label with null byte must be rejected");
+        assert!(
+            result.expect_err("null byte must fail")["public"]
+                .as_bool()
+                .unwrap_or(false),
+            "error must be public"
+        );
+    }
+
+    // --- sanitize_content ---
+
+    #[test]
+    fn sanitize_content_rejects_null_bytes() {
+        // Content containing a null byte must be rejected.
+        let result = sanitize_content("valid content\x00with null");
+        assert!(result.is_err(), "content with null byte must be rejected");
+        assert!(
+            result.expect_err("null byte content must fail")["public"]
+                .as_bool()
+                .unwrap_or(false),
+            "error must be public"
+        );
+    }
+
+    #[test]
+    fn sanitize_content_rejects_over_100k_chars() {
+        // Content exceeding 100,000 characters must be rejected.
+        let long = "a".repeat(100_001);
+        let result = sanitize_content(&long);
+        assert!(result.is_err(), "content > 100k chars must be rejected");
+        assert!(
+            result.expect_err("over-100k content must fail")["public"]
+                .as_bool()
+                .unwrap_or(false),
+            "error must be public"
+        );
+    }
 }

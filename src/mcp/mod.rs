@@ -659,6 +659,43 @@ mod tests {
         );
     }
 
+    // -- run_parse_request ---------------------------------------------------
+
+    #[test]
+    fn run_parse_request_valid_json_returns_ok() {
+        // A well-formed JSON object must be returned as a parsed Value.
+        let result = run_parse_request(r#"{"method":"ping","id":1}"#);
+        assert!(result.is_ok(), "valid JSON must return Ok");
+        let value = result.expect("valid JSON must parse");
+        assert_eq!(value["method"], "ping");
+        assert_eq!(value["id"], 1);
+    }
+
+    #[test]
+    fn run_parse_request_invalid_json_returns_error_response() {
+        // Invalid JSON must produce a JSON-RPC -32700 parse-error response.
+        let result = run_parse_request("not_valid{{{json");
+        assert!(result.is_err(), "invalid JSON must return Err");
+        let error_response = result.expect_err("invalid JSON must produce error");
+        assert_eq!(
+            error_response["error"]["code"], -32700,
+            "error code must be -32700 for a parse error"
+        );
+        assert!(
+            error_response["error"]["message"]
+                .as_str()
+                .expect("message must be a string")
+                .contains("Parse error"),
+            "error message must contain 'Parse error'"
+        );
+        // The id field must be null for parse errors (no id extracted).
+        assert_eq!(
+            error_response["id"],
+            serde_json::Value::Null,
+            "id must be null when the request cannot be parsed"
+        );
+    }
+
     // -- run_read_line tests (via run_read_line_impl) ------------------------
 
     #[tokio::test]
