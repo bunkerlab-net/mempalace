@@ -82,7 +82,7 @@ fn int_arg(args: &Value, key: &str, default: i64) -> i64 {
     args.get(key)
         .and_then(|v| {
             v.as_i64()
-                .and_then(|n| if n > 0 { Some(n) } else { None })
+                .filter(|&n| n > 0)
                 .or_else(|| {
                     v.as_f64().and_then(|f| {
                         if f.is_finite() && f > 0.0 && f <= MAX_EXACT_INT_F64 && f.fract() == 0.0 {
@@ -96,24 +96,21 @@ fn int_arg(args: &Value, key: &str, default: i64) -> i64 {
                 })
                 .or_else(|| {
                     v.as_str().and_then(|s| {
-                        s.parse::<i64>()
-                            .ok()
-                            .and_then(|n| if n > 0 { Some(n) } else { None })
-                            .or_else(|| {
-                                s.parse::<f64>().ok().and_then(|f| {
-                                    if f.is_finite()
-                                        && f > 0.0
-                                        && f <= MAX_EXACT_INT_F64
-                                        && f.fract() == 0.0
-                                    {
-                                        // Safe: MAX_EXACT_INT_F64 (2^53-1) < i64::MAX, so the value fits exactly
-                                        #[allow(clippy::cast_possible_truncation)]
-                                        Some(f as i64)
-                                    } else {
-                                        None
-                                    }
-                                })
+                        s.parse::<i64>().ok().filter(|&n| n > 0).or_else(|| {
+                            s.parse::<f64>().ok().and_then(|f| {
+                                if f.is_finite()
+                                    && f > 0.0
+                                    && f <= MAX_EXACT_INT_F64
+                                    && f.fract() == 0.0
+                                {
+                                    // Safe: MAX_EXACT_INT_F64 (2^53-1) < i64::MAX, so the value fits exactly
+                                    #[allow(clippy::cast_possible_truncation)]
+                                    Some(f as i64)
+                                } else {
+                                    None
+                                }
                             })
+                        })
                     })
                 })
         })
