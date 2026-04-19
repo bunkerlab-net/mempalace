@@ -862,10 +862,7 @@ fn tool_update_drawer_validate_args(args: &Value) -> Result<UpdateDrawerArgs, Va
         if content_raw.is_empty() {
             None
         } else {
-            match sanitize_content(content_raw) {
-                Ok(value) => Some(value),
-                Err(error) => return Err(error),
-            }
+            Some(sanitize_content(content_raw)?)
         }
     };
     let wing_new = sanitize_opt_name(str_arg(args, "wing"), "wing")?;
