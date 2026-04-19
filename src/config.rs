@@ -54,11 +54,11 @@ pub fn config_dir() -> PathBuf {
 ///
 /// A relative or empty `$XDG_DATA_HOME` is treated as unset, per XDG spec intent.
 fn xdg_data_dir() -> PathBuf {
-    let base_directory = if let Ok(val) = std::env::var("XDG_DATA_HOME")
-        && !val.is_empty()
-        && PathBuf::from(&val).is_absolute()
+    let base_directory = if let Ok(xdg_data_home) = std::env::var("XDG_DATA_HOME")
+        && !xdg_data_home.is_empty()
+        && PathBuf::from(&xdg_data_home).is_absolute()
     {
-        PathBuf::from(val)
+        PathBuf::from(xdg_data_home)
     } else {
         home_dir().join(".local").join("share")
     };
@@ -173,8 +173,8 @@ impl Default for MempalaceConfig {
 /// or `MEMPALACE_DIR` is set.
 fn maybe_migrate() -> Result<()> {
     // MEMPALACE_DIR means the caller manages paths — skip migration entirely.
-    if let Ok(val) = std::env::var("MEMPALACE_DIR")
-        && !val.is_empty()
+    if let Ok(mempalace_dir) = std::env::var("MEMPALACE_DIR")
+        && !mempalace_dir.is_empty()
     {
         return Ok(());
     }

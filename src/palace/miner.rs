@@ -96,9 +96,9 @@ fn walk_dir_gitignore(project_dir: &Path) -> Vec<PathBuf> {
         let path = entry.path();
 
         // Check all path components against SKIP_DIRS
-        let skip = path.components().any(|c| {
-            let s = c.as_os_str().to_string_lossy();
-            is_skip_dir(s.as_ref())
+        let skip = path.components().any(|component| {
+            let component_name = component.as_os_str().to_string_lossy();
+            is_skip_dir(component_name.as_ref())
         });
         if skip {
             continue;
@@ -190,7 +190,7 @@ fn mine_print_header(
         "  Rooms:   {}",
         rooms
             .iter()
-            .map(|r| r.name.as_str())
+            .map(|room| room.name.as_str())
             .collect::<Vec<_>>()
             .join(", ")
     );
@@ -325,9 +325,13 @@ async fn mine_process_files(
             // Capture mtime now so all chunks from the same file share the same timestamp.
             let source_mtime: Option<f64> = std::fs::metadata(filepath)
                 .ok()
-                .and_then(|m| m.modified().ok())
-                .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs_f64());
+                .and_then(|metadata| metadata.modified().ok())
+                .and_then(|system_time| {
+                    system_time
+                        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                        .ok()
+                })
+                .map(|duration| duration.as_secs_f64());
             mine_write_chunks(
                 connection,
                 &chunks,

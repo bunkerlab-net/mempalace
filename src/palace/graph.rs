@@ -362,22 +362,22 @@ fn canonical_tunnel_id(
     assert!(!target_wing.is_empty(), "target_wing must not be empty");
     assert!(!target_room.is_empty(), "target_room must not be empty");
 
-    let src = format!("{source_wing}/{source_room}");
-    let tgt = format!("{target_wing}/{target_room}");
-    let (a, b) = if src <= tgt {
-        (src.as_str(), tgt.as_str())
+    let source_path = format!("{source_wing}/{source_room}");
+    let target_path = format!("{target_wing}/{target_room}");
+    let (first_endpoint, second_endpoint) = if source_path <= target_path {
+        (source_path.as_str(), target_path.as_str())
     } else {
-        (tgt.as_str(), src.as_str())
+        (target_path.as_str(), source_path.as_str())
     };
     // ↔ (U+2194) separates the two endpoints. A bare `/` would be ambiguous
     // because wing and room strings can themselves contain slashes in principle;
     // a non-ASCII multi-byte separator makes accidental collisions impossible.
-    let input = format!("{a}\u{2194}{b}");
+    let input = format!("{first_endpoint}\u{2194}{second_endpoint}");
     let hash = sha2::Sha256::digest(input.as_bytes());
-    let hex: String = hash.iter().fold(String::new(), |mut s, byte| {
+    let hex: String = hash.iter().fold(String::new(), |mut hex_string, byte| {
         use std::fmt::Write as _;
-        let _ = write!(s, "{byte:02x}");
-        s
+        let _ = write!(hex_string, "{byte:02x}");
+        hex_string
     });
     // Postcondition: SHA256 hex is always 64 chars; we take the first 16.
     assert_eq!(hex.len(), 64, "SHA256 hex output must be 64 characters");

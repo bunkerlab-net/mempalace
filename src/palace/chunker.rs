@@ -16,30 +16,30 @@ pub struct Chunk {
 }
 
 /// Snap a byte offset to the nearest char boundary (forward).
-fn snap_forward(s: &str, mut pos: usize) -> usize {
+fn snap_forward(text: &str, mut pos: usize) -> usize {
     assert!(
-        pos <= s.len(),
+        pos <= text.len(),
         "snap_forward: pos {pos} exceeds string length {}",
-        s.len()
+        text.len()
     );
-    while pos < s.len() && !s.is_char_boundary(pos) {
+    while pos < text.len() && !text.is_char_boundary(pos) {
         pos += 1;
     }
-    debug_assert!(s.is_char_boundary(pos));
+    debug_assert!(text.is_char_boundary(pos));
     pos
 }
 
 /// Snap a byte offset to the nearest char boundary (backward).
-fn snap_backward(s: &str, mut pos: usize) -> usize {
+fn snap_backward(text: &str, mut pos: usize) -> usize {
     assert!(
-        pos <= s.len(),
+        pos <= text.len(),
         "snap_backward: pos {pos} exceeds string length {}",
-        s.len()
+        text.len()
     );
-    while pos > 0 && !s.is_char_boundary(pos) {
+    while pos > 0 && !text.is_char_boundary(pos) {
         pos -= 1;
     }
-    debug_assert!(s.is_char_boundary(pos));
+    debug_assert!(text.is_char_boundary(pos));
     pos
 }
 
@@ -170,29 +170,29 @@ mod tests {
 
     #[test]
     fn snap_forward_on_boundary_is_identity() {
-        let s = "hello";
-        assert_eq!(snap_forward(s, 0), 0);
-        assert_eq!(snap_forward(s, 3), 3);
+        let text = "hello";
+        assert_eq!(snap_forward(text, 0), 0);
+        assert_eq!(snap_forward(text, 3), 3);
     }
 
     #[test]
     fn snap_backward_on_boundary_is_identity() {
-        let s = "hello";
-        assert_eq!(snap_backward(s, 0), 0);
-        assert_eq!(snap_backward(s, 3), 3);
+        let text = "hello";
+        assert_eq!(snap_backward(text, 0), 0);
+        assert_eq!(snap_backward(text, 3), 3);
     }
 
     #[test]
     fn snap_forward_finds_next_char_boundary() {
-        let s = "\u{1F600}end"; // 4-byte emoji then ASCII
+        let text = "\u{1F600}end"; // 4-byte emoji then ASCII
         // Byte offset 1 is mid-emoji, should snap to 4
-        assert_eq!(snap_forward(s, 1), 4);
+        assert_eq!(snap_forward(text, 1), 4);
     }
 
     #[test]
     fn snap_backward_finds_prev_char_boundary() {
-        let s = "\u{1F600}end"; // 4-byte emoji then ASCII
+        let text = "\u{1F600}end"; // 4-byte emoji then ASCII
         // Byte offset 3 is mid-emoji, should snap to 0
-        assert_eq!(snap_backward(s, 3), 0);
+        assert_eq!(snap_backward(text, 3), 0);
     }
 }

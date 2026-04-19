@@ -183,8 +183,8 @@ static NEGATIVE_SET: LazyLock<HashSet<&str>> =
 fn compile_regexes(patterns: &[&str]) -> Vec<Regex> {
     patterns
         .iter()
-        .map(|p| {
-            Regex::new(p)
+        .map(|pattern| {
+            Regex::new(pattern)
                 .expect("regex pattern is a compile-time literal and cannot fail to compile")
         })
         .collect()
@@ -248,16 +248,16 @@ fn get_sentiment(text: &str) -> &'static str {
         .map(str::to_lowercase)
         .collect();
 
-    let pos = words
+    let positive_count = words
         .iter()
-        .filter(|w| POSITIVE_SET.contains(w.as_str()))
+        .filter(|word| POSITIVE_SET.contains(word.as_str()))
         .count();
-    let neg = words
+    let negative_count = words
         .iter()
-        .filter(|w| NEGATIVE_SET.contains(w.as_str()))
+        .filter(|word| NEGATIVE_SET.contains(word.as_str()))
         .count();
 
-    let result = match pos.cmp(&neg) {
+    let result = match positive_count.cmp(&negative_count) {
         std::cmp::Ordering::Greater => "positive",
         std::cmp::Ordering::Less => "negative",
         std::cmp::Ordering::Equal => "neutral",
@@ -333,7 +333,7 @@ fn split_into_segments(text: &str) -> Vec<String> {
         return lines
             .chunks(25)
             .map(|chunk| chunk.join("\n"))
-            .filter(|s| !s.trim().is_empty())
+            .filter(|line| !line.trim().is_empty())
             .collect();
     }
 

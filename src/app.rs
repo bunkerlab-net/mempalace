@@ -49,9 +49,9 @@ async fn open_palace() -> error::Result<(turso::Database, turso::Connection, std
             db_path.display()
         ))
     })?;
-    let (db, connection) = db::open_db(db_path_str).await?;
+    let (database, connection) = db::open_db(db_path_str).await?;
     schema::ensure_schema(&connection).await?;
-    Ok((db, connection, db_path))
+    Ok((database, connection, db_path))
 }
 
 // Each match arm is a single CLI subcommand — splitting this into separate

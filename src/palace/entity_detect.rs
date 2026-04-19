@@ -204,10 +204,10 @@ fn extract_candidates(text: &str) -> HashMap<String, usize> {
     // Require at least 3 occurrences before treating a name as an entity.
     // Once or twice is likely a passing reference; three times suggests the
     // name is a recurring actor or concept worth storing.
-    counts.retain(|_, v| *v >= 3);
+    counts.retain(|_, freq| *freq >= 3);
 
     // Postcondition: all surviving candidates have frequency >= 3.
-    debug_assert!(counts.values().all(|&v| v >= 3));
+    debug_assert!(counts.values().all(|&freq| freq >= 3));
 
     counts
 }
@@ -344,9 +344,9 @@ fn score_entity(name: &str, text: &str, lines: &[String]) -> EntityScores {
 }
 
 fn classify_entity(name: &str, frequency: usize, scores: &EntityScores) -> DetectedEntity {
-    let ps = scores.person_score;
-    let prs = scores.project_score;
-    let total = ps + prs;
+    let person_score = scores.person_score;
+    let project_score = scores.project_score;
+    let total = person_score + project_score;
 
     if total == 0 {
         // frequency is a name occurrence count, always small enough for exact f64 representation
@@ -361,25 +361,25 @@ fn classify_entity(name: &str, frequency: usize, scores: &EntityScores) -> Detec
         };
     }
 
-    let person_ratio = f64::from(ps) / f64::from(total);
+    let person_ratio = f64::from(person_score) / f64::from(total);
 
     // Count distinct signal categories to distinguish corroborated person signals
     // from pronoun-only matches, which are too weak for a confident classification.
     let mut signal_cats: HashSet<&str> = HashSet::new();
-    for s in &scores.person_signals {
-        if s.contains("dialogue") {
+    for signal in &scores.person_signals {
+        if signal.contains("dialogue") {
             signal_cats.insert("dialogue");
-        } else if s.contains("action") || s.contains("said") || s.contains("asked") {
+        } else if signal.contains("action") || signal.contains("said") || signal.contains("asked") {
             signal_cats.insert("action");
-        } else if s.contains("pronoun") {
+        } else if signal.contains("pronoun") {
             signal_cats.insert("pronoun");
-        } else if s.contains("addressed") {
+        } else if signal.contains("addressed") {
             signal_cats.insert("addressed");
         }
     }
     let has_two = signal_cats.len() >= 2;
 
-    classify_entity_build(name, frequency, scores, person_ratio, has_two, ps)
+    classify_entity_build(name, frequency, scores, person_ratio, has_two, person_score)
 }
 
 /// Build the `DetectedEntity` once `person_ratio` and `has_two` are known.
@@ -389,9 +389,9 @@ fn classify_entity_build(
     scores: &EntityScores,
     person_ratio: f64,
     has_two: bool,
-    ps: i32,
+    person_score: i32,
 ) -> DetectedEntity {
-    if person_ratio >= 0.7 && has_two && ps >= 5 {
+    if person_ratio >= 0.7 && has_two && person_score >= 5 {
         DetectedEntity {
             name: name.to_string(),
             entity_type: "person".to_string(),
@@ -403,16 +403,16 @@ fn classify_entity_build(
                 scores.person_signals.clone()
             },
         }
-    } else if person_ratio >= 0.7 && (!has_two || ps < 5) {
+    } else if person_ratio >= 0.7 && (!has_two || person_score < 5) {
         DetectedEntity {
             name: name.to_string(),
             entity_type: "uncertain".to_string(),
             confidence: 0.4,
             frequency,
             signals: {
-                let mut s = scores.person_signals.clone();
-                s.push(format!("appears {frequency}x — pronoun-only match"));
-                s
+                let mut signal_list = scores.person_signals.clone();
+                signal_list.push(format!("appears {frequency}x — pronoun-only match"));
+                signal_list
             },
         }
     } else if person_ratio <= 0.3 {

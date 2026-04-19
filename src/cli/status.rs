@@ -16,12 +16,12 @@ async fn run_print_wings(connection: &Connection) -> Result<()> {
         let wing = row
             .get_value(0)
             .ok()
-            .and_then(|v| v.as_text().cloned())
+            .and_then(|cell| cell.as_text().cloned())
             .unwrap_or_default();
         let count = row
             .get_value(1)
             .ok()
-            .and_then(|v| v.as_integer().copied())
+            .and_then(|cell| cell.as_integer().copied())
             .unwrap_or(0);
         println!("  {wing}: {count} drawers");
     }
@@ -42,17 +42,17 @@ async fn run_print_rooms(connection: &Connection) -> Result<()> {
         let wing = row
             .get_value(0)
             .ok()
-            .and_then(|v| v.as_text().cloned())
+            .and_then(|cell| cell.as_text().cloned())
             .unwrap_or_default();
         let room = row
             .get_value(1)
             .ok()
-            .and_then(|v| v.as_text().cloned())
+            .and_then(|cell| cell.as_text().cloned())
             .unwrap_or_default();
         let count = row
             .get_value(2)
             .ok()
-            .and_then(|v| v.as_integer().copied())
+            .and_then(|cell| cell.as_integer().copied())
             .unwrap_or(0);
 
         if wing != current_wing {
@@ -68,15 +68,15 @@ async fn run_print_kg(connection: &Connection) -> Result<()> {
     let entity_rows = db::query_all(connection, "SELECT COUNT(*) FROM entities", ()).await?;
     let entity_count: i64 = entity_rows
         .first()
-        .and_then(|r| r.get_value(0).ok())
-        .and_then(|v| v.as_integer().copied())
+        .and_then(|row| row.get_value(0).ok())
+        .and_then(|cell| cell.as_integer().copied())
         .unwrap_or(0);
 
     let triple_rows = db::query_all(connection, "SELECT COUNT(*) FROM triples", ()).await?;
     let triple_count: i64 = triple_rows
         .first()
-        .and_then(|r| r.get_value(0).ok())
-        .and_then(|v| v.as_integer().copied())
+        .and_then(|row| row.get_value(0).ok())
+        .and_then(|cell| cell.as_integer().copied())
         .unwrap_or(0);
 
     if entity_count > 0 || triple_count > 0 {
@@ -91,8 +91,8 @@ pub async fn run(connection: &Connection) -> Result<()> {
     let rows = db::query_all(connection, "SELECT COUNT(*) FROM drawers", ()).await?;
     let total: i64 = rows
         .first()
-        .and_then(|r| r.get_value(0).ok())
-        .and_then(|v| v.as_integer().copied())
+        .and_then(|row| row.get_value(0).ok())
+        .and_then(|cell| cell.as_integer().copied())
         .unwrap_or(0);
 
     if total == 0 {

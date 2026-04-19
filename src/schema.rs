@@ -114,7 +114,7 @@ pub async fn ensure_schema(connection: &Connection) -> Result<()> {
     .await?;
     let table_names: Vec<String> = rows
         .iter()
-        .filter_map(|r| r.get::<String>(0).ok())
+        .filter_map(|row| row.get::<String>(0).ok())
         .collect();
     assert!(
         table_names.contains(&"drawers".to_string()),
@@ -173,7 +173,7 @@ mod tests {
 
         let table_names: Vec<String> = rows
             .iter()
-            .filter_map(|r| r.get::<String>(0).ok())
+            .filter_map(|row| row.get::<String>(0).ok())
             .collect();
 
         // All 6 core tables must be present.

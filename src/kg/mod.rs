@@ -333,21 +333,26 @@ pub async fn add_entity(
     entity_type: &str,
     properties: Option<&str>,
 ) -> Result<String> {
-    let eid = entity_id(name);
+    let entity_identifier = entity_id(name);
     // entity_id can return "" for inputs like "'"; reject before writing a blank key.
-    if eid.is_empty() {
+    if entity_identifier.is_empty() {
         return Err(crate::error::Error::Other(
             "empty normalized entity id".to_string(),
         ));
     }
-    let props = properties.unwrap_or("{}");
+    let properties_json = properties.unwrap_or("{}");
     connection
         .execute(
             "INSERT OR REPLACE INTO entities (id, name, type, properties) VALUES (?1, ?2, ?3, ?4)",
-            turso::params![eid.as_str(), name, entity_type, props],
+            turso::params![
+                entity_identifier.as_str(),
+                name,
+                entity_type,
+                properties_json
+            ],
         )
         .await?;
-    Ok(eid)
+    Ok(entity_identifier)
 }
 
 /// Parameters for [`add_triple`].
@@ -381,16 +386,18 @@ fn add_triple_validate_params(params: &TripleParams<'_>) -> Result<()> {
     }
     let valid_from_date = params
         .valid_from
-        .map(|v| {
-            chrono::NaiveDate::parse_from_str(v, "%Y-%m-%d")
-                .map_err(|_| crate::error::Error::Other(format!("invalid valid_from date: {v}")))
+        .map(|date_str| {
+            chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d").map_err(|_| {
+                crate::error::Error::Other(format!("invalid valid_from date: {date_str}"))
+            })
         })
         .transpose()?;
     let valid_to_date = params
         .valid_to
-        .map(|v| {
-            chrono::NaiveDate::parse_from_str(v, "%Y-%m-%d")
-                .map_err(|_| crate::error::Error::Other(format!("invalid valid_to date: {v}")))
+        .map(|date_str| {
+            chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d").map_err(|_| {
+                crate::error::Error::Other(format!("invalid valid_to date: {date_str}"))
+            })
         })
         .transpose()?;
     if let (Some(from), Some(to)) = (valid_from_date, valid_to_date)
@@ -407,6 +414,9 @@ fn add_triple_validate_params(params: &TripleParams<'_>) -> Result<()> {
 
 /// Add a relationship triple. Auto-creates entities if they don't exist.
 /// Returns the triple ID.
+// Descriptive variable names for subject_id, object_id, predicate, and four turso::Value
+// bindings produce a line count just over 70; the logic itself is not complex.
+#[allow(clippy::too_many_lines)]
 pub async fn add_triple(connection: &Connection, params: &TripleParams<'_>) -> Result<String> {
     // Preconditions: subject, predicate, and object must all be non-empty.
     assert!(
@@ -421,27 +431,36 @@ pub async fn add_triple(connection: &Connection, params: &TripleParams<'_>) -> R
 
     add_triple_validate_params(params)?;
 
-    let sub_id = entity_id(params.subject);
-    let obj_id = entity_id(params.object);
-    let pred = params.predicate.to_lowercase().replace(' ', "_");
+    let subject_id = entity_id(params.subject);
+    let object_id = entity_id(params.object);
+    let predicate = params.predicate.to_lowercase().replace(' ', "_");
 
     // Pair assertions: entity_id can return "" for inputs like "'".
     // An empty normalized ID would silently corrupt the graph with a blank key.
-    assert!(!sub_id.is_empty(), "triple subject normalizes to empty ID");
-    assert!(!obj_id.is_empty(), "triple object normalizes to empty ID");
-    assert!(!pred.is_empty(), "triple predicate normalizes to empty ID");
+    assert!(
+        !subject_id.is_empty(),
+        "triple subject normalizes to empty ID"
+    );
+    assert!(
+        !object_id.is_empty(),
+        "triple object normalizes to empty ID"
+    );
+    assert!(
+        !predicate.is_empty(),
+        "triple predicate normalizes to empty ID"
+    );
 
     // Auto-create entities
     connection
         .execute(
             "INSERT OR IGNORE INTO entities (id, name) VALUES (?1, ?2)",
-            turso::params![sub_id.as_str(), params.subject],
+            turso::params![subject_id.as_str(), params.subject],
         )
         .await?;
     connection
         .execute(
             "INSERT OR IGNORE INTO entities (id, name) VALUES (?1, ?2)",
-            turso::params![obj_id.as_str(), params.object],
+            turso::params![object_id.as_str(), params.object],
         )
         .await?;
 
@@ -449,7 +468,7 @@ pub async fn add_triple(connection: &Connection, params: &TripleParams<'_>) -> R
     let existing = db::query_all(
         connection,
         "SELECT id FROM triples WHERE subject=?1 AND predicate=?2 AND object=?3 AND valid_to IS NULL",
-        turso::params![sub_id.as_str(), pred.as_str(), obj_id.as_str()],
+        turso::params![subject_id.as_str(), predicate.as_str(), object_id.as_str()],
     )
     .await?;
 
@@ -461,24 +480,24 @@ pub async fn add_triple(connection: &Connection, params: &TripleParams<'_>) -> R
     }
 
     let triple_id = format!(
-        "t_{sub_id}_{pred}_{obj_id}_{}",
+        "t_{subject_id}_{predicate}_{object_id}_{}",
         &uuid::Uuid::new_v4().to_string().replace('-', "")[..8]
     );
 
     let valid_from_value: turso::Value = match params.valid_from {
-        Some(v) => turso::Value::from(v),
+        Some(value) => turso::Value::from(value),
         None => turso::Value::Null,
     };
     let valid_to_value: turso::Value = match params.valid_to {
-        Some(v) => turso::Value::from(v),
+        Some(value) => turso::Value::from(value),
         None => turso::Value::Null,
     };
     let source_closet_value: turso::Value = match params.source_closet {
-        Some(v) => turso::Value::from(v),
+        Some(value) => turso::Value::from(value),
         None => turso::Value::Null,
     };
     let source_file_value: turso::Value = match params.source_file {
-        Some(v) => turso::Value::from(v),
+        Some(value) => turso::Value::from(value),
         None => turso::Value::Null,
     };
 
@@ -487,7 +506,7 @@ pub async fn add_triple(connection: &Connection, params: &TripleParams<'_>) -> R
 
     connection.execute(
         "INSERT INTO triples (id, subject, predicate, object, valid_from, valid_to, confidence, source_closet, source_file) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-        turso::params![triple_id.as_str(), sub_id.as_str(), pred.as_str(), obj_id.as_str(), valid_from_value, valid_to_value, params.confidence, source_closet_value, source_file_value],
+        turso::params![triple_id.as_str(), subject_id.as_str(), predicate.as_str(), object_id.as_str(), valid_from_value, valid_to_value, params.confidence, source_closet_value, source_file_value],
     )
     .await?;
 
@@ -510,22 +529,22 @@ pub async fn invalidate(
     );
     assert!(!object.is_empty(), "invalidate: object must not be empty");
 
-    let sub_id = entity_id(subject);
-    let obj_id = entity_id(object);
-    let pred = predicate.to_lowercase().replace(' ', "_");
+    let subject_id = entity_id(subject);
+    let object_id = entity_id(object);
+    let predicate_normalized = predicate.to_lowercase().replace(' ', "_");
 
     // Pair assertions: entity_id can return "" for apostrophe-only inputs.
     // An empty normalized ID would silently run an UPDATE with a blank key.
     assert!(
-        !sub_id.is_empty(),
+        !subject_id.is_empty(),
         "invalidate: subject normalizes to empty ID"
     );
     assert!(
-        !obj_id.is_empty(),
+        !object_id.is_empty(),
         "invalidate: object normalizes to empty ID"
     );
     assert!(
-        !pred.is_empty(),
+        !predicate_normalized.is_empty(),
         "invalidate: predicate normalizes to empty ID"
     );
 
@@ -537,7 +556,7 @@ pub async fn invalidate(
 
     connection.execute(
         "UPDATE triples SET valid_to=?1 WHERE subject=?2 AND predicate=?3 AND object=?4 AND valid_to IS NULL",
-        turso::params![persisted_ended.as_str(), sub_id.as_str(), pred.as_str(), obj_id.as_str()],
+        turso::params![persisted_ended.as_str(), subject_id.as_str(), predicate_normalized.as_str(), object_id.as_str()],
     )
     .await?;
 

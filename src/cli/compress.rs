@@ -16,16 +16,20 @@ fn run_load_dialect(config_path: Option<&str>) -> Result<Dialect> {
         .and_then(|e| e.as_object())
         .map(|obj| {
             obj.iter()
-                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .filter_map(|(k, entity_val)| {
+                    entity_val
+                        .as_str()
+                        .map(|code| (k.clone(), code.to_string()))
+                })
                 .collect()
         })
         .unwrap_or_default();
     let skip = config
         .get("skip_names")
-        .and_then(|s| s.as_array())
+        .and_then(|skip_val| skip_val.as_array())
         .map(|arr| {
             arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
+                .filter_map(|item| item.as_str().map(String::from))
                 .collect()
         })
         .unwrap_or_default();

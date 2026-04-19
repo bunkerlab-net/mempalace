@@ -75,8 +75,8 @@ pub async fn search_memories(
     if let Some(w) = wing {
         params.push(turso::Value::from(w));
     }
-    if let Some(r) = room {
-        params.push(turso::Value::from(r));
+    if let Some(room_name) = room {
+        params.push(turso::Value::from(room_name));
     }
     // SQLite LIMIT expects a signed integer. Callers are unlikely to request
     // more than i32::MAX results, but we saturate rather than panic.
@@ -100,33 +100,33 @@ fn search_memories_parse_rows(rows: &[turso::Row]) -> Vec<SearchResult> {
         let text = row
             .get_value(1)
             .ok()
-            .and_then(|v| v.as_text().cloned())
+            .and_then(|cell| cell.as_text().cloned())
             .unwrap_or_default();
         let wing = row
             .get_value(2)
             .ok()
-            .and_then(|v| v.as_text().cloned())
+            .and_then(|cell| cell.as_text().cloned())
             .unwrap_or_default();
         let room = row
             .get_value(3)
             .ok()
-            .and_then(|v| v.as_text().cloned())
+            .and_then(|cell| cell.as_text().cloned())
             .unwrap_or_default();
         let source = row
             .get_value(4)
             .ok()
-            .and_then(|v| v.as_text().cloned())
+            .and_then(|cell| cell.as_text().cloned())
             .unwrap_or_default();
         let raw_relevance = row
             .get_value(5)
             .ok()
-            .and_then(|v| v.as_integer().copied())
+            .and_then(|cell| cell.as_integer().copied())
             .unwrap_or(0);
         let relevance = f64::from(i32::try_from(raw_relevance).unwrap_or(i32::MAX));
         let created_at = row
             .get_value(6)
             .ok()
-            .and_then(|v| v.as_text().cloned())
+            .and_then(|cell| cell.as_text().cloned())
             .unwrap_or_default();
 
         let source_name = Path::new(&source)
@@ -154,10 +154,10 @@ fn search_memories_parse_rows(rows: &[turso::Row]) -> Vec<SearchResult> {
 /// and would fan out to enormous result sets, hurting relevance.
 fn tokenize_query(query: &str) -> Vec<String> {
     query
-        .split(|c: char| !c.is_alphanumeric() && c != '_')
-        .filter(|w| w.len() >= 3)
+        .split(|character: char| !character.is_alphanumeric() && character != '_')
+        .filter(|token| token.len() >= 3)
         .map(str::to_lowercase)
-        .filter(|w| !crate::palace::drawer::is_stop_word(w))
+        .filter(|token| !crate::palace::drawer::is_stop_word(token))
         .collect()
 }
 

@@ -125,7 +125,7 @@ fn file_mtime(path: &str) -> Option<f64> {
         .ok()?
         .duration_since(std::time::SystemTime::UNIX_EPOCH)
         .ok()
-        .map(|d| d.as_secs_f64())
+        .map(|duration| duration.as_secs_f64())
 }
 
 /// Check whether a file has already been mined *and is unchanged* since it was
@@ -238,7 +238,7 @@ mod async_tests {
     #[tokio::test]
     async fn add_drawer_inserts_row() {
         let (_db, connection) = crate::test_helpers::test_db().await;
-        let p = DrawerParams {
+        let params = DrawerParams {
             id: "d1",
             wing: "test_wing",
             room: "general",
@@ -249,7 +249,7 @@ mod async_tests {
             ingest_mode: "projects",
             source_mtime: None,
         };
-        let inserted = add_drawer(&connection, &p)
+        let inserted = add_drawer(&connection, &params)
             .await
             .expect("add_drawer should succeed for valid new drawer");
         assert!(inserted);
@@ -267,7 +267,7 @@ mod async_tests {
     #[tokio::test]
     async fn add_drawer_duplicate_returns_false() {
         let (_db, connection) = crate::test_helpers::test_db().await;
-        let p = DrawerParams {
+        let params = DrawerParams {
             id: "dup1",
             wing: "w",
             room: "r",
@@ -278,11 +278,11 @@ mod async_tests {
             ingest_mode: "projects",
             source_mtime: None,
         };
-        let first = add_drawer(&connection, &p)
+        let first = add_drawer(&connection, &params)
             .await
             .expect("first add_drawer should succeed for new drawer");
         assert!(first);
-        let second = add_drawer(&connection, &p)
+        let second = add_drawer(&connection, &params)
             .await
             .expect("second add_drawer on same id should not error (INSERT OR IGNORE)");
         assert!(!second);
@@ -291,7 +291,7 @@ mod async_tests {
     #[tokio::test]
     async fn add_drawer_stores_mtime() {
         let (_db, connection) = crate::test_helpers::test_db().await;
-        let p = DrawerParams {
+        let params = DrawerParams {
             id: "mt1",
             wing: "w",
             room: "r",
@@ -302,7 +302,7 @@ mod async_tests {
             ingest_mode: "projects",
             source_mtime: Some(1_700_000_000.5),
         };
-        add_drawer(&connection, &p)
+        add_drawer(&connection, &params)
             .await
             .expect("add_drawer should succeed for valid new drawer with mtime");
 
@@ -384,9 +384,9 @@ mod async_tests {
     #[tokio::test]
     async fn file_already_mined_matching_mtime_returns_true() {
         let (_db, connection) = crate::test_helpers::test_db().await;
-        let tmp = tempfile::NamedTempFile::new()
+        let temp_file = tempfile::NamedTempFile::new()
             .expect("tempfile::NamedTempFile::new should succeed in test environment");
-        let path = tmp.path().to_string_lossy().to_string();
+        let path = temp_file.path().to_string_lossy().to_string();
         let mtime =
             file_mtime(&path).expect("file_mtime should succeed for existing temp file on disk");
 
@@ -411,9 +411,9 @@ mod async_tests {
     #[tokio::test]
     async fn file_already_mined_stale_mtime_returns_false() {
         let (_db, connection) = crate::test_helpers::test_db().await;
-        let tmp = tempfile::NamedTempFile::new()
+        let temp_file = tempfile::NamedTempFile::new()
             .expect("tempfile::NamedTempFile::new should succeed in test environment");
-        let path = tmp.path().to_string_lossy().to_string();
+        let path = temp_file.path().to_string_lossy().to_string();
         // Store an obviously wrong mtime.
         let stale_mtime: f64 = 0.0;
 
@@ -439,9 +439,9 @@ mod async_tests {
     #[tokio::test]
     async fn file_already_mined_disagreeing_mtimes_returns_false() {
         let (_db, connection) = crate::test_helpers::test_db().await;
-        let tmp = tempfile::NamedTempFile::new()
+        let temp_file = tempfile::NamedTempFile::new()
             .expect("tempfile::NamedTempFile::new should succeed in test environment");
-        let path = tmp.path().to_string_lossy().to_string();
+        let path = temp_file.path().to_string_lossy().to_string();
 
         connection
             .execute(

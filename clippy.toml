@@ -2,4 +2,18 @@
 too-many-lines-threshold = 70
 
 # TigerStyle: do not abbreviate variable names.
-disallowed-names = ["conn", "cfg", "dir", "ext", "vf", "vt", "sc", "sf"]
+disallowed-names = [
+  "conn",
+  "cfg",
+  "dir",
+  "ext",
+  "vf",
+  "vt",
+  "sc",
+  "sf",
+  "s",
+  "v",
+  "r",
+  "d",
+  "q",
+]

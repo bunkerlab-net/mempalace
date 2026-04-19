@@ -84,7 +84,7 @@ fn extract_key_sentence(text: &str) -> String {
     let sentences: Vec<&str> = SENTENCE_SPLIT_RE
         .split(text)
         .map(str::trim)
-        .filter(|s| s.len() > 10)
+        .filter(|sentence| sentence.len() > 10)
         .collect();
 
     if sentences.is_empty() {
@@ -114,24 +114,24 @@ fn extract_key_sentence(text: &str) -> String {
 
     let mut scored: Vec<(i32, &str)> = sentences
         .into_iter()
-        .map(|s| {
-            let s_lower = s.to_lowercase();
+        .map(|sentence| {
+            let sentence_lower = sentence.to_lowercase();
             let mut score: i32 = 0;
             for w in &decision_words {
-                if s_lower.contains(w) {
+                if sentence_lower.contains(w) {
                     score += 2;
                 }
             }
-            if s.len() < 80 {
+            if sentence.len() < 80 {
                 score += 1;
             }
-            if s.len() < 40 {
+            if sentence.len() < 40 {
                 score += 1;
             }
-            if s.len() > 150 {
+            if sentence.len() > 150 {
                 score -= 2;
             }
-            (score, s)
+            (score, sentence)
         })
         .collect();
 
@@ -245,7 +245,7 @@ impl Dialect {
             } else {
                 Path::new(meta.source_file)
                     .file_stem()
-                    .and_then(|s| s.to_str())
+                    .and_then(|stem| stem.to_str())
                     .unwrap_or("?")
             };
             let header = format!(

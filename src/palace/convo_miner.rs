@@ -150,20 +150,20 @@ fn chunk_exchanges(content: &str) -> Vec<Chunk> {
 
 /// Return the largest byte index ≤ `index` that is a UTF‑8 char boundary in `s`.
 ///
-/// Slicing `s` by a raw byte offset is unsafe when the string contains multi‑byte
+/// Slicing `text` by a raw byte offset is unsafe when the string contains multi‑byte
 /// characters (emoji, accented letters, CJK) because the offset may land mid‑
 /// codepoint, causing a panic.  This function walks backwards from `index` until
-/// it finds a valid boundary, guaranteeing `&s[..result]` never panics.
-fn chunk_by_exchange_floor_char_boundary(s: &str, index: usize) -> usize {
-    if index >= s.len() {
-        return s.len();
+/// it finds a valid boundary, guaranteeing `&text[..result]` never panics.
+fn chunk_by_exchange_floor_char_boundary(text: &str, index: usize) -> usize {
+    if index >= text.len() {
+        return text.len();
     }
     let mut i = index;
-    while !s.is_char_boundary(i) {
+    while !text.is_char_boundary(i) {
         i -= 1;
     }
-    // Postcondition: i is a valid char boundary within s.
-    debug_assert!(s.is_char_boundary(i));
+    // Postcondition: i is a valid char boundary within text.
+    debug_assert!(text.is_char_boundary(i));
     debug_assert!(i <= index);
     i
 }
@@ -575,9 +575,13 @@ pub async fn mine_convos(
         // duplicates on reruns and producing stale duplicate chunks.
         let Some(source_mtime) = std::fs::metadata(filepath)
             .ok()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs_f64())
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|system_time| {
+                system_time
+                    .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                    .ok()
+            })
+            .map(|duration| duration.as_secs_f64())
         else {
             files_unreadable += 1;
             continue;

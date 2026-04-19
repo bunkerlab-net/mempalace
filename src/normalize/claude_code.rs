@@ -114,32 +114,32 @@ pub fn strip_noise(text: &str) -> String {
     let mut result: Cow<str> = Cow::Borrowed(text);
     for re in NOISE_TAG_RES.iter() {
         let replaced = re.replace_all(result.as_ref(), "");
-        if let Cow::Owned(s) = replaced {
-            result = Cow::Owned(s);
+        if let Cow::Owned(owned) = replaced {
+            result = Cow::Owned(owned);
         }
     }
     for re in NOISE_LINE_RES.iter() {
         let replaced = re.replace_all(result.as_ref(), "");
-        if let Cow::Owned(s) = replaced {
-            result = Cow::Owned(s);
+        if let Cow::Owned(owned) = replaced {
+            result = Cow::Owned(owned);
         }
     }
     let replaced = HOOK_LINE_RE.replace_all(result.as_ref(), "");
-    if let Cow::Owned(s) = replaced {
-        result = Cow::Owned(s);
+    if let Cow::Owned(owned) = replaced {
+        result = Cow::Owned(owned);
     }
     let replaced = COLLAPSED_LINES_RE.replace_all(result.as_ref(), "");
-    if let Cow::Owned(s) = replaced {
-        result = Cow::Owned(s);
+    if let Cow::Owned(owned) = replaced {
+        result = Cow::Owned(owned);
     }
     let replaced = TOKEN_MARKER_RE.replace_all(result.as_ref(), "");
-    if let Cow::Owned(s) = replaced {
-        result = Cow::Owned(s);
+    if let Cow::Owned(owned) = replaced {
+        result = Cow::Owned(owned);
     }
     // Collapse runs of 4+ blank lines down to 3 (a visual paragraph break).
     let replaced = EXCESS_BLANK_RE.replace_all(result.as_ref(), "\n\n\n");
-    if let Cow::Owned(s) = replaced {
-        result = Cow::Owned(s);
+    if let Cow::Owned(owned) = replaced {
+        result = Cow::Owned(owned);
     }
 
     // Postcondition: result is trimmed (no leading/trailing whitespace).
@@ -161,16 +161,16 @@ pub fn try_parse(content: &str) -> Option<String> {
             continue;
         }
         let entry: serde_json::Value = serde_json::from_str(line).ok()?;
-        let obj = entry.as_object()?;
+        let entry_object = entry.as_object()?;
 
-        let msg_type = obj.get("type")?.as_str()?;
-        let message = obj.get("message")?.as_object()?;
-        let raw = extract_content(message.get("content")?);
-        if raw.is_empty() {
+        let msg_type = entry_object.get("type")?.as_str()?;
+        let message = entry_object.get("message")?.as_object()?;
+        let raw_content = extract_content(message.get("content")?);
+        if raw_content.is_empty() {
             continue;
         }
         // Strip system-injected noise per message, never across boundaries.
-        let text = strip_noise(&raw);
+        let text = strip_noise(&raw_content);
         if text.is_empty() {
             continue;
         }
@@ -185,7 +185,7 @@ pub fn try_parse(content: &str) -> Option<String> {
     if messages.len() >= 2 {
         let refs: Vec<(&str, &str)> = messages
             .iter()
-            .map(|(r, t)| (r.as_str(), t.as_str()))
+            .map(|(role, text)| (role.as_str(), text.as_str()))
             .collect();
         Some(messages_to_transcript(&refs))
     } else {
@@ -195,12 +195,12 @@ pub fn try_parse(content: &str) -> Option<String> {
 
 fn extract_content(value: &serde_json::Value) -> String {
     match value {
-        serde_json::Value::String(s) => s.trim().to_string(),
+        serde_json::Value::String(text) => text.trim().to_string(),
         serde_json::Value::Array(arr) => arr
             .iter()
             .filter_map(|item| {
-                if let Some(s) = item.as_str() {
-                    Some(s.to_string())
+                if let Some(text) = item.as_str() {
+                    Some(text.to_string())
                 } else if let Some(obj) = item.as_object() {
                     if obj.get("type").and_then(|t| t.as_str()) == Some("text") {
                         obj.get("text")

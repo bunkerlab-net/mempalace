@@ -64,7 +64,7 @@ pub fn sanitize_query(raw: &str) -> SanitizedQuery {
     let segments: Vec<&str> = raw
         .lines()
         .map(str::trim)
-        .filter(|s| !s.is_empty())
+        .filter(|segment| !segment.is_empty())
         .collect();
 
     // Step 2/3: treat the trailing segment as the primary intent carrier.
@@ -97,10 +97,10 @@ pub fn sanitize_query(raw: &str) -> SanitizedQuery {
     sanitized(candidate, original_length, "tail_truncation")
 }
 
-fn passthrough(s: String, len: usize) -> SanitizedQuery {
+fn passthrough(clean_query: String, len: usize) -> SanitizedQuery {
     SanitizedQuery {
         clean_length: len,
-        clean_query: s,
+        clean_query,
         was_sanitized: false,
         original_length: len,
         method: "passthrough",
@@ -118,17 +118,17 @@ fn sanitized(clean_query: String, original_length: usize, method: &'static str) 
     }
 }
 
-/// Return the last [`MAX_QUERY_LEN`] chars of `s`.
-fn tail_guard(s: &str) -> String {
-    assert!(!s.is_empty(), "tail_guard: input must not be empty");
+/// Return the last [`MAX_QUERY_LEN`] chars of `text`.
+fn tail_guard(text: &str) -> String {
+    assert!(!text.is_empty(), "tail_guard: input must not be empty");
 
-    let total = s.chars().count();
+    let total = text.chars().count();
     if total <= MAX_QUERY_LEN {
-        return s.to_owned();
+        return text.to_owned();
     }
     let skip = total - MAX_QUERY_LEN;
-    let byte_start = s.char_indices().nth(skip).map_or(0, |(i, _)| i);
-    let result = s[byte_start..].to_owned();
+    let byte_start = text.char_indices().nth(skip).map_or(0, |(i, _)| i);
+    let result = text[byte_start..].to_owned();
 
     // Postcondition: output is bounded by MAX_QUERY_LEN.
     debug_assert!(result.chars().count() <= MAX_QUERY_LEN);
@@ -142,17 +142,17 @@ mod tests {
 
     #[test]
     fn passthrough_short() {
-        let r = sanitize_query("what is the capital of France?");
-        assert!(!r.was_sanitized);
-        assert_eq!(r.method, "passthrough");
-        assert_eq!(r.clean_query, "what is the capital of France?");
+        let result = sanitize_query("what is the capital of France?");
+        assert!(!result.was_sanitized);
+        assert_eq!(result.method, "passthrough");
+        assert_eq!(result.clean_query, "what is the capital of France?");
     }
 
     #[test]
     fn passthrough_empty() {
-        let r = sanitize_query("   ");
-        assert!(!r.was_sanitized);
-        assert_eq!(r.clean_query, "");
+        let result = sanitize_query("   ");
+        assert!(!result.was_sanitized);
+        assert_eq!(result.clean_query, "");
     }
 
     #[test]
@@ -161,11 +161,11 @@ mod tests {
             "{}\nwhat did we decide about the database schema?",
             "x".repeat(300)
         );
-        let r = sanitize_query(&prompt);
-        assert!(r.was_sanitized);
-        assert_eq!(r.method, "question_extraction");
+        let result = sanitize_query(&prompt);
+        assert!(result.was_sanitized);
+        assert_eq!(result.method, "question_extraction");
         assert_eq!(
-            r.clean_query,
+            result.clean_query,
             "what did we decide about the database schema?"
         );
     }
@@ -173,46 +173,46 @@ mod tests {
     #[test]
     fn question_extraction_short_question_segment() {
         let prompt = format!("{}\nETA?", "x".repeat(300));
-        let r = sanitize_query(&prompt);
-        assert!(r.was_sanitized);
-        assert_eq!(r.method, "question_extraction");
-        assert_eq!(r.clean_query, "ETA?");
+        let result = sanitize_query(&prompt);
+        assert!(result.was_sanitized);
+        assert_eq!(result.method, "question_extraction");
+        assert_eq!(result.clean_query, "ETA?");
     }
 
     #[test]
     fn tail_sentence() {
         let prompt = format!("{}\nchromadb locking bug", "x".repeat(300));
-        let r = sanitize_query(&prompt);
-        assert!(r.was_sanitized);
-        assert_eq!(r.method, "tail_sentence");
-        assert_eq!(r.clean_query, "chromadb locking bug");
+        let result = sanitize_query(&prompt);
+        assert!(result.was_sanitized);
+        assert_eq!(result.method, "tail_sentence");
+        assert_eq!(result.clean_query, "chromadb locking bug");
     }
 
     #[test]
     fn tail_truncation() {
         // All newline-segments are tiny (only 2 chars each), forcing fallback to tail_truncation.
         let prompt = "ab\n".repeat(100); // 300 chars; each segment "ab" is only 2 chars
-        let r = sanitize_query(&prompt);
-        assert!(r.was_sanitized);
-        assert_eq!(r.method, "tail_truncation");
+        let result = sanitize_query(&prompt);
+        assert!(result.was_sanitized);
+        assert_eq!(result.method, "tail_truncation");
     }
 
     #[test]
     fn tail_sentence_long_line() {
         // Single long line with no newlines → tail_sentence via the last (only) segment.
         let prompt = "a".repeat(600);
-        let r = sanitize_query(&prompt);
-        assert!(r.was_sanitized);
-        assert_eq!(r.method, "tail_sentence");
-        assert_eq!(r.clean_length, MAX_QUERY_LEN);
+        let result = sanitize_query(&prompt);
+        assert!(result.was_sanitized);
+        assert_eq!(result.method, "tail_sentence");
+        assert_eq!(result.clean_length, MAX_QUERY_LEN);
     }
 
     #[test]
     fn utf8_boundary_safe() {
         // Force truncation with multi-byte chars to validate UTF-8-safe slicing.
         let prompt = "é".repeat(550);
-        let r = sanitize_query(&prompt);
-        assert_eq!(r.clean_length, MAX_QUERY_LEN);
-        assert!(std::str::from_utf8(r.clean_query.as_bytes()).is_ok());
+        let result = sanitize_query(&prompt);
+        assert_eq!(result.clean_length, MAX_QUERY_LEN);
+        assert!(std::str::from_utf8(result.clean_query.as_bytes()).is_ok());
     }
 }

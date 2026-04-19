@@ -173,12 +173,19 @@ pub fn detect_rooms_from_folders(project_dir: &Path) -> Vec<RoomConfig> {
 
     rooms.sort_by(|a, b| a.name.cmp(&b.name));
 
-    if !rooms.iter().any(|r| r.name == "general") {
+    if !rooms
+        .iter()
+        .any(|room_config| room_config.name == "general")
+    {
         rooms.push(general_room());
     }
 
     // Postcondition: result always contains a "general" room.
-    debug_assert!(rooms.iter().any(|r| r.name == "general"));
+    debug_assert!(
+        rooms
+            .iter()
+            .any(|room_config| room_config.name == "general")
+    );
 
     rooms
 }
@@ -214,8 +221,8 @@ pub fn detect_room(
     let path_parts: Vec<&str> = relative.split(['/', '\\']).collect();
     for part in &path_parts[..path_parts.len().saturating_sub(1)] {
         for room in rooms {
-            let rn = room.name.to_lowercase();
-            if rn.contains(part) || part.contains(&rn) {
+            let room_name_lower = room.name.to_lowercase();
+            if room_name_lower.contains(part) || part.contains(&room_name_lower) {
                 return room.name.clone();
             }
         }
@@ -223,8 +230,8 @@ pub fn detect_room(
 
     // Priority 2: filename matches room name
     for room in rooms {
-        let rn = room.name.to_lowercase();
-        if rn.contains(&filename) || filename.contains(&rn) {
+        let room_name_lower = room.name.to_lowercase();
+        if room_name_lower.contains(&filename) || filename.contains(&room_name_lower) {
             return room.name.clone();
         }
     }

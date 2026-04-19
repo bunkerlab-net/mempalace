@@ -91,7 +91,7 @@ pub fn try_parse(data: &serde_json::Value) -> Option<String> {
     if messages.len() >= 2 {
         let refs: Vec<(&str, &str)> = messages
             .iter()
-            .map(|(r, t)| (r.as_str(), t.as_str()))
+            .map(|(role, text)| (role.as_str(), text.as_str()))
             .collect();
         Some(messages_to_transcript(&refs) + PROVENANCE_FOOTER)
     } else {

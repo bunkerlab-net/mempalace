@@ -70,7 +70,9 @@ pub async fn dispatch(connection: &Connection, name: &str, args: &Value) -> Valu
 }
 
 fn str_arg<'a>(args: &'a Value, key: &str) -> &'a str {
-    args.get(key).and_then(|v| v.as_str()).unwrap_or("")
+    args.get(key)
+        .and_then(|arg_val| arg_val.as_str())
+        .unwrap_or("")
 }
 
 /// Extract a positive integer argument, coercing floats and strings.
@@ -80,11 +82,12 @@ fn str_arg<'a>(args: &'a Value, key: &str) -> &'a str {
 /// of what the client sends. Only accepts finite, whole, positive integers (>0).
 fn int_arg(args: &Value, key: &str, default: i64) -> i64 {
     args.get(key)
-        .and_then(|v| {
-            v.as_i64()
+        .and_then(|arg_val| {
+            arg_val
+                .as_i64()
                 .filter(|&n| n > 0)
                 .or_else(|| {
-                    v.as_f64().and_then(|f| {
+                    arg_val.as_f64().and_then(|f| {
                         if f.is_finite() && f > 0.0 && f <= MAX_EXACT_INT_F64 && f.fract() == 0.0 {
                             // Safe: MAX_EXACT_INT_F64 (2^53-1) < i64::MAX, so the value fits exactly
                             #[allow(clippy::cast_possible_truncation)]
@@ -95,9 +98,9 @@ fn int_arg(args: &Value, key: &str, default: i64) -> i64 {
                     })
                 })
                 .or_else(|| {
-                    v.as_str().and_then(|s| {
-                        s.parse::<i64>().ok().filter(|&n| n > 0).or_else(|| {
-                            s.parse::<f64>().ok().and_then(|f| {
+                    arg_val.as_str().and_then(|str_val| {
+                        str_val.parse::<i64>().ok().filter(|&n| n > 0).or_else(|| {
+                            str_val.parse::<f64>().ok().and_then(|f| {
                                 if f.is_finite()
                                     && f > 0.0
                                     && f <= MAX_EXACT_INT_F64
@@ -125,28 +128,36 @@ fn int_arg(args: &Value, key: &str, default: i64) -> i64 {
 /// empty, too long, contains path-traversal sequences, null bytes, an invalid
 /// first character, or characters outside `[a-zA-Z0-9_ .'-]`.
 fn sanitize_name(value: &str, field_name: &str) -> Result<String, Value> {
-    let v = value.trim();
-    if v.is_empty() {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
         return Err(
             json!({"success": false, "error": format!("{field_name} must be a non-empty string"), "public": true}),
         );
     }
-    if v.len() > 128 {
+    if trimmed.len() > 128 {
         return Err(
             json!({"success": false, "error": format!("{field_name} exceeds maximum length of 128 characters"), "public": true}),
         );
     }
-    if v.contains("..") || v.contains('/') || v.contains('\\') || v.contains('\x00') {
+    if trimmed.contains("..")
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains('\x00')
+    {
         return Err(
             json!({"success": false, "error": format!("{field_name} contains invalid characters"), "public": true}),
         );
     }
-    if !v.chars().next().is_some_and(|c| c.is_ascii_alphanumeric()) {
+    if !trimmed
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric())
+    {
         return Err(
             json!({"success": false, "error": format!("{field_name} must start with an alphanumeric character"), "public": true}),
         );
     }
-    if !v
+    if !trimmed
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | ' ' | '.' | '\'' | '-'))
     {
@@ -154,7 +165,7 @@ fn sanitize_name(value: &str, field_name: &str) -> Result<String, Value> {
             json!({"success": false, "error": format!("{field_name} contains invalid characters"), "public": true}),
         );
     }
-    let result = v.to_string();
+    let result = trimmed.to_string();
 
     // Postconditions: result is non-empty, trimmed, and has no path-traversal chars.
     debug_assert!(!result.is_empty());
@@ -354,7 +365,7 @@ async fn wal_log(operation: &str, params: Value) {
                     eprintln!("WAL write failed: {e}");
                 }
             }
-            Err(e) => eprintln!("WAL write failed: {e}"),
+            Err(error) => eprintln!("WAL write failed: {error}"),
         }
     })
     .await;
@@ -369,8 +380,8 @@ async fn tool_status(connection: &Connection) -> Value {
     .await;
 
     let rows = match rows {
-        Ok(r) => r,
-        Err(e) => return json!({"error": e.to_string()}),
+        Ok(rows) => rows,
+        Err(error) => return json!({"error": error.to_string()}),
     };
 
     let mut wings: HashMap<String, i64> = HashMap::new();
@@ -413,14 +424,14 @@ async fn tool_list_wings(connection: &Connection) -> Value {
             }
             json!({"wings": wings})
         }
-        Err(e) => json!({"error": e.to_string()}),
+        Err(error) => json!({"error": error.to_string()}),
     }
 }
 
 async fn tool_list_rooms(connection: &Connection, args: &Value) -> Value {
     let wing = match sanitize_opt_name(str_arg(args, "wing"), "wing") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
 
     let rows = if let Some(ref w) = wing {
@@ -449,7 +460,7 @@ async fn tool_list_rooms(connection: &Connection, args: &Value) -> Value {
             }
             json!({"wing": wing.as_deref().unwrap_or("all"), "rooms": rooms})
         }
-        Err(e) => json!({"error": e.to_string()}),
+        Err(error) => json!({"error": error.to_string()}),
     }
 }
 
@@ -472,7 +483,7 @@ async fn tool_get_taxonomy(connection: &Connection) -> Value {
             }
             json!({"taxonomy": taxonomy})
         }
-        Err(e) => json!({"error": e.to_string()}),
+        Err(error) => json!({"error": error.to_string()}),
     }
 }
 
@@ -484,12 +495,12 @@ async fn tool_search(connection: &Connection, args: &Value) -> Value {
     let limit = usize::try_from(int_arg(args, "limit", 5).clamp(1, 100)).unwrap_or(5);
     let context_received = !str_arg(args, "context").trim().is_empty();
     let wing = match sanitize_opt_name(str_arg(args, "wing"), "wing") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
     let room = match sanitize_opt_name(str_arg(args, "room"), "room") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
 
     // Mitigate system prompt contamination before the search (mempalace-py issue #333).
@@ -507,22 +518,22 @@ async fn tool_search(connection: &Connection, args: &Value) -> Value {
         Ok(results) => {
             let items: Vec<Value> = results
                 .iter()
-                .map(|r| {
+                .map(|result| {
                     json!({
-                        "wing": r.wing,
-                        "room": r.room,
-                        "content": r.text,
-                        "source_file": r.source_file,
-                        "created_at": r.created_at,
-                        "similarity": r.relevance,
+                        "wing": result.wing,
+                        "room": result.room,
+                        "content": result.text,
+                        "source_file": result.source_file,
+                        "created_at": result.created_at,
+                        "similarity": result.relevance,
                     })
                 })
                 .collect();
             let count = items.len();
-            let mut out = json!({"results": items, "count": count});
+            let mut output = json!({"results": items, "count": count});
             if sanitized.was_sanitized {
-                out["query_sanitized"] = json!(true);
-                out["sanitizer"] = json!({
+                output["query_sanitized"] = json!(true);
+                output["sanitizer"] = json!({
                     "method": sanitized.method,
                     "original_length": sanitized.original_length,
                     "clean_length": sanitized.clean_length,
@@ -530,11 +541,11 @@ async fn tool_search(connection: &Connection, args: &Value) -> Value {
                 });
             }
             if context_received {
-                out["context_received"] = json!(true);
+                output["context_received"] = json!(true);
             }
-            out
+            output
         }
-        Err(e) => json!({"error": e.to_string()}),
+        Err(error) => json!({"error": error.to_string()}),
     }
 }
 
@@ -545,16 +556,16 @@ async fn tool_check_duplicate(connection: &Connection, args: &Value) -> Value {
         Ok(results) => {
             let matches: Vec<Value> = results
                 .iter()
-                .filter(|r| r.relevance > 3.0) // high word overlap
-                .map(|r| {
-                    let preview = if r.text.chars().count() > 200 {
-                        format!("{}...", r.text.chars().take(200).collect::<String>())
+                .filter(|result| result.relevance > 3.0) // high word overlap
+                .map(|result| {
+                    let preview = if result.text.chars().count() > 200 {
+                        format!("{}...", result.text.chars().take(200).collect::<String>())
                     } else {
-                        r.text.clone()
+                        result.text.clone()
                     };
                     json!({
-                        "wing": r.wing,
-                        "room": r.room,
+                        "wing": result.wing,
+                        "room": result.room,
                         "content": preview,
                     })
                 })
@@ -564,7 +575,7 @@ async fn tool_check_duplicate(connection: &Connection, args: &Value) -> Value {
                 "matches": matches,
             })
         }
-        Err(e) => json!({"error": e.to_string()}),
+        Err(error) => json!({"error": error.to_string()}),
     }
 }
 
@@ -574,30 +585,34 @@ async fn tool_add_drawer(connection: &Connection, args: &Value) -> Value {
     let content = str_arg(args, "content");
     let source_file = str_arg(args, "source_file");
     let added_by = {
-        let a = str_arg(args, "added_by");
-        if a.is_empty() { "mcp" } else { a }
+        let added_by_raw = str_arg(args, "added_by");
+        if added_by_raw.is_empty() {
+            "mcp"
+        } else {
+            added_by_raw
+        }
     };
 
     let wing = match sanitize_name(wing, "wing") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
     let room = match sanitize_name(room, "room") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
     let content = match sanitize_content(content) {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
 
     // Deterministic ID: sha256(wing+room+content) so the same content in
     // the same wing/room always produces the same ID, making the call idempotent.
     let hash = sha2::Sha256::digest(format!("{wing}\u{1f}{room}\u{1f}{content}").as_bytes());
-    let hex: String = hash.iter().fold(String::new(), |mut s, b| {
+    let hex: String = hash.iter().fold(String::new(), |mut hex_string, byte| {
         use std::fmt::Write as _;
-        let _ = write!(s, "{b:02x}");
-        s
+        let _ = write!(hex_string, "{byte:02x}");
+        hex_string
     });
     let id = format!("drawer_{wing}_{room}_{}", &hex[..24]);
     // Postcondition: deterministic ID follows naming convention.
@@ -661,14 +676,14 @@ async fn tool_add_drawer_insert(
             "wing": wing,
             "room": room,
         }),
-        Err(e) => json!({"success": false, "error": e.to_string()}),
+        Err(error) => json!({"success": false, "error": error.to_string()}),
     }
 }
 
 async fn tool_delete_drawer(connection: &Connection, args: &Value) -> Value {
     let drawer_id = match sanitize_name(str_arg(args, "drawer_id"), "drawer_id") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
     if !drawer_id.starts_with("drawer_") {
         return json!({"success": false, "error": "drawer_id has invalid format", "public": true});
@@ -690,15 +705,15 @@ async fn tool_delete_drawer(connection: &Connection, args: &Value) -> Value {
                 .await;
             json!({"success": true, "drawer_id": drawer_id})
         }
-        Err(e) => json!({"success": false, "error": e.to_string()}),
+        Err(error) => json!({"success": false, "error": error.to_string()}),
     }
 }
 
 /// Fetch a single drawer by ID, returning its full content and metadata.
 async fn tool_get_drawer(connection: &Connection, args: &Value) -> Value {
     let drawer_id = match sanitize_name(str_arg(args, "drawer_id"), "drawer_id") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
     if !drawer_id.starts_with("drawer_") {
         return json!({"error": "drawer_id has invalid format", "public": true});
@@ -731,7 +746,7 @@ async fn tool_get_drawer(connection: &Connection, args: &Value) -> Value {
                 "filed_at": filed_at,
             })
         }
-        Err(e) => json!({"error": e.to_string()}),
+        Err(error) => json!({"error": error.to_string()}),
     }
 }
 
@@ -741,12 +756,12 @@ async fn tool_list_drawers(connection: &Connection, args: &Value) -> Value {
     let limit = int_arg(args, "limit", 20).clamp(1, MAX_LIMIT);
     let offset = int_arg(args, "offset", 0).max(0);
     let wing = match sanitize_opt_name(str_arg(args, "wing"), "wing") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
     let room = match sanitize_opt_name(str_arg(args, "room"), "room") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
 
     match tool_list_drawers_query(connection, wing.as_ref(), room.as_ref(), limit, offset).await {
@@ -779,7 +794,7 @@ async fn tool_list_drawers(connection: &Connection, args: &Value) -> Value {
                 "limit": limit,
             })
         }
-        Err(e) => json!({"error": e.to_string()}),
+        Err(error) => json!({"error": error.to_string()}),
     }
 }
 
@@ -796,14 +811,14 @@ async fn tool_list_drawers_query(
     offset: i64,
 ) -> crate::error::Result<Vec<turso::Row>> {
     match (wing, room) {
-        (Some(w), Some(r)) => {
-            query_all(connection, "SELECT id, content, wing, room FROM drawers WHERE wing = ?1 AND room = ?2 AND (ingest_mode IS NULL OR ingest_mode != 'diary') ORDER BY filed_at DESC, id DESC LIMIT ?3 OFFSET ?4", (w.as_str(), r.as_str(), limit, offset)).await
+        (Some(wing_value), Some(room_value)) => {
+            query_all(connection, "SELECT id, content, wing, room FROM drawers WHERE wing = ?1 AND room = ?2 AND (ingest_mode IS NULL OR ingest_mode != 'diary') ORDER BY filed_at DESC, id DESC LIMIT ?3 OFFSET ?4", (wing_value.as_str(), room_value.as_str(), limit, offset)).await
         }
-        (Some(w), None) => {
-            query_all(connection, "SELECT id, content, wing, room FROM drawers WHERE wing = ?1 AND (ingest_mode IS NULL OR ingest_mode != 'diary') ORDER BY filed_at DESC, id DESC LIMIT ?2 OFFSET ?3", (w.as_str(), limit, offset)).await
+        (Some(wing_value), None) => {
+            query_all(connection, "SELECT id, content, wing, room FROM drawers WHERE wing = ?1 AND (ingest_mode IS NULL OR ingest_mode != 'diary') ORDER BY filed_at DESC, id DESC LIMIT ?2 OFFSET ?3", (wing_value.as_str(), limit, offset)).await
         }
-        (None, Some(r)) => {
-            query_all(connection, "SELECT id, content, wing, room FROM drawers WHERE room = ?1 AND (ingest_mode IS NULL OR ingest_mode != 'diary') ORDER BY filed_at DESC, id DESC LIMIT ?2 OFFSET ?3", (r.as_str(), limit, offset)).await
+        (None, Some(room_value)) => {
+            query_all(connection, "SELECT id, content, wing, room FROM drawers WHERE room = ?1 AND (ingest_mode IS NULL OR ingest_mode != 'diary') ORDER BY filed_at DESC, id DESC LIMIT ?2 OFFSET ?3", (room_value.as_str(), limit, offset)).await
         }
         (None, None) => {
             query_all(connection, "SELECT id, content, wing, room FROM drawers WHERE (ingest_mode IS NULL OR ingest_mode != 'diary') ORDER BY filed_at DESC, id DESC LIMIT ?1 OFFSET ?2", (limit, offset)).await
@@ -822,8 +837,8 @@ async fn tool_list_drawers_query(
 #[allow(clippy::too_many_lines)]
 async fn tool_update_drawer(connection: &Connection, args: &Value) -> Value {
     let drawer_id = match sanitize_name(str_arg(args, "drawer_id"), "drawer_id") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
     // Diary entries use UUID IDs; they must not be mutated via this handler.
     if !drawer_id.starts_with("drawer_") {
@@ -831,23 +846,23 @@ async fn tool_update_drawer(connection: &Connection, args: &Value) -> Value {
     }
 
     let new_content = {
-        let s = str_arg(args, "content");
-        if s.is_empty() {
+        let content_raw = str_arg(args, "content");
+        if content_raw.is_empty() {
             None
         } else {
-            match sanitize_content(s) {
-                Ok(v) => Some(v),
-                Err(e) => return e,
+            match sanitize_content(content_raw) {
+                Ok(value) => Some(value),
+                Err(error) => return error,
             }
         }
     };
     let new_wing = match sanitize_opt_name(str_arg(args, "wing"), "wing") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
     let new_room = match sanitize_opt_name(str_arg(args, "room"), "room") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
 
     // No-op: nothing to change
@@ -864,8 +879,8 @@ async fn tool_update_drawer(connection: &Connection, args: &Value) -> Value {
     .await;
 
     let rows = match rows {
-        Ok(r) => r,
-        Err(e) => return json!({"success": false, "error": e.to_string()}),
+        Ok(rows) => rows,
+        Err(error) => return json!({"success": false, "error": error.to_string()}),
     };
 
     if rows.is_empty() {
@@ -885,10 +900,10 @@ async fn tool_update_drawer(connection: &Connection, args: &Value) -> Value {
     let hash = sha2::Sha256::digest(
         format!("{final_wing}\u{1f}{final_room}\u{1f}{final_content}").as_bytes(),
     );
-    let hex: String = hash.iter().fold(String::new(), |mut s, b| {
+    let hex: String = hash.iter().fold(String::new(), |mut hex_string, byte| {
         use std::fmt::Write as _;
-        let _ = write!(s, "{b:02x}");
-        s
+        let _ = write!(hex_string, "{byte:02x}");
+        hex_string
     });
     let new_id = format!("drawer_{final_wing}_{final_room}_{}", &hex[..24]);
 
@@ -924,7 +939,7 @@ async fn tool_update_drawer(connection: &Connection, args: &Value) -> Value {
                     "public": true,
                 });
             }
-            Err(e) => return json!({"success": false, "error": e.to_string()}),
+            Err(error) => return json!({"success": false, "error": error.to_string()}),
             Ok(_) => {}
         }
     }
@@ -996,20 +1011,24 @@ async fn tool_update_drawer(connection: &Connection, args: &Value) -> Value {
 
 async fn tool_kg_query(connection: &Connection, args: &Value) -> Value {
     let entity = match sanitize_kg_value(str_arg(args, "entity"), "entity") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
     let as_of = {
-        let a = str_arg(args, "as_of");
-        if a.is_empty() {
+        let as_of_raw = str_arg(args, "as_of");
+        if as_of_raw.is_empty() {
             None
         } else {
-            Some(a.to_string())
+            Some(as_of_raw.to_string())
         }
     };
     let direction = {
-        let d = str_arg(args, "direction");
-        if d.is_empty() { "both" } else { d }
+        let direction_raw = str_arg(args, "direction");
+        if direction_raw.is_empty() {
+            "both"
+        } else {
+            direction_raw
+        }
     };
     if !matches!(direction, "outgoing" | "incoming" | "both") {
         return json!({"error": "direction must be 'outgoing', 'incoming', or 'both'", "public": true});
@@ -1020,7 +1039,7 @@ async fn tool_kg_query(connection: &Connection, args: &Value) -> Value {
             let count = facts.len();
             json!({"entity": entity, "as_of": as_of, "facts": facts, "count": count})
         }
-        Err(e) => json!({"error": e.to_string()}),
+        Err(error) => json!({"error": error.to_string()}),
     }
 }
 
@@ -1029,33 +1048,33 @@ async fn tool_kg_add(connection: &Connection, args: &Value) -> Value {
     let predicate = str_arg(args, "predicate");
     let object = str_arg(args, "object");
     let valid_from = {
-        let v = str_arg(args, "valid_from");
-        if v.is_empty() {
+        let valid_from_raw = str_arg(args, "valid_from");
+        if valid_from_raw.is_empty() {
             None
         } else {
-            Some(v.to_string())
+            Some(valid_from_raw.to_string())
         }
     };
     let source_closet = {
-        let s = str_arg(args, "source_closet");
-        if s.is_empty() {
+        let source_closet_raw = str_arg(args, "source_closet");
+        if source_closet_raw.is_empty() {
             None
         } else {
-            Some(s.to_string())
+            Some(source_closet_raw.to_string())
         }
     };
 
     let subject = match sanitize_kg_value(subject, "subject") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
     let predicate = match sanitize_name(predicate, "predicate") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
     let object = match sanitize_kg_value(object, "object") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
 
     wal_log(
@@ -1090,7 +1109,7 @@ async fn tool_kg_add(connection: &Connection, args: &Value) -> Value {
             "triple_id": triple_id,
             "fact": format!("{subject} → {predicate} → {object}"),
         }),
-        Err(e) => json!({"success": false, "error": e.to_string()}),
+        Err(error) => json!({"success": false, "error": error.to_string()}),
     }
 }
 
@@ -1099,25 +1118,25 @@ async fn tool_kg_invalidate(connection: &Connection, args: &Value) -> Value {
     let predicate = str_arg(args, "predicate");
     let object = str_arg(args, "object");
     let ended = {
-        let e = str_arg(args, "ended");
-        if e.is_empty() {
+        let ended_raw = str_arg(args, "ended");
+        if ended_raw.is_empty() {
             None
         } else {
-            Some(e.to_string())
+            Some(ended_raw.to_string())
         }
     };
 
     let subject = match sanitize_kg_value(subject, "subject") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
     let predicate = match sanitize_name(predicate, "predicate") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
     let object = match sanitize_kg_value(object, "object") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
 
     // Perform the mutation first so the WAL records persisted_ended — the value
@@ -1136,7 +1155,7 @@ async fn tool_kg_invalidate(connection: &Connection, args: &Value) -> Value {
                 "ended": persisted_ended,
             })
         }
-        Err(e) => json!({"success": false, "error": e.to_string()}),
+        Err(error) => json!({"success": false, "error": error.to_string()}),
     }
 }
 
@@ -1147,8 +1166,8 @@ async fn tool_kg_timeline(connection: &Connection, args: &Value) -> Value {
             None
         } else {
             match sanitize_kg_value(raw_entity, "entity") {
-                Ok(v) => Some(v),
-                Err(e) => return e,
+                Ok(sanitized_val) => Some(sanitized_val),
+                Err(error) => return error,
             }
         }
     };
@@ -1162,83 +1181,83 @@ async fn tool_kg_timeline(connection: &Connection, args: &Value) -> Value {
                 "count": count,
             })
         }
-        Err(e) => json!({"error": e.to_string()}),
+        Err(error) => json!({"error": error.to_string()}),
     }
 }
 
 async fn tool_kg_stats(connection: &Connection) -> Value {
     match kg::query::stats(connection).await {
         Ok(stats) => json!(stats),
-        Err(e) => json!({"error": e.to_string()}),
+        Err(error) => json!({"error": error.to_string()}),
     }
 }
 
 async fn tool_traverse(connection: &Connection, args: &Value) -> Value {
     let start_room = match sanitize_name(str_arg(args, "start_room"), "start_room") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
     let max_hops = usize::try_from(int_arg(args, "max_hops", 2).clamp(1, 10)).unwrap_or(2);
 
     match graph::traverse(connection, &start_room, max_hops).await {
         Ok((results, truncated)) => json!({"results": results, "truncated": truncated}),
-        Err(e) => json!({"error": e.to_string()}),
+        Err(error) => json!({"error": error.to_string()}),
     }
 }
 
 async fn tool_find_tunnels(connection: &Connection, args: &Value) -> Value {
     let wing_a = match sanitize_opt_name(str_arg(args, "wing_a"), "wing_a") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
     let wing_b = match sanitize_opt_name(str_arg(args, "wing_b"), "wing_b") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
 
     match graph::find_tunnels(connection, wing_a.as_deref(), wing_b.as_deref()).await {
         Ok((tunnels, truncated)) => json!({"tunnels": tunnels, "truncated": truncated}),
-        Err(e) => json!({"error": e.to_string()}),
+        Err(error) => json!({"error": error.to_string()}),
     }
 }
 
 async fn tool_graph_stats(connection: &Connection) -> Value {
     match graph::graph_stats(connection).await {
         Ok(stats) => json!(stats),
-        Err(e) => json!({"error": e.to_string()}),
+        Err(error) => json!({"error": error.to_string()}),
     }
 }
 
 async fn tool_create_tunnel(connection: &Connection, args: &Value) -> Value {
     let source_wing = match sanitize_name(str_arg(args, "source_wing"), "source_wing") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
     let source_room = match sanitize_name(str_arg(args, "source_room"), "source_room") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
     let target_wing = match sanitize_name(str_arg(args, "target_wing"), "target_wing") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
     let target_room = match sanitize_name(str_arg(args, "target_room"), "target_room") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
     let label = match sanitize_label(str_arg(args, "label")) {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
     let source_drawer_id =
         match sanitize_opt_name(str_arg(args, "source_drawer_id"), "source_drawer_id") {
-            Ok(v) => v,
-            Err(e) => return e,
+            Ok(value) => value,
+            Err(error) => return error,
         };
     let target_drawer_id =
         match sanitize_opt_name(str_arg(args, "target_drawer_id"), "target_drawer_id") {
-            Ok(v) => v,
-            Err(e) => return e,
+            Ok(value) => value,
+            Err(error) => return error,
         };
 
     match graph::create_tunnel(
@@ -1272,19 +1291,19 @@ async fn tool_create_tunnel(connection: &Connection, args: &Value) -> Value {
             .await;
             json!(tunnel)
         }
-        Err(e) => json!({"error": e.to_string()}),
+        Err(error) => json!({"error": error.to_string()}),
     }
 }
 
 async fn tool_list_tunnels(connection: &Connection, args: &Value) -> Value {
     let wing = match sanitize_opt_name(str_arg(args, "wing"), "wing") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
 
     match graph::list_tunnels(connection, wing.as_deref()).await {
         Ok(tunnels) => json!({"tunnels": tunnels, "count": tunnels.len()}),
-        Err(e) => json!({"error": e.to_string()}),
+        Err(error) => json!({"error": error.to_string()}),
     }
 }
 
@@ -1304,23 +1323,23 @@ async fn tool_delete_tunnel(connection: &Connection, args: &Value) -> Value {
 
     match graph::delete_tunnel(connection, tunnel_id).await {
         Ok(deleted) => json!({"deleted": deleted, "tunnel_id": tunnel_id}),
-        Err(e) => json!({"error": e.to_string()}),
+        Err(error) => json!({"error": error.to_string()}),
     }
 }
 
 async fn tool_follow_tunnels(connection: &Connection, args: &Value) -> Value {
     let wing = match sanitize_name(str_arg(args, "wing"), "wing") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
     let room = match sanitize_name(str_arg(args, "room"), "room") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
 
     match graph::follow_tunnels(connection, &wing, &room).await {
         Ok(connections) => json!({"wing": wing, "room": room, "connections": connections}),
-        Err(e) => json!({"error": e.to_string()}),
+        Err(error) => json!({"error": error.to_string()}),
     }
 }
 
@@ -1328,24 +1347,24 @@ async fn tool_diary_write(connection: &Connection, args: &Value) -> Value {
     let agent_name = str_arg(args, "agent_name");
     let entry = str_arg(args, "entry");
     let topic = {
-        let t = str_arg(args, "topic");
-        if t.is_empty() {
+        let topic_raw = str_arg(args, "topic");
+        if topic_raw.is_empty() {
             "general".to_string()
         } else {
-            match sanitize_name(t, "topic") {
-                Ok(v) => v,
-                Err(e) => return e,
+            match sanitize_name(topic_raw, "topic") {
+                Ok(value) => value,
+                Err(error) => return error,
             }
         }
     };
 
     let agent_name = match sanitize_name(agent_name, "agent_name") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
     let entry = match sanitize_content(entry) {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
 
     let wing = format!("wing_{}", agent_name.to_lowercase().replace(' ', "_"));
@@ -1381,7 +1400,7 @@ async fn tool_diary_write(connection: &Connection, args: &Value) -> Value {
                 "timestamp": now.to_rfc3339(),
             })
         }
-        Err(e) => json!({"success": false, "error": e.to_string()}),
+        Err(error) => json!({"success": false, "error": error.to_string()}),
     }
 }
 
@@ -1390,8 +1409,8 @@ async fn tool_diary_read(connection: &Connection, args: &Value) -> Value {
     let last_n = int_arg(args, "last_n", 10).clamp(1, 100);
 
     let agent_name = match sanitize_name(agent_name, "agent_name") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
 
     let wing = format!("wing_{}", agent_name.to_lowercase().replace(' ', "_"));
@@ -1428,7 +1447,7 @@ async fn tool_diary_read(connection: &Connection, args: &Value) -> Value {
                 "showing": total,
             })
         }
-        Err(e) => json!({"error": e.to_string()}),
+        Err(error) => json!({"error": error.to_string()}),
     }
 }
 
@@ -1538,24 +1557,24 @@ mod tests {
     async fn add_drawer_missing_required_fields_returns_error() {
         with_isolated_env(|connection| async move {
             // Missing content
-            let r = tool_add_drawer(&connection, &json!({"wing": "w", "room": "r"})).await;
-            assert_eq!(r["success"], false);
+            let result = tool_add_drawer(&connection, &json!({"wing": "w", "room": "r"})).await;
+            assert_eq!(result["success"], false);
 
             // Missing wing
-            let r = tool_add_drawer(
+            let result = tool_add_drawer(
                 &connection,
                 &json!({"room": "r", "content": "some text here for testing"}),
             )
             .await;
-            assert_eq!(r["success"], false);
+            assert_eq!(result["success"], false);
 
             // Missing room
-            let r = tool_add_drawer(
+            let result = tool_add_drawer(
                 &connection,
                 &json!({"wing": "w", "content": "some text here for testing"}),
             )
             .await;
-            assert_eq!(r["success"], false);
+            assert_eq!(result["success"], false);
         })
         .await;
     }
@@ -2021,8 +2040,8 @@ mod tests {
 
             let result = tool_list_drawers(&connection, &json!({"wing": "alpha"})).await;
             assert_eq!(result["count"], 1);
-            let d = &result["drawers"][0];
-            assert_eq!(d["wing"], "alpha");
+            let drawer = &result["drawers"][0];
+            assert_eq!(drawer["wing"], "alpha");
         })
         .await;
     }

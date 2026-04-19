@@ -54,8 +54,8 @@ pub async fn run(connection: &Connection) -> Result<()> {
                     "id": null,
                     "error": {"code": -32700, "message": "Request exceeds maximum frame size"}
                 });
-                let out = serde_json::to_string(&err_response).unwrap_or_default();
-                stdout.write_all(out.as_bytes()).await?;
+                let serialized_response = serde_json::to_string(&err_response).unwrap_or_default();
+                stdout.write_all(serialized_response.as_bytes()).await?;
                 stdout.write_all(b"\n").await?;
                 stdout.flush().await?;
                 continue;
@@ -66,8 +66,8 @@ pub async fn run(connection: &Connection) -> Result<()> {
                     "id": null,
                     "error": {"code": -32700, "message": "Request contains invalid UTF-8"}
                 });
-                let out = serde_json::to_string(&err_response).unwrap_or_default();
-                stdout.write_all(out.as_bytes()).await?;
+                let serialized_response = serde_json::to_string(&err_response).unwrap_or_default();
+                stdout.write_all(serialized_response.as_bytes()).await?;
                 stdout.write_all(b"\n").await?;
                 stdout.flush().await?;
                 continue;
@@ -82,15 +82,15 @@ pub async fn run(connection: &Connection) -> Result<()> {
         }
 
         let request: Value = match serde_json::from_str(trimmed) {
-            Ok(v) => v,
+            Ok(parsed) => parsed,
             Err(e) => {
                 let err_response = json!({
                     "jsonrpc": "2.0",
                     "id": null,
                     "error": {"code": -32700, "message": format!("Parse error: {e}")}
                 });
-                let out = serde_json::to_string(&err_response).unwrap_or_default();
-                stdout.write_all(out.as_bytes()).await?;
+                let serialized_response = serde_json::to_string(&err_response).unwrap_or_default();
+                stdout.write_all(serialized_response.as_bytes()).await?;
                 stdout.write_all(b"\n").await?;
                 stdout.flush().await?;
                 continue;
@@ -99,9 +99,9 @@ pub async fn run(connection: &Connection) -> Result<()> {
 
         let response = handle_request(connection, &request).await;
 
-        if let Some(resp) = response {
-            let out = serde_json::to_string(&resp).unwrap_or_default();
-            stdout.write_all(out.as_bytes()).await?;
+        if let Some(response_body) = response {
+            let serialized_response = serde_json::to_string(&response_body).unwrap_or_default();
+            stdout.write_all(serialized_response.as_bytes()).await?;
             stdout.write_all(b"\n").await?;
             stdout.flush().await?;
         }
@@ -238,7 +238,9 @@ async fn handle_request(connection: &Connection, request: &Value) -> Option<Valu
 
     match method {
         "initialize" => {
-            let client_version = params.get("protocolVersion").and_then(|v| v.as_str());
+            let client_version = params
+                .get("protocolVersion")
+                .and_then(|proto_val| proto_val.as_str());
             let negotiated = if let Some(cv) = client_version {
                 if SUPPORTED_PROTOCOL_VERSIONS.contains(&cv) {
                     cv
@@ -381,32 +383,32 @@ mod tests {
 
     #[tokio::test]
     async fn handle_request_initialize_supported_version() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        let req = json!({
+        let (_database, connection) = crate::test_helpers::test_db().await;
+        let request = json!({
             "method": "initialize",
             "params": {"protocolVersion": "2024-11-05"},
             "id": 1
         });
-        let resp = handle_request(&conn, &req)
+        let response = handle_request(&connection, &request)
             .await
             .expect("should return Some");
-        let result = &resp["result"];
+        let result = &response["result"];
         assert_eq!(result["protocolVersion"], "2024-11-05");
         assert_eq!(result["serverInfo"]["name"], "mempalace");
     }
 
     #[tokio::test]
     async fn handle_request_initialize_unsupported_falls_back() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        let req = json!({
+        let (_database, connection) = crate::test_helpers::test_db().await;
+        let request = json!({
             "method": "initialize",
             "params": {"protocolVersion": "9999-01-01"},
             "id": 1
         });
-        let resp = handle_request(&conn, &req)
+        let response = handle_request(&connection, &request)
             .await
             .expect("should return Some");
-        let result = &resp["result"];
+        let result = &response["result"];
         // Falls back to the latest supported version.
         assert_eq!(result["protocolVersion"], SUPPORTED_PROTOCOL_VERSIONS[0]);
         assert_eq!(result["serverInfo"]["name"], "mempalace");
@@ -414,16 +416,16 @@ mod tests {
 
     #[tokio::test]
     async fn handle_request_initialize_no_version() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        let req = json!({
+        let (_database, connection) = crate::test_helpers::test_db().await;
+        let request = json!({
             "method": "initialize",
             "params": {},
             "id": 1
         });
-        let resp = handle_request(&conn, &req)
+        let response = handle_request(&connection, &request)
             .await
             .expect("should return Some");
-        let result = &resp["result"];
+        let result = &response["result"];
         // Missing protocolVersion falls back to the latest supported version.
         assert_eq!(result["protocolVersion"], SUPPORTED_PROTOCOL_VERSIONS[0]);
         assert_eq!(result["serverInfo"]["name"], "mempalace");
@@ -431,35 +433,38 @@ mod tests {
 
     #[tokio::test]
     async fn handle_request_ping() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        let req = json!({"method": "ping", "id": 2});
-        let resp = handle_request(&conn, &req)
+        let (_database, connection) = crate::test_helpers::test_db().await;
+        let request = json!({"method": "ping", "id": 2});
+        let response = handle_request(&connection, &request)
             .await
             .expect("should return Some");
-        assert_eq!(resp["result"], json!({}));
-        assert_eq!(resp["id"], 2);
+        assert_eq!(response["result"], json!({}));
+        assert_eq!(response["id"], 2);
     }
 
     #[tokio::test]
     async fn handle_request_notification_returns_none() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        let req = json!({"method": "notifications/initialized"});
-        let resp = handle_request(&conn, &req).await;
-        assert!(resp.is_none(), "notifications must return None");
+        let (_database, connection) = crate::test_helpers::test_db().await;
+        let request = json!({"method": "notifications/initialized"});
+        let response = handle_request(&connection, &request).await;
+        assert!(response.is_none(), "notifications must return None");
         // Also verify a different notification prefix.
-        let req2 = json!({"method": "notifications/cancelled"});
-        let resp2 = handle_request(&conn, &req2).await;
-        assert!(resp2.is_none(), "all notifications/ must return None");
+        let request_notification = json!({"method": "notifications/cancelled"});
+        let response_notification = handle_request(&connection, &request_notification).await;
+        assert!(
+            response_notification.is_none(),
+            "all notifications/ must return None"
+        );
     }
 
     #[tokio::test]
     async fn handle_request_tools_list() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        let req = json!({"method": "tools/list", "id": 3});
-        let resp = handle_request(&conn, &req)
+        let (_database, connection) = crate::test_helpers::test_db().await;
+        let request = json!({"method": "tools/list", "id": 3});
+        let response = handle_request(&connection, &request)
             .await
             .expect("should return Some");
-        let tools = resp["result"]["tools"]
+        let tools = response["result"]["tools"]
             .as_array()
             .expect("tools should be an array");
         assert!(!tools.is_empty(), "tools list must not be empty");
@@ -478,21 +483,21 @@ mod tests {
         }
         // At least one well-known tool must be present.
         assert!(
-            tools.iter().any(|t| t["name"] == "mempalace_status"),
+            tools.iter().any(|tool| tool["name"] == "mempalace_status"),
             "tools list must include 'mempalace_status'"
         );
     }
 
     #[tokio::test]
     async fn handle_request_unknown_method() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        let req = json!({"method": "bogus", "id": 4});
-        let resp = handle_request(&conn, &req)
+        let (_database, connection) = crate::test_helpers::test_db().await;
+        let request = json!({"method": "bogus", "id": 4});
+        let response = handle_request(&connection, &request)
             .await
             .expect("should return Some");
-        assert_eq!(resp["error"]["code"], -32601);
+        assert_eq!(response["error"]["code"], -32601);
         assert!(
-            resp["error"]["message"]
+            response["error"]["message"]
                 .as_str()
                 .expect("message should be a string")
                 .contains("bogus"),
@@ -502,14 +507,14 @@ mod tests {
 
     #[tokio::test]
     async fn handle_request_non_object() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        let req = json!("string");
-        let resp = handle_request(&conn, &req)
+        let (_database, connection) = crate::test_helpers::test_db().await;
+        let request = json!("string");
+        let response = handle_request(&connection, &request)
             .await
             .expect("should return Some");
-        assert_eq!(resp["error"]["code"], -32600);
+        assert_eq!(response["error"]["code"], -32600);
         assert!(
-            resp["error"]["message"]
+            response["error"]["message"]
                 .as_str()
                 .expect("message should be a string")
                 .contains("Invalid Request"),
@@ -518,14 +523,14 @@ mod tests {
 
     #[tokio::test]
     async fn handle_request_missing_method() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        let req = json!({"id": 1});
-        let resp = handle_request(&conn, &req)
+        let (_database, connection) = crate::test_helpers::test_db().await;
+        let request = json!({"id": 1});
+        let response = handle_request(&connection, &request)
             .await
             .expect("should return Some");
-        assert_eq!(resp["error"]["code"], -32600);
+        assert_eq!(response["error"]["code"], -32600);
         assert!(
-            resp["error"]["message"]
+            response["error"]["message"]
                 .as_str()
                 .expect("message should be a string")
                 .contains("method"),
@@ -535,16 +540,16 @@ mod tests {
 
     #[tokio::test]
     async fn handle_request_tools_call_valid() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        let req = json!({
+        let (_database, connection) = crate::test_helpers::test_db().await;
+        let request = json!({
             "method": "tools/call",
             "params": {"name": "mempalace_status", "arguments": {}},
             "id": 5
         });
-        let resp = handle_request(&conn, &req)
+        let response = handle_request(&connection, &request)
             .await
             .expect("should return Some");
-        let content = resp["result"]["content"]
+        let content = response["result"]["content"]
             .as_array()
             .expect("content should be an array");
         assert!(!content.is_empty(), "content array must not be empty");
@@ -553,18 +558,18 @@ mod tests {
 
     #[tokio::test]
     async fn handle_request_tools_call_missing_name() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        let req = json!({
+        let (_database, connection) = crate::test_helpers::test_db().await;
+        let request = json!({
             "method": "tools/call",
             "params": {"arguments": {}},
             "id": 6
         });
-        let resp = handle_request(&conn, &req)
+        let response = handle_request(&connection, &request)
             .await
             .expect("should return Some");
-        assert_eq!(resp["error"]["code"], -32602);
+        assert_eq!(response["error"]["code"], -32602);
         assert!(
-            resp["error"]["message"]
+            response["error"]["message"]
                 .as_str()
                 .expect("message should be a string")
                 .contains("name"),
@@ -574,18 +579,18 @@ mod tests {
 
     #[tokio::test]
     async fn handle_request_tools_call_invalid_arguments() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        let req = json!({
+        let (_database, connection) = crate::test_helpers::test_db().await;
+        let request = json!({
             "method": "tools/call",
             "params": {"name": "mempalace_status", "arguments": "string"},
             "id": 7
         });
-        let resp = handle_request(&conn, &req)
+        let response = handle_request(&connection, &request)
             .await
             .expect("should return Some");
-        assert_eq!(resp["error"]["code"], -32602);
+        assert_eq!(response["error"]["code"], -32602);
         assert!(
-            resp["error"]["message"]
+            response["error"]["message"]
                 .as_str()
                 .expect("message should be a string")
                 .contains("arguments"),
@@ -599,8 +604,8 @@ mod tests {
     async fn read_line_normal() {
         let cursor = Cursor::new(b"hello\n".to_vec());
         let mut reader = BufReader::new(cursor);
-        let mut buf = Vec::new();
-        let result = run_read_line_impl(&mut reader, &mut buf, 1024)
+        let mut buffer = Vec::new();
+        let result = run_read_line_impl(&mut reader, &mut buffer, 1024)
             .await
             .expect("read should succeed");
         let LineRead::Line(line) = result else {
@@ -608,22 +613,22 @@ mod tests {
         };
         assert_eq!(line, "hello");
         // Verify buffer was used for accumulation.
-        assert_eq!(buf.len(), 5, "buffer should contain 'hello' (5 bytes)");
+        assert_eq!(buffer.len(), 5, "buffer should contain 'hello' (5 bytes)");
     }
 
     #[tokio::test]
     async fn read_line_eof() {
         let cursor = Cursor::new(Vec::new());
         let mut reader = BufReader::new(cursor);
-        let mut buf = Vec::new();
-        let result = run_read_line_impl(&mut reader, &mut buf, 1024)
+        let mut buffer = Vec::new();
+        let result = run_read_line_impl(&mut reader, &mut buffer, 1024)
             .await
             .expect("read should succeed");
         assert!(
             matches!(result, LineRead::Eof),
             "expected Eof on empty input"
         );
-        assert!(buf.is_empty(), "buffer should remain empty on EOF");
+        assert!(buffer.is_empty(), "buffer should remain empty on EOF");
     }
 
     #[tokio::test]
@@ -634,8 +639,8 @@ mod tests {
         let input = "a".repeat(limit + 5) + "\n" + "ok\n";
         let cursor = Cursor::new(input.into_bytes());
         let mut reader = BufReader::new(cursor);
-        let mut buf = Vec::new();
-        let result = run_read_line_impl(&mut reader, &mut buf, limit)
+        let mut buffer = Vec::new();
+        let result = run_read_line_impl(&mut reader, &mut buffer, limit)
             .await
             .expect("read should succeed");
         assert!(
@@ -643,8 +648,8 @@ mod tests {
             "expected Overflow for line exceeding limit"
         );
         // After overflow drain, the reader must resync and return the next line.
-        buf.clear();
-        let next = run_read_line_impl(&mut reader, &mut buf, limit)
+        buffer.clear();
+        let next = run_read_line_impl(&mut reader, &mut buffer, limit)
             .await
             .expect("second read should succeed");
         let LineRead::Line(recovered) = next else {
@@ -665,8 +670,8 @@ mod tests {
         assert!(String::from_utf8(input.clone()).is_err());
         let cursor = Cursor::new(std::mem::take(&mut input));
         let mut reader = BufReader::new(cursor);
-        let mut buf = Vec::new();
-        let result = run_read_line_impl(&mut reader, &mut buf, 1024)
+        let mut buffer = Vec::new();
+        let result = run_read_line_impl(&mut reader, &mut buffer, 1024)
             .await
             .expect("read should succeed");
         assert!(
@@ -679,8 +684,8 @@ mod tests {
     async fn read_line_crlf_stripped() {
         let cursor = Cursor::new(b"hello\r\n".to_vec());
         let mut reader = BufReader::new(cursor);
-        let mut buf = Vec::new();
-        let result = run_read_line_impl(&mut reader, &mut buf, 1024)
+        let mut buffer = Vec::new();
+        let result = run_read_line_impl(&mut reader, &mut buffer, 1024)
             .await
             .expect("read should succeed");
         let LineRead::Line(line) = result else {
@@ -688,7 +693,7 @@ mod tests {
         };
         assert_eq!(line, "hello", "\\r\\n should be stripped to just 'hello'");
         // Buffer should have 'hello' without the \r.
-        assert_eq!(buf.len(), 5, "buffer should be 5 bytes after \\r strip");
+        assert_eq!(buffer.len(), 5, "buffer should be 5 bytes after \\r strip");
     }
 
     #[tokio::test]
@@ -696,8 +701,8 @@ mod tests {
         // A stream that ends without a trailing newline must return the accumulated bytes as a line.
         let cursor = Cursor::new(b"no newline at end".to_vec());
         let mut reader = BufReader::new(cursor);
-        let mut buf = Vec::new();
-        let result = run_read_line_impl(&mut reader, &mut buf, 1024)
+        let mut buffer = Vec::new();
+        let result = run_read_line_impl(&mut reader, &mut buffer, 1024)
             .await
             .expect("read should succeed");
         let LineRead::Line(line) = result else {
@@ -707,7 +712,7 @@ mod tests {
             line, "no newline at end",
             "partial line at EOF must be returned"
         );
-        assert_eq!(buf.len(), 17, "buffer must contain all bytes");
+        assert_eq!(buffer.len(), 17, "buffer must contain all bytes");
     }
 
     #[tokio::test]
@@ -717,8 +722,8 @@ mod tests {
         let input = "a".repeat(limit + 10); // No newline — entire input is one oversized line.
         let cursor = Cursor::new(input.into_bytes());
         let mut reader = BufReader::new(cursor);
-        let mut buf = Vec::new();
-        let result = run_read_line_impl(&mut reader, &mut buf, limit)
+        let mut buffer = Vec::new();
+        let result = run_read_line_impl(&mut reader, &mut buffer, limit)
             .await
             .expect("read should succeed");
         assert!(
@@ -726,8 +731,8 @@ mod tests {
             "oversized line without newline must report Overflow"
         );
         // After drain the stream is at EOF; next read must return Eof.
-        buf.clear();
-        let next = run_read_line_impl(&mut reader, &mut buf, limit)
+        buffer.clear();
+        let next = run_read_line_impl(&mut reader, &mut buffer, limit)
             .await
             .expect("second read should succeed");
         assert!(

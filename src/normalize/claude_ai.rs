@@ -24,9 +24,9 @@ pub fn try_parse(data: &serde_json::Value) -> Option<String> {
         // or messages key.  Only treat as privacy export if the first element looks
         // like a conversation object (has chat_messages or messages) to avoid
         // misclassifying a plain flat message array.
-        let first_is_convo = arr.first().is_some_and(|v| {
-            v.get("chat_messages")
-                .or_else(|| v.get("messages"))
+        let first_is_convo = arr.first().is_some_and(|item| {
+            item.get("chat_messages")
+                .or_else(|| item.get("messages"))
                 .and_then(|m| m.as_array())
                 .is_some()
         });
@@ -39,7 +39,7 @@ pub fn try_parse(data: &serde_json::Value) -> Option<String> {
                     let msgs = conv
                         .get("chat_messages")
                         .or_else(|| conv.get("messages"))
-                        .and_then(|v| v.as_array())?;
+                        .and_then(|msg_val| msg_val.as_array())?;
                     collect_messages(msgs)
                 })
                 .collect();
@@ -57,7 +57,7 @@ pub fn try_parse(data: &serde_json::Value) -> Option<String> {
         let items = obj
             .get("messages")
             .or_else(|| obj.get("chat_messages"))
-            .and_then(|v| v.as_array())?;
+            .and_then(|msg_val| msg_val.as_array())?;
         collect_messages(items)
     } else {
         None
@@ -81,7 +81,7 @@ fn collect_messages(items: &[serde_json::Value]) -> Option<String> {
         let role = obj
             .get("role")
             .or_else(|| obj.get("sender"))
-            .and_then(|v| v.as_str())
+            .and_then(|role_val| role_val.as_str())
             .unwrap_or("");
 
         // Primary: content blocks. Fallback: top-level "text" key.
@@ -89,7 +89,7 @@ fn collect_messages(items: &[serde_json::Value]) -> Option<String> {
             let from_content = obj.get("content").map(extract_content).unwrap_or_default();
             if from_content.is_empty() {
                 obj.get("text")
-                    .and_then(|v| v.as_str())
+                    .and_then(|text_val| text_val.as_str())
                     .unwrap_or("")
                     .trim()
                     .to_string()
@@ -112,7 +112,7 @@ fn collect_messages(items: &[serde_json::Value]) -> Option<String> {
     if messages.len() >= 2 {
         let refs: Vec<(&str, &str)> = messages
             .iter()
-            .map(|(r, t)| (r.as_str(), t.as_str()))
+            .map(|(role, text)| (role.as_str(), text.as_str()))
             .collect();
         Some(messages_to_transcript(&refs))
     } else {
@@ -122,12 +122,12 @@ fn collect_messages(items: &[serde_json::Value]) -> Option<String> {
 
 fn extract_content(value: &serde_json::Value) -> String {
     match value {
-        serde_json::Value::String(s) => s.trim().to_string(),
+        serde_json::Value::String(text) => text.trim().to_string(),
         serde_json::Value::Array(arr) => arr
             .iter()
             .filter_map(|item| {
-                if let Some(s) = item.as_str() {
-                    Some(s.to_string())
+                if let Some(text) = item.as_str() {
+                    Some(text.to_string())
                 } else if let Some(obj) = item.as_object() {
                     if obj.get("type").and_then(|t| t.as_str()) == Some("text") {
                         obj.get("text")

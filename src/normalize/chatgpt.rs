@@ -89,12 +89,12 @@ pub fn try_parse(data: &serde_json::Value) -> Option<String> {
 
     // Require at least one user turn AND at least one assistant turn so we
     // never store a one-sided transcript (e.g. a file with only system prompts).
-    let has_user = messages.iter().any(|(r, _)| r == "user");
-    let has_assistant = messages.iter().any(|(r, _)| r == "assistant");
+    let has_user = messages.iter().any(|(role, _)| role == "user");
+    let has_assistant = messages.iter().any(|(role, _)| role == "assistant");
     if has_user && has_assistant {
         let refs: Vec<(&str, &str)> = messages
             .iter()
-            .map(|(r, t)| (r.as_str(), t.as_str()))
+            .map(|(role, text)| (role.as_str(), text.as_str()))
             .collect();
         Some(messages_to_transcript(&refs))
     } else {
