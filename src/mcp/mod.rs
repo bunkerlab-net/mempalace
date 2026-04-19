@@ -44,7 +44,7 @@ pub async fn run(connection: &Connection) -> Result<()> {
     // Reusable buffer for line reading — allocated once, cleared each iteration.
     let mut line_buffer: Vec<u8> = Vec::with_capacity(4096);
 
-    // Intentional server loop: runs until stdin closes (Eof signals EOF).
+    // Intentional: server loop runs until stdin closes.
     loop {
         let line = match run_read_line(&mut reader, &mut line_buffer, REQUEST_BYTES_MAX).await {
             Ok(LineRead::Eof) => break, // Client disconnected.
@@ -133,7 +133,13 @@ async fn run_read_line_impl<R: AsyncBufRead + Unpin>(
     assert!(limit > 0);
     buffer.clear();
 
+    let mut read_iterations: usize = 0;
     loop {
+        read_iterations += 1;
+        assert!(
+            read_iterations <= REQUEST_BYTES_MAX,
+            "run_read_line_impl: exceeded REQUEST_BYTES_MAX ({REQUEST_BYTES_MAX}) read iterations"
+        );
         let available = reader.fill_buf().await?;
 
         // EOF: return accumulated buffer or signal end-of-stream.
@@ -191,7 +197,13 @@ async fn run_read_line_impl<R: AsyncBufRead + Unpin>(
 /// Drain bytes from the reader until the next newline or EOF.
 /// Called after detecting an overlong line to resync the stream.
 async fn run_read_line_drain<R: AsyncBufRead + Unpin>(reader: &mut R) -> std::io::Result<LineRead> {
+    let mut drain_iterations: usize = 0;
     loop {
+        drain_iterations += 1;
+        assert!(
+            drain_iterations <= REQUEST_BYTES_MAX,
+            "run_read_line_drain: exceeded REQUEST_BYTES_MAX ({REQUEST_BYTES_MAX}) drain iterations"
+        );
         let available = reader.fill_buf().await?;
         if available.is_empty() {
             // EOF during drain — still report overflow so the error response is sent.

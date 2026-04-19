@@ -1,6 +1,11 @@
 const CHUNK_SIZE: usize = 800;
 const CHUNK_OVERLAP: usize = 100;
 const CHUNK_SIZE_MIN: usize = 50;
+/// UTF-8 code points are at most 4 bytes, so a char-boundary snap never takes more than 3 steps.
+const CHAR_BOUNDARY_SNAP_MAX: usize = 4;
+/// A chunk covers at least `CHUNK_SIZE_MIN` bytes, so max chunks = `text.len()` / `CHUNK_SIZE_MIN`.
+/// `5_000` is a generous upper bound for any realistic input.
+const CHUNKS_MAX: usize = 5_000;
 
 // Compile-time invariant: overlap must be less than chunk size.
 const _: () = assert!(CHUNK_OVERLAP < CHUNK_SIZE);
@@ -22,7 +27,13 @@ fn snap_forward(text: &str, mut pos: usize) -> usize {
         "snap_forward: pos {pos} exceeds string length {}",
         text.len()
     );
+    let mut snap_steps: usize = 0;
     while pos < text.len() && !text.is_char_boundary(pos) {
+        snap_steps += 1;
+        assert!(
+            snap_steps < CHAR_BOUNDARY_SNAP_MAX,
+            "snap_forward: exceeded CHAR_BOUNDARY_SNAP_MAX ({CHAR_BOUNDARY_SNAP_MAX}) steps"
+        );
         pos += 1;
     }
     debug_assert!(text.is_char_boundary(pos));
@@ -36,7 +47,13 @@ fn snap_backward(text: &str, mut pos: usize) -> usize {
         "snap_backward: pos {pos} exceeds string length {}",
         text.len()
     );
+    let mut snap_steps: usize = 0;
     while pos > 0 && !text.is_char_boundary(pos) {
+        snap_steps += 1;
+        assert!(
+            snap_steps < CHAR_BOUNDARY_SNAP_MAX,
+            "snap_backward: exceeded CHAR_BOUNDARY_SNAP_MAX ({CHAR_BOUNDARY_SNAP_MAX}) steps"
+        );
         pos -= 1;
     }
     debug_assert!(text.is_char_boundary(pos));
@@ -53,8 +70,14 @@ pub fn chunk_text(content: &str) -> Vec<Chunk> {
     let mut chunks = Vec::new();
     let mut start = 0;
     let mut chunk_index = 0;
+    let mut chunk_count: usize = 0;
 
     while start < content.len() {
+        assert!(
+            chunk_count < CHUNKS_MAX,
+            "chunk_text: exceeded CHUNKS_MAX ({CHUNKS_MAX}) iterations"
+        );
+        chunk_count += 1;
         let mut end = snap_backward(content, (start + CHUNK_SIZE).min(content.len()));
 
         // Try to break at paragraph boundary, then line boundary.

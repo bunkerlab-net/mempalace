@@ -2,6 +2,10 @@
 
 use std::time::Duration;
 
+/// Generous upper bound on rows drained from a query result; prevents unbounded
+/// iteration when no explicit SQL LIMIT is present (e.g. PRAGMA responses).
+const ROWS_MAX: usize = 100_000;
+
 use turso::{Builder, Connection, Database};
 
 use crate::error::Result;
@@ -30,7 +34,14 @@ pub async fn open_db(path: &str) -> Result<(Database, Connection)> {
     if !is_in_memory {
         let mut wal_rows = connection.query("PRAGMA journal_mode=WAL", ()).await?;
         // Upper bound: PRAGMA journal_mode returns exactly one row; drain it.
-        while wal_rows.next().await?.is_some() {}
+        let mut wal_row_count: usize = 0;
+        while wal_rows.next().await?.is_some() {
+            wal_row_count += 1;
+            assert!(
+                wal_row_count <= ROWS_MAX,
+                "open_db: exceeded ROWS_MAX ({ROWS_MAX}) rows draining WAL pragma result"
+            );
+        }
     }
 
     // Allow waiting up to 5 seconds for write locks when another process is
@@ -57,7 +68,13 @@ pub async fn query_all(
 
     let mut rows = connection.query(sql, params).await?;
     let mut results = Vec::new();
+    let mut row_count: usize = 0;
     while let Some(row) = rows.next().await? {
+        row_count += 1;
+        assert!(
+            row_count <= ROWS_MAX,
+            "query_all: exceeded ROWS_MAX ({ROWS_MAX}) rows — add a SQL LIMIT to the calling query"
+        );
         results.push(row);
     }
     Ok(results)

@@ -12,6 +12,9 @@ use crate::palace::room_detect::is_skip_dir;
 
 const CONVO_EXTENSIONS: &[&str] = &["txt", "md", "json", "jsonl"];
 const CHUNK_SIZE_MIN: usize = 30;
+/// Upper bound on lines in a single conversation chunk; prevents unbounded iteration
+/// over malformed or adversarially large inputs.
+const LINES_MAX: usize = 100_000;
 /// Bytes per drawer — large exchanges are split at this boundary (rounded down
 /// to a UTF-8 char boundary) so the full AI response is stored without
 /// truncation.  Mirrors miner.py's `CHUNK_SIZE`.  Uses `content.len()` (bytes),
@@ -174,11 +177,20 @@ fn chunk_by_exchange_floor_char_boundary(text: &str, index: usize) -> usize {
 /// lines are joined with a single space.  When the combined content exceeds
 /// `CHUNK_SIZE` bytes, it is split across consecutive drawers so nothing is
 /// silently discarded (fixes the prior 8-line cap).
+// TigerStyle exemption: sequential loop structure with three bounded loops and
+// explicit upper-bound assertions; extracting helpers would obscure the control flow.
+#[allow(clippy::too_many_lines)]
 fn chunk_by_exchange(lines: &[&str]) -> Vec<Chunk> {
     let mut chunks = Vec::new();
     let mut i = 0;
+    let mut lines_count: usize = 0;
 
     while i < lines.len() {
+        lines_count += 1;
+        assert!(
+            lines_count <= LINES_MAX,
+            "chunk_by_exchange: exceeded LINES_MAX ({LINES_MAX}) outer iterations"
+        );
         // Upper bound: i strictly increases each iteration, bounded by lines.len().
         debug_assert!(i < lines.len());
         let line = lines[i].trim();
@@ -187,7 +199,13 @@ fn chunk_by_exchange(lines: &[&str]) -> Vec<Chunk> {
             i += 1;
 
             let mut ai_lines = Vec::new();
+            let mut exchange_count: usize = 0;
             while i < lines.len() {
+                exchange_count += 1;
+                assert!(
+                    exchange_count <= LINES_MAX,
+                    "chunk_by_exchange: exceeded LINES_MAX ({LINES_MAX}) inner (exchange-drain) iterations"
+                );
                 // Upper bound: i strictly increases each inner iteration, bounded by lines.len().
                 debug_assert!(i < lines.len());
                 let next = lines[i].trim();
@@ -225,7 +243,13 @@ fn chunk_by_exchange(lines: &[&str]) -> Vec<Chunk> {
                 // Continuation fragments are always pushed (no CHUNK_SIZE_MIN filter)
                 // to prevent silent data loss once we've committed to multi-chunk output.
                 let mut remainder = &content[first_end..];
+                let mut chunk_accumulation_count: usize = 0;
                 while !remainder.is_empty() {
+                    chunk_accumulation_count += 1;
+                    assert!(
+                        chunk_accumulation_count <= LINES_MAX,
+                        "chunk_by_exchange: exceeded LINES_MAX ({LINES_MAX}) chunk-accumulation iterations"
+                    );
                     let end = chunk_by_exchange_floor_char_boundary(remainder, CHUNK_SIZE);
                     // If floor_char_boundary returned 0 (edge case for corrupted input),
                     // advance by the first character's UTF-8 byte length to maintain

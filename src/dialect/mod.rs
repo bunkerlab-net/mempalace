@@ -3,6 +3,9 @@
 pub mod emotions;
 pub mod topics;
 
+/// UTF-8 code points are at most 4 bytes, so a char-boundary snap never takes more than 3 steps.
+const CHAR_BOUNDARY_SNAP_MAX: usize = 4;
+
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::LazyLock;
@@ -140,7 +143,13 @@ fn extract_key_sentence(text: &str) -> String {
 
     if best.len() > 55 {
         let mut end = 52;
+        let mut snap_steps: usize = 0;
         while end < best.len() && !best.is_char_boundary(end) {
+            snap_steps += 1;
+            assert!(
+                snap_steps < CHAR_BOUNDARY_SNAP_MAX,
+                "extract_key_sentence: exceeded CHAR_BOUNDARY_SNAP_MAX ({CHAR_BOUNDARY_SNAP_MAX}) snap steps"
+            );
             end += 1;
         }
         format!("{}...", &best[..end])
