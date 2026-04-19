@@ -52,11 +52,11 @@ pub struct TraversalResult {
 #[derive(Debug, Clone, Serialize)]
 pub struct GraphStats {
     /// Total distinct rooms (excluding "general").
-    pub total_rooms: usize,
+    pub rooms_total: usize,
     /// Rooms that span two or more wings.
     pub tunnel_rooms: usize,
     /// Total tunnel edges (wing-pair connections).
-    pub total_edges: usize,
+    pub edges_total: usize,
     /// Room count per wing.
     pub rooms_per_wing: HashMap<String, usize>,
     /// Top rooms by number of wings spanned.
@@ -137,9 +137,9 @@ const GRAPH_RESULT_CAP: usize = 50;
 pub async fn traverse(
     connection: &Connection,
     start_room: &str,
-    max_hops: usize,
+    hops_max: usize,
 ) -> Result<(Vec<TraversalResult>, bool)> {
-    assert!(max_hops > 0, "max_hops must be positive");
+    assert!(hops_max > 0, "hops_max must be positive");
     assert!(!start_room.is_empty(), "start_room must not be empty");
 
     let (nodes, _) = build_graph(connection).await?;
@@ -165,17 +165,17 @@ pub async fn traverse(
 
     // Upper bound: each room enters `visited` before being pushed to `frontier`,
     // so the frontier empties after at most nodes.len() iterations.
-    while let Some((current_room, depth)) = frontier.pop_front() {
+    while let Some((room_current, depth)) = frontier.pop_front() {
         assert!(
             visited.len() <= nodes.len(),
             "visited set cannot exceed node count — frontier invariant is broken"
         );
-        if depth >= max_hops {
+        if depth >= hops_max {
             continue;
         }
 
-        let current_wings: HashSet<String> = nodes
-            .get(&current_room)
+        let wings_current: HashSet<String> = nodes
+            .get(&room_current)
             .map(|n| n.wings.iter().cloned().collect())
             .unwrap_or_default();
 
@@ -184,7 +184,7 @@ pub async fn traverse(
                 continue;
             }
             let node_wings: HashSet<String> = node.wings.iter().cloned().collect();
-            let shared: Vec<String> = current_wings.intersection(&node_wings).cloned().collect();
+            let shared: Vec<String> = wings_current.intersection(&node_wings).cloned().collect();
             if !shared.is_empty() {
                 visited.insert(room.clone());
                 let mut sorted_shared = shared;
@@ -196,7 +196,7 @@ pub async fn traverse(
                     hop: depth + 1,
                     connected_via: Some(sorted_shared),
                 });
-                if depth + 1 < max_hops {
+                if depth + 1 < hops_max {
                     frontier.push_back((room.clone(), depth + 1));
                 }
             }
@@ -279,9 +279,9 @@ pub async fn graph_stats(connection: &Connection) -> Result<GraphStats> {
     top_tunnels.truncate(10);
 
     Ok(GraphStats {
-        total_rooms: nodes.len(),
+        rooms_total: nodes.len(),
         tunnel_rooms,
-        total_edges: edges.len(),
+        edges_total: edges.len(),
         rooms_per_wing: wing_counts,
         top_tunnels,
     })

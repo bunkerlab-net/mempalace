@@ -115,20 +115,20 @@ pub async fn run(
         return Ok(());
     }
 
-    let mut total_original = 0usize;
-    let mut total_compressed = 0usize;
+    let mut original_total = 0usize;
+    let mut compressed_total = 0usize;
 
     for (count, row) in rows.iter().enumerate() {
         let (orig, comp) = run_compress_row(connection, row, &dialect, dry_run, count + 1).await?;
-        total_original += orig;
-        total_compressed += comp;
+        original_total += orig;
+        compressed_total += comp;
     }
 
     let count = rows.len();
     // Byte lengths for display-only ratio; precision loss negligible for practical sizes.
     #[allow(clippy::cast_precision_loss)]
-    let overall_ratio = if total_compressed > 0 {
-        total_original as f64 / total_compressed as f64
+    let overall_ratio = if compressed_total > 0 {
+        original_total as f64 / compressed_total as f64
     } else {
         0.0
     };
@@ -139,7 +139,7 @@ pub async fn run(
         println!("Compressed {count} drawers into AAAK dialect");
     }
     println!(
-        "  Total: {total_original} → {total_compressed} bytes ({overall_ratio:.1}x compression)"
+        "  Total: {original_total} → {compressed_total} bytes ({overall_ratio:.1}x compression)"
     );
 
     Ok(())

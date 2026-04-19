@@ -30,18 +30,18 @@ pub fn try_parse(data: &serde_json::Value) -> Option<String> {
 
     let root = root_id.or(fallback_root)?;
     let mut messages: Vec<(String, String)> = Vec::new();
-    let mut current_id = root.to_string();
+    let mut id_current = root.to_string();
     let mut visited = HashSet::new();
 
     // Upper bound: each node in `mapping` can be visited at most once, so this
     // loop runs at most mapping.len() times regardless of the tree structure.
-    while !visited.contains(&current_id) {
+    while !visited.contains(&id_current) {
         assert!(
             visited.len() <= mapping.len(),
             "visited set cannot exceed mapping size — cycle guard is broken"
         );
-        visited.insert(current_id.clone());
-        let node = mapping.get(&current_id)?;
+        visited.insert(id_current.clone());
+        let node = mapping.get(&id_current)?;
 
         if let Some(msg) = node.get("message")
             && !msg.is_null()
@@ -78,7 +78,7 @@ pub fn try_parse(data: &serde_json::Value) -> Option<String> {
         let children = node.get("children").and_then(|c| c.as_array());
         if let Some(kids) = children {
             if let Some(first) = kids.first().and_then(|k| k.as_str()) {
-                current_id = first.to_string();
+                id_current = first.to_string();
             } else {
                 break;
             }

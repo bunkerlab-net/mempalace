@@ -37,7 +37,7 @@ async fn run_print_rooms(connection: &Connection) -> Result<()> {
     .await?;
 
     println!("\nRooms:");
-    let mut current_wing = String::new();
+    let mut wing_current = String::new();
     for row in &rows {
         let wing = row
             .get_value(0)
@@ -55,9 +55,9 @@ async fn run_print_rooms(connection: &Connection) -> Result<()> {
             .and_then(|cell| cell.as_integer().copied())
             .unwrap_or(0);
 
-        if wing != current_wing {
+        if wing != wing_current {
             println!("  [{wing}]");
-            current_wing = wing;
+            wing_current = wing;
         }
         println!("    {room}: {count}");
     }

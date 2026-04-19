@@ -16,12 +16,12 @@ use super::protocol::{AAAK_SPEC, PALACE_PROTOCOL};
 
 /// Largest integer exactly representable as an f64 (2^53 − 1).
 /// Values above this lose precision when stored in f64, so we reject them.
-const MAX_EXACT_INT_F64: f64 = 9_007_199_254_740_991.0;
+const EXACT_INT_F64_MAX: f64 = 9_007_199_254_740_991.0;
 
 /// Maximum byte length for a tunnel label.  Labels are free-form strings stored
 /// in `SQLite`; without a cap an unbounded value could waste DB space or overflow
 /// index rows.  255 characters is generous for a short descriptive label.
-const MAX_LABEL_LEN: usize = 255;
+const LABEL_LEN_MAX: usize = 255;
 
 /// Exact character length of a tunnel ID.  Tunnel IDs are the first 16 hex
 /// characters of a SHA256 digest (see `canonical_tunnel_id` in graph.rs).
@@ -88,8 +88,8 @@ fn int_arg(args: &Value, key: &str, default: i64) -> i64 {
                 .filter(|&n| n > 0)
                 .or_else(|| {
                     arg_val.as_f64().and_then(|f| {
-                        if f.is_finite() && f > 0.0 && f <= MAX_EXACT_INT_F64 && f.fract() == 0.0 {
-                            // Safe: MAX_EXACT_INT_F64 (2^53-1) < i64::MAX, so the value fits exactly
+                        if f.is_finite() && f > 0.0 && f <= EXACT_INT_F64_MAX && f.fract() == 0.0 {
+                            // Safe: EXACT_INT_F64_MAX (2^53-1) < i64::MAX, so the value fits exactly
                             #[allow(clippy::cast_possible_truncation)]
                             Some(f as i64)
                         } else {
@@ -103,10 +103,10 @@ fn int_arg(args: &Value, key: &str, default: i64) -> i64 {
                             str_val.parse::<f64>().ok().and_then(|f| {
                                 if f.is_finite()
                                     && f > 0.0
-                                    && f <= MAX_EXACT_INT_F64
+                                    && f <= EXACT_INT_F64_MAX
                                     && f.fract() == 0.0
                                 {
-                                    // Safe: MAX_EXACT_INT_F64 (2^53-1) < i64::MAX, so the value fits exactly
+                                    // Safe: EXACT_INT_F64_MAX (2^53-1) < i64::MAX, so the value fits exactly
                                     #[allow(clippy::cast_possible_truncation)]
                                     Some(f as i64)
                                 } else {
@@ -245,9 +245,9 @@ fn sanitize_label(value: &str) -> Result<String, Value> {
             json!({"success": false, "error": "label must be a non-empty string", "public": true}),
         );
     }
-    if trimmed.len() > MAX_LABEL_LEN {
+    if trimmed.len() > LABEL_LEN_MAX {
         return Err(
-            json!({"success": false, "error": format!("label exceeds maximum length of {MAX_LABEL_LEN} characters"), "public": true}),
+            json!({"success": false, "error": format!("label exceeds maximum length of {LABEL_LEN_MAX} characters"), "public": true}),
         );
     }
     if trimmed.contains('\0') {
@@ -261,7 +261,7 @@ fn sanitize_label(value: &str) -> Result<String, Value> {
     debug_assert!(!result.is_empty());
     debug_assert!(result == result.trim());
     debug_assert!(!result.contains('\0'));
-    debug_assert!(result.len() <= MAX_LABEL_LEN);
+    debug_assert!(result.len() <= LABEL_LEN_MAX);
 
     Ok(result)
 }
@@ -752,8 +752,8 @@ async fn tool_get_drawer(connection: &Connection, args: &Value) -> Value {
 
 /// List drawers with optional wing/room filtering and cursor-style pagination.
 async fn tool_list_drawers(connection: &Connection, args: &Value) -> Value {
-    const MAX_LIMIT: i64 = 100;
-    let limit = int_arg(args, "limit", 20).clamp(1, MAX_LIMIT);
+    const LIMIT_MAX: i64 = 100;
+    let limit = int_arg(args, "limit", 20).clamp(1, LIMIT_MAX);
     let offset = int_arg(args, "offset", 0).max(0);
     let wing = match sanitize_opt_name(str_arg(args, "wing"), "wing") {
         Ok(value) => value,
@@ -845,7 +845,7 @@ async fn tool_update_drawer(connection: &Connection, args: &Value) -> Value {
         return json!({"success": false, "error": "drawer_id has invalid format", "public": true});
     }
 
-    let new_content = {
+    let content_new = {
         let content_raw = str_arg(args, "content");
         if content_raw.is_empty() {
             None
@@ -856,17 +856,17 @@ async fn tool_update_drawer(connection: &Connection, args: &Value) -> Value {
             }
         }
     };
-    let new_wing = match sanitize_opt_name(str_arg(args, "wing"), "wing") {
+    let wing_new = match sanitize_opt_name(str_arg(args, "wing"), "wing") {
         Ok(value) => value,
         Err(error) => return error,
     };
-    let new_room = match sanitize_opt_name(str_arg(args, "room"), "room") {
+    let room_new = match sanitize_opt_name(str_arg(args, "room"), "room") {
         Ok(value) => value,
         Err(error) => return error,
     };
 
     // No-op: nothing to change
-    if new_content.is_none() && new_wing.is_none() && new_room.is_none() {
+    if content_new.is_none() && wing_new.is_none() && room_new.is_none() {
         return json!({"success": true, "drawer_id": drawer_id, "noop": true});
     }
 
@@ -887,13 +887,13 @@ async fn tool_update_drawer(connection: &Connection, args: &Value) -> Value {
         return json!({"success": false, "error": format!("Drawer not found: {drawer_id}"), "public": true});
     }
 
-    let old_wing: String = rows[0].get(0).unwrap_or_default();
-    let old_room: String = rows[0].get(1).unwrap_or_default();
-    let old_content: String = rows[0].get(2).unwrap_or_default();
+    let wing_old: String = rows[0].get(0).unwrap_or_default();
+    let room_old: String = rows[0].get(1).unwrap_or_default();
+    let content_old: String = rows[0].get(2).unwrap_or_default();
 
-    let final_wing = new_wing.as_deref().unwrap_or(&old_wing);
-    let final_room = new_room.as_deref().unwrap_or(&old_room);
-    let final_content = new_content.as_deref().unwrap_or(&old_content);
+    let final_wing = wing_new.as_deref().unwrap_or(&wing_old);
+    let final_room = room_new.as_deref().unwrap_or(&room_old);
+    let final_content = content_new.as_deref().unwrap_or(&content_old);
 
     // Recompute the deterministic ID to keep it consistent with tool_add_drawer.
     // wing/room/content are all baked into the ID, so any change means a new ID.
@@ -905,29 +905,29 @@ async fn tool_update_drawer(connection: &Connection, args: &Value) -> Value {
         let _ = write!(hex_string, "{byte:02x}");
         hex_string
     });
-    let new_id = format!("drawer_{final_wing}_{final_room}_{}", &hex[..24]);
+    let id_new = format!("drawer_{final_wing}_{final_room}_{}", &hex[..24]);
 
     wal_log(
         "update_drawer",
         json!({
             "drawer_id": drawer_id,
-            "new_drawer_id": new_id,
-            "old_wing": old_wing,
-            "old_room": old_room,
+            "new_drawer_id": id_new,
+            "old_wing": wing_old,
+            "old_room": room_old,
             "new_wing": final_wing,
             "new_room": final_room,
-            "content_changed": new_content.is_some(),
+            "content_changed": content_new.is_some(),
         }),
     )
     .await;
 
     // If the recomputed ID already exists (and differs), the new wing+room+content
     // is a duplicate of another drawer — reject to prevent silent duplication.
-    if new_id != drawer_id {
+    if id_new != drawer_id {
         let existing = query_all(
             connection,
             "SELECT id FROM drawers WHERE id = ?",
-            [new_id.as_str()],
+            [id_new.as_str()],
         )
         .await;
         match existing {
@@ -935,7 +935,7 @@ async fn tool_update_drawer(connection: &Connection, args: &Value) -> Value {
                 return json!({
                     "success": false,
                     "error": "A drawer with this wing/room/content already exists",
-                    "existing_drawer_id": new_id,
+                    "existing_drawer_id": id_new,
                     "public": true,
                 });
             }
@@ -954,7 +954,7 @@ async fn tool_update_drawer(connection: &Connection, args: &Value) -> Value {
         .execute(
             "UPDATE drawers SET id = ?1, wing = ?2, room = ?3, content = ?4 WHERE id = ?5",
             turso::params![
-                new_id.as_str(),
+                id_new.as_str(),
                 final_wing,
                 final_room,
                 final_content,
@@ -979,19 +979,19 @@ async fn tool_update_drawer(connection: &Connection, args: &Value) -> Value {
         return json!({"success": false, "error": e.to_string()});
     }
 
-    if new_id != drawer_id {
+    if id_new != drawer_id {
         // drawer_words rows for the old ID were deleted above; if the new
         // ID already had entries (shouldn't happen — we checked above),
         // clean those too.
         let _ = connection
             .execute(
                 "DELETE FROM drawer_words WHERE drawer_id = ?",
-                [new_id.as_str()],
+                [id_new.as_str()],
             )
             .await;
     }
 
-    if let Err(e) = drawer::index_words(connection, &new_id, final_content).await {
+    if let Err(e) = drawer::index_words(connection, &id_new, final_content).await {
         let _ = connection.execute("ROLLBACK", ()).await;
         return json!({"success": false, "error": e.to_string()});
     }
@@ -1003,7 +1003,7 @@ async fn tool_update_drawer(connection: &Connection, args: &Value) -> Value {
 
     json!({
         "success": true,
-        "drawer_id": new_id,
+        "drawer_id": id_new,
         "wing": final_wing,
         "room": final_room,
     })
@@ -1197,9 +1197,9 @@ async fn tool_traverse(connection: &Connection, args: &Value) -> Value {
         Ok(value) => value,
         Err(error) => return error,
     };
-    let max_hops = usize::try_from(int_arg(args, "max_hops", 2).clamp(1, 10)).unwrap_or(2);
+    let hops_max = usize::try_from(int_arg(args, "max_hops", 2).clamp(1, 10)).unwrap_or(2);
 
-    match graph::traverse(connection, &start_room, max_hops).await {
+    match graph::traverse(connection, &start_room, hops_max).await {
         Ok((results, truncated)) => json!({"results": results, "truncated": truncated}),
         Err(error) => json!({"error": error.to_string()}),
     }
@@ -2528,8 +2528,8 @@ mod tests {
         with_isolated_env(|connection| async move {
             let result = tool_graph_stats(&connection).await;
             assert!(result.get("error").is_none(), "must not error");
-            assert_eq!(result["total_rooms"], 0);
-            assert_eq!(result["total_edges"], 0);
+            assert_eq!(result["rooms_total"], 0);
+            assert_eq!(result["edges_total"], 0);
         })
         .await;
     }
@@ -2543,7 +2543,7 @@ mod tests {
             let result = tool_graph_stats(&connection).await;
             assert!(result.get("error").is_none(), "must not error");
             assert!(
-                result["total_rooms"].as_i64().expect("total_rooms") >= 1,
+                result["rooms_total"].as_i64().expect("rooms_total") >= 1,
                 "must count at least one room"
             );
         })

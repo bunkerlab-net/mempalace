@@ -11,7 +11,7 @@ use crate::palace::miner::MineParams;
 use crate::palace::room_detect::is_skip_dir;
 
 const CONVO_EXTENSIONS: &[&str] = &["txt", "md", "json", "jsonl"];
-const MIN_CHUNK_SIZE: usize = 30;
+const CHUNK_SIZE_MIN: usize = 30;
 /// Bytes per drawer — large exchanges are split at this boundary (rounded down
 /// to a UTF-8 char boundary) so the full AI response is stored without
 /// truncation.  Mirrors miner.py's `CHUNK_SIZE`.  Uses `content.len()` (bytes),
@@ -19,10 +19,10 @@ const MIN_CHUNK_SIZE: usize = 30;
 /// multi-byte characters.
 const CHUNK_SIZE: usize = 800;
 /// Files larger than this are skipped — prevents OOM on huge files.
-const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
+const FILE_SIZE_MAX: u64 = 10 * 1024 * 1024; // 10 MB
 
 // Compile-time invariant: chunk size must be greater than min chunk size.
-const _: () = assert!(CHUNK_SIZE > MIN_CHUNK_SIZE);
+const _: () = assert!(CHUNK_SIZE > CHUNK_SIZE_MIN);
 
 use super::WALK_DEPTH_LIMIT;
 
@@ -215,14 +215,14 @@ fn chunk_by_exchange(lines: &[&str]) -> Vec<Chunk> {
                 let first_end = chunk_by_exchange_floor_char_boundary(&content, CHUNK_SIZE);
                 let first = &content[..first_end];
                 // Guard first chunk to avoid nearly-empty starts.
-                if first.trim().len() > MIN_CHUNK_SIZE {
+                if first.trim().len() > CHUNK_SIZE_MIN {
                     chunks.push(Chunk {
                         content: first.to_string(),
                         chunk_index: chunks.len(),
                     });
                 }
                 // Remaining response in CHUNK_SIZE continuation drawers.
-                // Continuation fragments are always pushed (no MIN_CHUNK_SIZE filter)
+                // Continuation fragments are always pushed (no CHUNK_SIZE_MIN filter)
                 // to prevent silent data loss once we've committed to multi-chunk output.
                 let mut remainder = &content[first_end..];
                 while !remainder.is_empty() {
@@ -244,7 +244,7 @@ fn chunk_by_exchange(lines: &[&str]) -> Vec<Chunk> {
                         chunk_index: chunks.len(),
                     });
                 }
-            } else if content.trim().len() > MIN_CHUNK_SIZE {
+            } else if content.trim().len() > CHUNK_SIZE_MIN {
                 chunks.push(Chunk {
                     content,
                     chunk_index: chunks.len(),
@@ -272,7 +272,7 @@ fn chunk_by_paragraph(content: &str) -> Vec<Chunk> {
             .enumerate()
             .filter_map(|(i, group)| {
                 let text = group.join("\n");
-                if text.trim().len() > MIN_CHUNK_SIZE {
+                if text.trim().len() > CHUNK_SIZE_MIN {
                     Some(Chunk {
                         content: text.trim().to_string(),
                         chunk_index: i,
@@ -287,7 +287,7 @@ fn chunk_by_paragraph(content: &str) -> Vec<Chunk> {
     paragraphs
         .iter()
         .enumerate()
-        .filter(|(_, p)| p.len() > MIN_CHUNK_SIZE)
+        .filter(|(_, p)| p.len() > CHUNK_SIZE_MIN)
         .map(|(i, p)| Chunk {
             content: p.to_string(),
             chunk_index: i,
@@ -347,7 +347,7 @@ fn walk_convos(directory: &Path, files: &mut Vec<PathBuf>) {
                 if CONVO_EXTENSIONS.contains(&extension_lower.as_str())
                     && !name.ends_with(".meta.json")
                 {
-                    if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_FILE_SIZE) {
+                    if std::fs::metadata(&path).is_ok_and(|m| m.len() > FILE_SIZE_MAX) {
                         continue;
                     }
                     files.push(path);
@@ -387,7 +387,7 @@ fn mine_convos_print_summary(
     files_unreadable: usize,
     files_too_short: usize,
     files_empty_chunks: usize,
-    total_drawers: usize,
+    drawers_total: usize,
     room_counts: &HashMap<String, usize>,
 ) {
     let files_processed = file_count
@@ -413,7 +413,7 @@ fn mine_convos_print_summary(
         println!("  Files skipped (no chunks):        {files_empty_chunks}");
     }
     println!(
-        "  Drawers {}: {total_drawers}",
+        "  Drawers {}: {drawers_total}",
         if dry_run { "would be filed" } else { "filed" }
     );
 
@@ -535,7 +535,7 @@ pub async fn mine_convos(
 
     mine_convos_print_header(wing, &directory, files.len(), extract_mode, opts.dry_run);
 
-    let mut total_drawers: usize = 0;
+    let mut drawers_total: usize = 0;
     let mut files_skipped: usize = 0;
     let mut files_unreadable: usize = 0;
     let mut files_too_short: usize = 0;
@@ -556,7 +556,7 @@ pub async fn mine_convos(
             files_unreadable += 1;
             continue;
         };
-        if content.trim().len() < MIN_CHUNK_SIZE {
+        if content.trim().len() < CHUNK_SIZE_MIN {
             files_too_short += 1;
             continue;
         }
@@ -600,7 +600,7 @@ pub async fn mine_convos(
             .await?;
         }
 
-        total_drawers += drawers_added;
+        drawers_total += drawers_added;
         *room_counts.entry(room.clone()).or_insert(0) += 1;
         println!(
             "  [{:4}/{}] {:50} +{drawers_added}",
@@ -617,7 +617,7 @@ pub async fn mine_convos(
         files_unreadable,
         files_too_short,
         files_empty_chunks,
-        total_drawers,
+        drawers_total,
         &room_counts,
     );
     Ok(())
@@ -672,7 +672,7 @@ mod tests {
 
     #[test]
     fn chunk_by_exchange_small_exchange_single_chunk() {
-        // Content is > MIN_CHUNK_SIZE (30) so it must produce exactly one chunk.
+        // Content is > CHUNK_SIZE_MIN (30) so it must produce exactly one chunk.
         let input = "> user asks a question here\nthe assistant replies with an answer";
         let lines: Vec<&str> = input.lines().collect();
         let chunks = chunk_by_exchange(&lines);
@@ -729,11 +729,11 @@ mod tests {
 
     #[test]
     fn chunk_by_exchange_small_tail_regression() {
-        // Regression test: tail chunk smaller than MIN_CHUNK_SIZE is preserved.
-        // Total size = CHUNK_SIZE + (MIN_CHUNK_SIZE - 1) - prefix_len so remainder
-        // after first CHUNK_SIZE bytes is strictly < MIN_CHUNK_SIZE.
+        // Regression test: tail chunk smaller than CHUNK_SIZE_MIN is preserved.
+        // Total size = CHUNK_SIZE + (CHUNK_SIZE_MIN - 1) - prefix_len so remainder
+        // after first CHUNK_SIZE bytes is strictly < CHUNK_SIZE_MIN.
         let prefix_len = "> user\n".len(); // 7 bytes
-        let ai_body = "x".repeat(CHUNK_SIZE + (MIN_CHUNK_SIZE - 1) - prefix_len); // 822 bytes
+        let ai_body = "x".repeat(CHUNK_SIZE + (CHUNK_SIZE_MIN - 1) - prefix_len); // 822 bytes
         let input = format!("> user\n{ai_body}");
         let lines: Vec<&str> = input.lines().collect();
 
@@ -797,7 +797,7 @@ mod tests {
 
     #[test]
     fn chunk_by_paragraph_multiple_paragraphs() {
-        // Content with multiple double-newline-separated paragraphs above MIN_CHUNK_SIZE
+        // Content with multiple double-newline-separated paragraphs above CHUNK_SIZE_MIN
         // must produce one chunk per paragraph with 0-based contiguous indices.
         let content = "First paragraph with enough text to exceed the minimum size check here.\n\n\
                        Second paragraph with its own content that also exceeds the minimum.\n\n\
@@ -836,18 +836,18 @@ mod tests {
         );
         for chunk in &chunks {
             assert!(
-                chunk.content.trim().len() > MIN_CHUNK_SIZE,
-                "every chunk must exceed MIN_CHUNK_SIZE"
+                chunk.content.trim().len() > CHUNK_SIZE_MIN,
+                "every chunk must exceed CHUNK_SIZE_MIN"
             );
         }
     }
 
     #[test]
     fn chunk_by_paragraph_short_paragraph_filtered() {
-        // A paragraph shorter than MIN_CHUNK_SIZE must be excluded from output.
+        // A paragraph shorter than CHUNK_SIZE_MIN must be excluded from output.
         let content = "short\n\nThis second paragraph has enough characters to exceed the minimum chunk threshold.";
         let chunks = chunk_by_paragraph(content);
-        // "short" (5 chars) is below MIN_CHUNK_SIZE=30 and must be filtered.
+        // "short" (5 chars) is below CHUNK_SIZE_MIN=30 and must be filtered.
         assert_eq!(
             chunks.len(),
             1,
@@ -1218,7 +1218,7 @@ mod tests {
 
     #[tokio::test]
     async fn mine_convos_skips_too_short_files() {
-        // Files with content below MIN_CHUNK_SIZE must be counted as too-short
+        // Files with content below CHUNK_SIZE_MIN must be counted as too-short
         // and must not produce any drawers.
         let temp_directory =
             tempfile::tempdir().expect("failed to create temporary directory for too-short test");

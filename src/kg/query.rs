@@ -36,7 +36,7 @@ pub struct KgStats {
     /// Total triple count.
     pub triples: i64,
     /// Triples with no `valid_to` (still active).
-    pub current_facts: i64,
+    pub facts_current: i64,
     /// Triples with a `valid_to` set.
     pub expired_facts: i64,
     /// Distinct predicate values across all triples.
@@ -285,7 +285,7 @@ pub async fn stats(connection: &Connection) -> Result<KgStats> {
     Ok(KgStats {
         entities,
         triples,
-        current_facts: current,
+        facts_current: current,
         expired_facts: expired,
         relationship_types,
     })
@@ -450,7 +450,7 @@ mod tests {
         assert!(kg_stats.entities > 0, "seeded DB should have entities");
         assert!(kg_stats.triples > 0, "seeded DB should have triples");
         assert_eq!(
-            kg_stats.current_facts, kg_stats.triples,
+            kg_stats.facts_current, kg_stats.triples,
             "no expired facts yet"
         );
     }

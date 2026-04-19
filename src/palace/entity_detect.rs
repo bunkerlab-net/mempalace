@@ -50,19 +50,19 @@ pub struct DetectionResult {
 }
 
 /// Scan files and detect entity candidates.
-pub fn detect_entities(file_paths: &[&Path], max_files: usize) -> DetectionResult {
-    assert!(max_files > 0, "detect_entities: max_files must be positive");
+pub fn detect_entities(file_paths: &[&Path], files_max: usize) -> DetectionResult {
+    assert!(files_max > 0, "detect_entities: files_max must be positive");
     let mut all_text = String::new();
     let mut all_lines = Vec::new();
-    let max_bytes_per_file = 5000;
+    let bytes_per_file_max = 5000;
 
     for (i, path) in file_paths.iter().enumerate() {
-        if i >= max_files {
+        if i >= files_max {
             break;
         }
         if let Ok(content) = fs::read_to_string(path) {
-            let truncated = if content.len() > max_bytes_per_file {
-                &content[..max_bytes_per_file]
+            let truncated = if content.len() > bytes_per_file_max {
+                &content[..bytes_per_file_max]
             } else {
                 &content
             };
@@ -668,9 +668,9 @@ Clara said the migration is complete. He agreed.\n";
         let result = detect_entities(&paths, 10);
 
         // Postcondition: detection found entities across multiple categories.
-        let total_entities = result.people.len() + result.projects.len() + result.uncertain.len();
+        let entities_total = result.people.len() + result.projects.len() + result.uncertain.len();
         assert!(
-            total_entities > 0,
+            entities_total > 0,
             "detection should find at least one entity across all categories"
         );
 

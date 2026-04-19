@@ -102,7 +102,7 @@ static MULTI_UNDERSCORE_RE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("multi-underscore regex is a compile-time literal and cannot fail to compile")
 });
 
-const MAX_SPLIT_FILE_SIZE: u64 = 500 * 1024 * 1024; // 500 MB safety limit
+const SPLIT_FILE_SIZE_MAX: u64 = 500 * 1024 * 1024; // 500 MB safety limit
 /// POSIX filename byte limit; used to compute the subject byte budget in `split_file`.
 const FILENAME_BYTE_LIMIT: usize = 255;
 
@@ -201,7 +201,7 @@ fn split_file(path: &Path, output_dir: &Path, dry_run: bool) -> Result<usize> {
             output_dir.display()
         )));
     }
-    if fs::metadata(path).is_ok_and(|m| m.len() > MAX_SPLIT_FILE_SIZE) {
+    if fs::metadata(path).is_ok_and(|m| m.len() > SPLIT_FILE_SIZE_MAX) {
         println!("  SKIP: {} exceeds 500 MB limit", path.display());
         return Ok(0);
     }
@@ -321,7 +321,7 @@ pub fn run(
     directory: &Path,
     output_dir: Option<&Path>,
     dry_run: bool,
-    min_sessions: usize,
+    sessions_min: usize,
     respect_gitignore: bool,
 ) -> Result<()> {
     if !directory.is_dir() {
@@ -330,15 +330,15 @@ pub fn run(
             directory.display()
         )));
     }
-    if min_sessions < 2 {
+    if sessions_min < 2 {
         return Err(crate::error::Error::Other(
-            "split: min_sessions must be at least 2".to_string(),
+            "split: sessions_min must be at least 2".to_string(),
         ));
     }
     let mut mega_files: Vec<(PathBuf, usize)> = Vec::new();
 
     for path in split_collect_txt_files(directory, respect_gitignore)? {
-        if fs::metadata(&path).is_ok_and(|m| m.len() > MAX_SPLIT_FILE_SIZE) {
+        if fs::metadata(&path).is_ok_and(|m| m.len() > SPLIT_FILE_SIZE_MAX) {
             println!("  SKIP: {} exceeds 500 MB limit", path.display());
             continue;
         }
@@ -347,7 +347,7 @@ pub fn run(
         })?;
         let lines: Vec<&str> = content.lines().collect();
         let boundaries = find_session_boundaries(&lines);
-        if boundaries.len() >= min_sessions {
+        if boundaries.len() >= sessions_min {
             mega_files.push((path, boundaries.len()));
         }
     }
@@ -366,7 +366,7 @@ pub fn run(
 
     if mega_files.is_empty() {
         println!(
-            "No mega-files found in {} (min {min_sessions} sessions).",
+            "No mega-files found in {} (min {sessions_min} sessions).",
             directory.display()
         );
         return Ok(());
@@ -376,7 +376,7 @@ pub fn run(
 
     println!("Found {} mega-files to split:", mega_files.len());
 
-    let mut total_written = 0usize;
+    let mut written_total = 0usize;
 
     for (path, _n_sessions) in &mega_files {
         // When output_dir was provided it is already validated above; skip the
@@ -394,18 +394,18 @@ pub fn run(
             }
             file_directory
         };
-        total_written += split_file(path, output_directory, dry_run)?;
+        written_total += split_file(path, output_directory, dry_run)?;
     }
 
     println!();
     if dry_run {
         println!(
-            "Dry run: would create {total_written} files from {} mega-files",
+            "Dry run: would create {written_total} files from {} mega-files",
             mega_files.len()
         );
     } else {
         println!(
-            "Done: created {total_written} files from {} mega-files",
+            "Done: created {written_total} files from {} mega-files",
             mega_files.len()
         );
     }
@@ -703,17 +703,17 @@ mod tests {
     // --- run ---
 
     #[test]
-    fn run_min_sessions_below_two_returns_error() {
-        // min_sessions=1 must be rejected immediately — callers must require at least two.
+    fn run_sessions_min_below_two_returns_error() {
+        // sessions_min=1 must be rejected immediately — callers must require at least two.
         let temp_directory = tempfile::tempdir()
-            .expect("failed to create temporary directory for min_sessions test");
+            .expect("failed to create temporary directory for sessions_min test");
         let result = run(temp_directory.path(), None, false, 1, false);
-        assert!(result.is_err(), "min_sessions < 2 must return Err");
+        assert!(result.is_err(), "sessions_min < 2 must return Err");
         assert!(
             result
                 .err()
-                .is_some_and(|error| error.to_string().contains("min_sessions")),
-            "error message must mention min_sessions"
+                .is_some_and(|error| error.to_string().contains("sessions_min")),
+            "error message must mention sessions_min"
         );
     }
 
@@ -738,10 +738,10 @@ mod tests {
 
     #[test]
     fn run_no_mega_files_returns_ok() {
-        // A directory with no .txt files meeting min_sessions must return Ok with no output.
+        // A directory with no .txt files meeting sessions_min must return Ok with no output.
         let temp_directory = tempfile::tempdir()
             .expect("failed to create temporary directory for no-mega-files test");
-        // One .txt file but only one session — does not meet min_sessions=2.
+        // One .txt file but only one session — does not meet sessions_min=2.
         fs::write(temp_directory.path().join("single.txt"), make_mega_file(1))
             .expect("failed to write single-session test file");
 

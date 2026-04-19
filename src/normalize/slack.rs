@@ -73,16 +73,16 @@ pub fn try_parse(data: &serde_json::Value) -> Option<String> {
         let role = if let Some(existing_role) = seen_users.get(&user_id) {
             existing_role.clone()
         } else {
-            let new_role = if seen_users.is_empty() {
+            let role_new = if seen_users.is_empty() {
                 "user".to_string()
             } else if last_role.as_deref() == Some("user") {
                 "assistant".to_string()
             } else {
                 "user".to_string()
             };
-            seen_users.insert(user_id.clone(), new_role.clone());
-            last_role = Some(new_role.clone());
-            new_role
+            seen_users.insert(user_id.clone(), role_new.clone());
+            last_role = Some(role_new.clone());
+            role_new
         };
         // Prefix with speaker ID so the original author is preserved in the transcript.
         messages.push((role, format!("[{user_id}] {text}")));

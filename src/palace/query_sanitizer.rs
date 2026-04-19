@@ -15,9 +15,9 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-const MAX_QUERY_LEN: usize = 250;
+const QUERY_LEN_MAX: usize = 250;
 const SAFE_QUERY_LEN: usize = 200;
-const MIN_QUESTION_SEGMENT_LEN: usize = 3;
+const QUESTION_SEGMENT_LEN_MIN: usize = 3;
 
 #[allow(clippy::expect_used)]
 // Matches a sentence ending with a question mark (including Unicode `？`),
@@ -70,7 +70,7 @@ pub fn sanitize_query(raw: &str) -> SanitizedQuery {
     // Step 2/3: treat the trailing segment as the primary intent carrier.
     if let Some(last_seg) = segments.last().copied() {
         let last_len = last_seg.chars().count();
-        if QUESTION_RE.is_match(last_seg) && last_len >= MIN_QUESTION_SEGMENT_LEN {
+        if QUESTION_RE.is_match(last_seg) && last_len >= QUESTION_SEGMENT_LEN_MIN {
             let candidate = tail_guard(last_seg);
             eprintln!(
                 "mempalace: query sanitized {original_length} → {} chars (method=question_extraction)",
@@ -78,7 +78,7 @@ pub fn sanitize_query(raw: &str) -> SanitizedQuery {
             );
             return sanitized(candidate, original_length, "question_extraction");
         }
-        if last_len >= MIN_QUESTION_SEGMENT_LEN {
+        if last_len >= QUESTION_SEGMENT_LEN_MIN {
             let candidate = tail_guard(last_seg);
             eprintln!(
                 "mempalace: query sanitized {original_length} → {} chars (method=tail_sentence)",
@@ -118,20 +118,20 @@ fn sanitized(clean_query: String, original_length: usize, method: &'static str) 
     }
 }
 
-/// Return the last [`MAX_QUERY_LEN`] chars of `text`.
+/// Return the last [`QUERY_LEN_MAX`] chars of `text`.
 fn tail_guard(text: &str) -> String {
     assert!(!text.is_empty(), "tail_guard: input must not be empty");
 
     let total = text.chars().count();
-    if total <= MAX_QUERY_LEN {
+    if total <= QUERY_LEN_MAX {
         return text.to_owned();
     }
-    let skip = total - MAX_QUERY_LEN;
+    let skip = total - QUERY_LEN_MAX;
     let byte_start = text.char_indices().nth(skip).map_or(0, |(i, _)| i);
     let result = text[byte_start..].to_owned();
 
-    // Postcondition: output is bounded by MAX_QUERY_LEN.
-    debug_assert!(result.chars().count() <= MAX_QUERY_LEN);
+    // Postcondition: output is bounded by QUERY_LEN_MAX.
+    debug_assert!(result.chars().count() <= QUERY_LEN_MAX);
 
     result
 }
@@ -204,7 +204,7 @@ mod tests {
         let result = sanitize_query(&prompt);
         assert!(result.was_sanitized);
         assert_eq!(result.method, "tail_sentence");
-        assert_eq!(result.clean_length, MAX_QUERY_LEN);
+        assert_eq!(result.clean_length, QUERY_LEN_MAX);
     }
 
     #[test]
@@ -212,7 +212,7 @@ mod tests {
         // Force truncation with multi-byte chars to validate UTF-8-safe slicing.
         let prompt = "é".repeat(550);
         let result = sanitize_query(&prompt);
-        assert_eq!(result.clean_length, MAX_QUERY_LEN);
+        assert_eq!(result.clean_length, QUERY_LEN_MAX);
         assert!(std::str::from_utf8(result.clean_query.as_bytes()).is_ok());
     }
 }

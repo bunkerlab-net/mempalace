@@ -22,7 +22,7 @@ const SUPPORTED_PROTOCOL_VERSIONS: &[&str] =
 /// Hard cap on a single newline-delimited request frame. A client-controlled
 /// line is buffered entirely before JSON parsing, so this bound prevents OOM
 /// before any validation runs. 1 MiB comfortably fits any real tool payload.
-const MAX_REQUEST_BYTES: usize = 1024 * 1024; // 1 MiB
+const REQUEST_BYTES_MAX: usize = 1024 * 1024; // 1 MiB
 
 /// Outcome of reading a single newline-delimited frame from the buffered reader.
 enum LineRead {
@@ -46,7 +46,7 @@ pub async fn run(connection: &Connection) -> Result<()> {
 
     // Intentional server loop: runs until stdin closes (Eof signals EOF).
     loop {
-        let line = match run_read_line(&mut reader, &mut line_buffer, MAX_REQUEST_BYTES).await {
+        let line = match run_read_line(&mut reader, &mut line_buffer, REQUEST_BYTES_MAX).await {
             Ok(LineRead::Eof) => break, // Client disconnected.
             Ok(LineRead::Overflow) => {
                 let err_response = json!({

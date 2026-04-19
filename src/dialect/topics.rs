@@ -31,7 +31,7 @@ pub fn stop_words() -> HashSet<&'static str> {
 }
 
 /// Extract key topic words from plain text by frequency + proper noun boost.
-pub fn extract_topics(text: &str, max_topics: usize) -> Vec<String> {
+pub fn extract_topics(text: &str, topics_max: usize) -> Vec<String> {
     let stops = stop_words();
     let words: Vec<&str> = WORD_RE.find_iter(text).map(|m| m.as_str()).collect();
 
@@ -67,7 +67,7 @@ pub fn extract_topics(text: &str, max_topics: usize) -> Vec<String> {
     ranked.sort_by_key(|b| std::cmp::Reverse(b.1));
     ranked
         .into_iter()
-        .take(max_topics)
+        .take(topics_max)
         .map(|(w, _)| w)
         .collect()
 }

@@ -10,11 +10,11 @@ use crate::error::Result;
 
 // L1 is injected into AI context windows. 15 drawers at ~200 chars each is
 // ~3 000 chars — enough for a meaningful summary without crowding the prompt.
-const MAX_DRAWERS: usize = 15;
+const DRAWERS_MAX: usize = 15;
 // Hard character cap so a wing with many long drawers cannot overflow the
 // context budget. 3 200 chars is roughly 800 tokens at the 4-chars/token
 // rule of thumb, leaving headroom for L0 and the user's own message.
-const MAX_CHARS: usize = 3200;
+const CHARS_MAX: usize = 3200;
 
 /// Layer 0: Identity text from `$XDG_DATA_HOME/mempalace/identity.txt`.
 pub fn layer0() -> String {
@@ -60,7 +60,7 @@ pub async fn layer1(connection: &Connection, wing: Option<&str>) -> Result<Strin
     // Use insertion order as a proxy for recency. A proper recency sort would
     // require a timestamp column; insertion order is good enough until that
     // column exists.
-    let top_drawers = &rows[..rows.len().min(MAX_DRAWERS)];
+    let top_drawers = &rows[..rows.len().min(DRAWERS_MAX)];
     let by_room = layer1_build_room_map(top_drawers);
 
     let mut lines = vec!["## L1 — ESSENTIAL STORY".to_string()];
@@ -89,7 +89,7 @@ pub async fn layer1(connection: &Connection, wing: Option<&str>) -> Result<Strin
                 let _ = write!(entry, "  ({source})");
             }
 
-            if total_len + entry.len() > MAX_CHARS {
+            if total_len + entry.len() > CHARS_MAX {
                 lines.push("  ... (more in L3 search)".to_string());
                 return Ok(lines.join("\n"));
             }

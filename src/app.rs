@@ -128,7 +128,7 @@ pub async fn run(cli: Cli) -> error::Result<()> {
             directory,
             output_dir,
             dry_run,
-            min_sessions,
+            sessions_min,
             no_gitignore,
         } => {
             // Expand ~ so that `mempalace split ~/convos` works as expected.
@@ -138,7 +138,7 @@ pub async fn run(cli: Cli) -> error::Result<()> {
                 &directory,
                 output_dir.as_deref(),
                 dry_run,
-                min_sessions,
+                sessions_min,
                 !no_gitignore,
             )?;
         }

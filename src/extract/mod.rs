@@ -69,21 +69,21 @@ pub fn extract_memories(text: &str, min_confidence: f64) -> Vec<Memory> {
 
         // f64 scores come from integer match counts (count as f64); partial_cmp
         // only returns None for NaN, which cannot arise here.
-        let Some(&(max_type, max_score)) = scores
+        let Some(&(type_max, score_max)) = scores
             .iter()
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
         else {
             // Unreachable: scores is non-empty (checked above at `if scores.is_empty()`).
             continue;
         };
-        let max_score = max_score + length_bonus;
+        let score_max = score_max + length_bonus;
 
         // Disambiguate
-        let score_map: std::collections::HashMap<&str, f64> = scores.iter().copied().collect();
-        let final_type = disambiguate(max_type, &prose, &score_map);
+        let scores_by_type: std::collections::HashMap<&str, f64> = scores.iter().copied().collect();
+        let final_type = disambiguate(type_max, &prose, &scores_by_type);
 
         // Confidence
-        let confidence = (max_score / 5.0).min(1.0);
+        let confidence = (score_max / 5.0).min(1.0);
         if confidence < min_confidence {
             continue;
         }

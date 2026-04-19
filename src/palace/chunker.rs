@@ -1,11 +1,11 @@
 const CHUNK_SIZE: usize = 800;
 const CHUNK_OVERLAP: usize = 100;
-const MIN_CHUNK_SIZE: usize = 50;
+const CHUNK_SIZE_MIN: usize = 50;
 
 // Compile-time invariant: overlap must be less than chunk size.
 const _: () = assert!(CHUNK_OVERLAP < CHUNK_SIZE);
 // Compile-time invariant: min chunk size must be less than chunk size.
-const _: () = assert!(MIN_CHUNK_SIZE < CHUNK_SIZE);
+const _: () = assert!(CHUNK_SIZE_MIN < CHUNK_SIZE);
 
 /// A single text chunk produced by [`chunk_text`].
 pub struct Chunk {
@@ -73,7 +73,7 @@ pub fn chunk_text(content: &str) -> Vec<Chunk> {
         }
 
         let chunk = content[start..end].trim();
-        if chunk.len() >= MIN_CHUNK_SIZE {
+        if chunk.len() >= CHUNK_SIZE_MIN {
             chunks.push(Chunk {
                 content: chunk.to_string(),
                 chunk_index,
@@ -90,7 +90,7 @@ pub fn chunk_text(content: &str) -> Vec<Chunk> {
     // Postcondition: chunk indices are sequential.
     debug_assert!(chunks.iter().enumerate().all(|(i, c)| c.chunk_index == i));
     // Postcondition: all chunks have content above minimum size.
-    debug_assert!(chunks.iter().all(|c| c.content.len() >= MIN_CHUNK_SIZE));
+    debug_assert!(chunks.iter().all(|c| c.content.len() >= CHUNK_SIZE_MIN));
 
     chunks
 }
@@ -107,7 +107,7 @@ mod tests {
 
     #[test]
     fn short_string_below_min_size_returns_no_chunks() {
-        // Below MIN_CHUNK_SIZE (50)
+        // Below CHUNK_SIZE_MIN (50)
         assert!(chunk_text("too short").is_empty());
     }
 
@@ -164,7 +164,7 @@ mod tests {
         assert!(!chunks.is_empty());
         // Verify all chunks are valid UTF-8 (implicit — String guarantees this)
         for chunk in &chunks {
-            assert!(chunk.content.len() >= MIN_CHUNK_SIZE);
+            assert!(chunk.content.len() >= CHUNK_SIZE_MIN);
         }
     }
 
