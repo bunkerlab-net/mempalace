@@ -79,7 +79,10 @@ pub fn extract_memories(text: &str, min_confidence: f64) -> Vec<Memory> {
 }
 
 /// Score a single segment against all marker types, returning the winning type
-/// and confidence. Returns `None` if no markers match or the segment has no prose.
+/// and confidence. Returns `None` only when no marker patterns match.
+///
+/// `extract_prose` strips code blocks from the segment but always falls back to
+/// the full text when nothing remains, so an empty-prose result never causes `None`.
 fn extract_memories_score_segment(
     para: &str,
     all_markers: &[(&str, &[Regex])],

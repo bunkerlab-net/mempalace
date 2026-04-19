@@ -247,7 +247,7 @@ fn sanitize_label(value: &str) -> Result<String, Value> {
             json!({"success": false, "error": "label must be a non-empty string", "public": true}),
         );
     }
-    if trimmed.len() > LABEL_LEN_MAX {
+    if trimmed.chars().count() > LABEL_LEN_MAX {
         return Err(
             json!({"success": false, "error": format!("label exceeds maximum length of {LABEL_LEN_MAX} characters"), "public": true}),
         );
@@ -263,7 +263,7 @@ fn sanitize_label(value: &str) -> Result<String, Value> {
     debug_assert!(!result.is_empty());
     debug_assert!(result == result.trim());
     debug_assert!(!result.contains('\0'));
-    debug_assert!(result.len() <= LABEL_LEN_MAX);
+    debug_assert!(result.chars().count() <= LABEL_LEN_MAX);
 
     Ok(result)
 }
@@ -1006,19 +1006,6 @@ async fn tool_update_drawer(connection: &Connection, args: &Value) -> Value {
     // Recompute the deterministic ID to keep it consistent with tool_add_drawer.
     // wing/room/content are all baked into the ID, so any change means a new ID.
     let id_new = tool_update_drawer_recompute_id(final_wing, final_room, final_content);
-    wal_log(
-        "update_drawer",
-        json!({
-            "drawer_id": parsed.drawer_id,
-            "new_drawer_id": id_new,
-            "old_wing": wing_old,
-            "old_room": room_old,
-            "new_wing": final_wing,
-            "new_room": final_room,
-            "content_changed": parsed.content_new.is_some(),
-        }),
-    )
-    .await;
 
     // If the recomputed ID already exists (and differs), the new wing+room+content
     // is a duplicate of another drawer — reject to prevent silent duplication.
@@ -1040,6 +1027,23 @@ async fn tool_update_drawer(connection: &Connection, args: &Value) -> Value {
     {
         return error;
     }
+
+    // WAL entry is written only after both validation and the transaction commit
+    // succeed — a bogus log entry would be written if wal_log ran before either check.
+    wal_log(
+        "update_drawer",
+        json!({
+            "drawer_id": parsed.drawer_id,
+            "new_drawer_id": id_new,
+            "old_wing": wing_old,
+            "old_room": room_old,
+            "new_wing": final_wing,
+            "new_room": final_room,
+            "content_changed": parsed.content_new.is_some(),
+        }),
+    )
+    .await;
+
     json!({
         "success": true,
         "drawer_id": id_new,

@@ -61,7 +61,14 @@ pub fn detect_entities(file_paths: &[&Path], files_max: usize) -> DetectionResul
         }
         if let Ok(content) = fs::read_to_string(path) {
             let truncated = if content.len() > bytes_per_file_max {
-                &content[..bytes_per_file_max]
+                // Walk backward from the byte limit to find a valid UTF-8 char
+                // boundary.  Slicing at a raw byte offset can land mid-codepoint
+                // for multi-byte characters (emoji, CJK, accented letters) and panic.
+                let mut end = bytes_per_file_max;
+                while end > 0 && !content.is_char_boundary(end) {
+                    end -= 1;
+                }
+                &content[..end]
             } else {
                 &content
             };
@@ -71,6 +78,15 @@ pub fn detect_entities(file_paths: &[&Path], files_max: usize) -> DetectionResul
         }
     }
 
+    // Guard against the case where no files were readable: extract_candidates
+    // has an assert!(!text.is_empty()) that would panic on empty input.
+    if all_text.is_empty() {
+        return DetectionResult {
+            people: vec![],
+            projects: vec![],
+            uncertain: vec![],
+        };
+    }
     let candidates = extract_candidates(&all_text);
     if candidates.is_empty() {
         return DetectionResult {
