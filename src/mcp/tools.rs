@@ -82,7 +82,7 @@ fn int_arg(args: &Value, key: &str, default: i64) -> i64 {
     args.get(key)
         .and_then(|v| {
             v.as_i64()
-                .and_then(|n| if n > 0 { Some(n) } else { None })
+                .filter(|&n| n > 0)
                 .or_else(|| {
                     v.as_f64().and_then(|f| {
                         if f.is_finite() && f > 0.0 && f <= MAX_EXACT_INT_F64 && f.fract() == 0.0 {
@@ -96,24 +96,21 @@ fn int_arg(args: &Value, key: &str, default: i64) -> i64 {
                 })
                 .or_else(|| {
                     v.as_str().and_then(|s| {
-                        s.parse::<i64>()
-                            .ok()
-                            .and_then(|n| if n > 0 { Some(n) } else { None })
-                            .or_else(|| {
-                                s.parse::<f64>().ok().and_then(|f| {
-                                    if f.is_finite()
-                                        && f > 0.0
-                                        && f <= MAX_EXACT_INT_F64
-                                        && f.fract() == 0.0
-                                    {
-                                        // Safe: MAX_EXACT_INT_F64 (2^53-1) < i64::MAX, so the value fits exactly
-                                        #[allow(clippy::cast_possible_truncation)]
-                                        Some(f as i64)
-                                    } else {
-                                        None
-                                    }
-                                })
+                        s.parse::<i64>().ok().filter(|&n| n > 0).or_else(|| {
+                            s.parse::<f64>().ok().and_then(|f| {
+                                if f.is_finite()
+                                    && f > 0.0
+                                    && f <= MAX_EXACT_INT_F64
+                                    && f.fract() == 0.0
+                                {
+                                    // Safe: MAX_EXACT_INT_F64 (2^53-1) < i64::MAX, so the value fits exactly
+                                    #[allow(clippy::cast_possible_truncation)]
+                                    Some(f as i64)
+                                } else {
+                                    None
+                                }
                             })
+                        })
                     })
                 })
         })
@@ -2762,6 +2759,74 @@ mod tests {
     fn sanitize_kg_value_rejects_empty_and_whitespace_only() {
         assert!(sanitize_kg_value("", "entity").is_err());
         assert!(sanitize_kg_value("   ", "entity").is_err());
+    }
+
+    // --- int_arg ---
+
+    #[test]
+    fn int_arg_missing_key_returns_default() {
+        // Missing key: every code path falls through to the default.
+        assert_eq!(int_arg(&json!({}), "limit", 5), 5);
+        assert_eq!(int_arg(&json!({}), "limit", 0), 0);
+    }
+
+    #[test]
+    fn int_arg_integer_positive_returns_value() {
+        // Direct i64 path: positive integer must be returned as-is.
+        assert_eq!(int_arg(&json!({"limit": 10}), "limit", 5), 10);
+        // Negative space: an unrelated key must still return the default.
+        assert_eq!(int_arg(&json!({"limit": 10}), "offset", 5), 5);
+    }
+
+    #[test]
+    fn int_arg_integer_non_positive_returns_default() {
+        // Zero and negative integers are rejected; only >0 is accepted.
+        assert_eq!(int_arg(&json!({"n": 0}), "n", 7), 7);
+        assert_eq!(int_arg(&json!({"n": -1}), "n", 7), 7);
+    }
+
+    #[test]
+    fn int_arg_float_whole_positive_returns_value() {
+        // MCP transports sometimes deliver integers as floats (e.g. 5.0).
+        assert_eq!(int_arg(&json!({"limit": 5.0}), "limit", 1), 5);
+        assert_eq!(int_arg(&json!({"limit": 100.0}), "limit", 1), 100);
+    }
+
+    #[test]
+    fn int_arg_float_invalid_returns_default() {
+        // Fractional, non-positive, and zero floats must fall through to the default.
+        assert_eq!(int_arg(&json!({"n": 5.5}), "n", 1), 1);
+        assert_eq!(int_arg(&json!({"n": -1.0}), "n", 1), 1);
+        assert_eq!(int_arg(&json!({"n": 0.0}), "n", 1), 1);
+    }
+
+    #[test]
+    fn int_arg_string_integer_positive_returns_value() {
+        // MCP transports sometimes deliver integers as strings (e.g. "10").
+        assert_eq!(int_arg(&json!({"limit": "10"}), "limit", 1), 10);
+        assert_eq!(int_arg(&json!({"limit": "1"}), "limit", 99), 1);
+    }
+
+    #[test]
+    fn int_arg_string_integer_non_positive_returns_default() {
+        // Zero and negative integer strings are rejected.
+        assert_eq!(int_arg(&json!({"n": "0"}), "n", 7), 7);
+        assert_eq!(int_arg(&json!({"n": "-3"}), "n", 7), 7);
+    }
+
+    #[test]
+    fn int_arg_string_float_whole_positive_returns_value() {
+        // Whole positive floats encoded as strings are also accepted.
+        assert_eq!(int_arg(&json!({"limit": "5.0"}), "limit", 1), 5);
+        assert_eq!(int_arg(&json!({"limit": "20.0"}), "limit", 1), 20);
+    }
+
+    #[test]
+    fn int_arg_string_invalid_returns_default() {
+        // Non-numeric, fractional, and non-positive string values return the default.
+        assert_eq!(int_arg(&json!({"n": "abc"}), "n", 7), 7);
+        assert_eq!(int_arg(&json!({"n": "1.5"}), "n", 7), 7);
+        assert_eq!(int_arg(&json!({"n": "-2.0"}), "n", 7), 7);
     }
 
     // --- get_aaak_spec (via dispatch) ---
