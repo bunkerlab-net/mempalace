@@ -165,7 +165,7 @@ mod tests {
         let config_path = dir.path().join("dialect.json");
         std::fs::write(
             &config_path,
-            r#"{"entities": {"Rust": "RS", "Python": "PY"}, "skip_names": ["test"]}"#,
+            r#"{"entities": {"Rust": "RS", "Python": "PY"}}"#,
         )
         .expect("must write config file");
 

@@ -326,9 +326,14 @@ fn score_entity_person_pronoun_score(name: &str, lines: &[String]) -> i32 {
     assert!(!name.is_empty(), "name must not be empty");
 
     let name_lower = name.to_lowercase();
+    // Build a word-boundary regex so "al" does not match inside "palantir".
+    // Compile once outside the loop; fall back to no matches if the name yields
+    // an invalid pattern (cannot happen with regex::escape, but handle gracefully).
+    let escaped = regex::escape(&name_lower);
+    let name_re = Regex::new(&format!(r"(?i)\b{escaped}\b")).ok();
     let mut pronoun_hits = 0i32;
     for (i, line) in lines.iter().enumerate() {
-        if line.to_lowercase().contains(&name_lower) {
+        if name_re.as_ref().is_some_and(|re| re.is_match(line)) {
             let start = i.saturating_sub(2);
             let end = (i + 3).min(lines.len());
             let window: String = lines[start..end].join(" ");

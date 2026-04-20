@@ -145,7 +145,10 @@ async fn run_read_line_impl<R: AsyncBufRead + Unpin>(
     let mut read_iterations: usize = 0;
     loop {
         read_iterations += 1;
-        assert!(
+        // debug_assert: iteration count is a proxy for bytes read; a 1-byte-per-chunk
+        // client could legitimately reach REQUEST_BYTES_MAX+1 iterations without being
+        // a logic error, so this fires only in debug builds as a sanity ceiling.
+        debug_assert!(
             read_iterations <= REQUEST_BYTES_MAX,
             "run_read_line_impl: exceeded REQUEST_BYTES_MAX ({REQUEST_BYTES_MAX}) read iterations"
         );
@@ -209,7 +212,9 @@ async fn run_read_line_drain<R: AsyncBufRead + Unpin>(reader: &mut R) -> std::io
     let mut drain_iterations: usize = 0;
     loop {
         drain_iterations += 1;
-        assert!(
+        // debug_assert: same reasoning as run_read_line_impl — iteration count is not
+        // a byte count; a slow client could legitimately exceed this in production.
+        debug_assert!(
             drain_iterations <= REQUEST_BYTES_MAX,
             "run_read_line_drain: exceeded REQUEST_BYTES_MAX ({REQUEST_BYTES_MAX}) drain iterations"
         );
@@ -399,8 +404,9 @@ fn handle_request_tools_call_respond(tool_name: &str, result: Value, req_id: &Va
             .and_then(Value::as_bool)
             .unwrap_or(false);
         // Extract the full error string before deciding what to expose.
-        // Truncate only for logging so we don't shorten public error messages.
-        let full_error = error_val.as_str().unwrap_or("unknown");
+        // Owned String so the borrow on `result` via `error_val` ends here,
+        // allowing `result` to be moved in the is_public arm below.
+        let full_error: String = error_val.as_str().unwrap_or("unknown").to_owned();
         let truncated: String = full_error.chars().take(100).collect();
         // Sanitize log fields: replace control characters so a hostile client
         // cannot inject newlines or terminal escape sequences into stderr.
@@ -414,7 +420,9 @@ fn handle_request_tools_call_respond(tool_name: &str, result: Value, req_id: &Va
             .collect();
         eprintln!("tool error: tool={tool_name_safe} error={error_safe}");
         if is_public {
-            json!({"error": full_error})
+            // Return the full result so sibling fields (e.g. "existing_drawer_id")
+            // are preserved alongside the "error" key.
+            result
         } else {
             json!({"error": "Internal tool error"})
         }

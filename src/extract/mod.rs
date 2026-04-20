@@ -114,7 +114,9 @@ fn extract_memories_score_segment(
     };
 
     // f64 scores come from integer match counts (count as f64); partial_cmp
-    // only returns None for NaN, which cannot arise here.
+    // only returns None for NaN, which cannot arise here. The `?` is
+    // unreachable in practice because scores.is_empty() already returns None
+    // above, but clippy::question_mark requires the idiomatic form.
     let &(type_max, score_max) = scores
         .iter()
         .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))?;
