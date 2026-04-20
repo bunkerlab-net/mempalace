@@ -18,6 +18,7 @@ static SINGLE_RE: LazyLock<Regex> = LazyLock::new(|| {
     )
 });
 
+// Regex pattern is a compile-time literal and cannot fail to compile at runtime.
 #[allow(clippy::expect_used)]
 // Matches two or more consecutive capitalized words (multi-word entity names).
 static MULTI_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -26,6 +27,7 @@ static MULTI_RE: LazyLock<Regex> = LazyLock::new(|| {
     )
 });
 
+// Regex pattern is a compile-time literal and cannot fail to compile at runtime.
 #[allow(clippy::expect_used)]
 // Matches gendered and plural pronouns to score person-like proximity.
 static PRONOUN_RE: LazyLock<Regex> = LazyLock::new(|| {

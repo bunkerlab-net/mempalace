@@ -113,7 +113,8 @@ async fn run_write_response(
     stdout: &mut tokio::io::Stdout,
     response: &Value,
 ) -> std::io::Result<()> {
-    let serialized_response = serde_json::to_string(response).unwrap_or_default();
+    let serialized_response = serde_json::to_string(response)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
     stdout.write_all(serialized_response.as_bytes()).await?;
     stdout.write_all(b"\n").await?;
     stdout.flush().await

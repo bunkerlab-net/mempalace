@@ -857,16 +857,33 @@ fn tool_update_drawer_validate_args(args: &Value) -> Result<UpdateDrawerArgs, Va
             json!({"success": false, "error": "drawer_id has invalid format", "public": true}),
         );
     }
-    let content_new = {
-        let content_raw = str_arg(args, "content");
-        if content_raw.is_empty() {
-            None
-        } else {
-            Some(sanitize_content(content_raw)?)
+    let content_new = match args.get("content") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(content_raw)) => Some(sanitize_content(content_raw)?),
+        Some(_) => {
+            return Err(
+                json!({"success": false, "error": "content must be a string", "public": true}),
+            );
         }
     };
-    let wing_new = sanitize_opt_name(str_arg(args, "wing"), "wing")?;
-    let room_new = sanitize_opt_name(str_arg(args, "room"), "room")?;
+    let wing_new = match args.get("wing") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(wing_raw)) => sanitize_opt_name(wing_raw, "wing")?,
+        Some(_) => {
+            return Err(
+                json!({"success": false, "error": "wing must be a string", "public": true}),
+            );
+        }
+    };
+    let room_new = match args.get("room") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(room_raw)) => sanitize_opt_name(room_raw, "room")?,
+        Some(_) => {
+            return Err(
+                json!({"success": false, "error": "room must be a string", "public": true}),
+            );
+        }
+    };
     // No-op: nothing to change.  Return as Err so the caller can return early.
     if content_new.is_none() && wing_new.is_none() && room_new.is_none() {
         return Err(json!({"success": true, "drawer_id": drawer_id, "noop": true}));
@@ -2166,6 +2183,66 @@ mod tests {
             let result = tool_update_drawer(&connection, &json!({"drawer_id": drawer_id})).await;
             assert_eq!(result["success"], true);
             assert_eq!(result["noop"], true);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn update_drawer_wrong_type_fields_return_error() {
+        with_isolated_env(|connection| async move {
+            let seeded = seed_drawer(&connection, "proj", "code", "typed field test").await;
+            let drawer_id = seeded["drawer_id"]
+                .as_str()
+                .expect("drawer_id must be string");
+
+            // Non-string content must be rejected, not silently treated as absent.
+            let result_content = tool_update_drawer(
+                &connection,
+                &json!({"drawer_id": drawer_id, "content": 123}),
+            )
+            .await;
+            assert_eq!(
+                result_content["success"], false,
+                "integer content must be rejected"
+            );
+            assert!(
+                result_content["error"]
+                    .as_str()
+                    .expect("error must be a string")
+                    .contains("content"),
+                "error must mention the offending field"
+            );
+
+            // Non-string wing must be rejected.
+            let result_wing =
+                tool_update_drawer(&connection, &json!({"drawer_id": drawer_id, "wing": 42})).await;
+            assert_eq!(
+                result_wing["success"], false,
+                "integer wing must be rejected"
+            );
+            assert!(
+                result_wing["error"]
+                    .as_str()
+                    .expect("error must be a string")
+                    .contains("wing"),
+                "error must mention the offending field"
+            );
+
+            // Non-string room must be rejected.
+            let result_room =
+                tool_update_drawer(&connection, &json!({"drawer_id": drawer_id, "room": true}))
+                    .await;
+            assert_eq!(
+                result_room["success"], false,
+                "boolean room must be rejected"
+            );
+            assert!(
+                result_room["error"]
+                    .as_str()
+                    .expect("error must be a string")
+                    .contains("room"),
+                "error must mention the offending field"
+            );
         })
         .await;
     }
