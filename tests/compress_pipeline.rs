@@ -41,7 +41,7 @@ fn dialect_with_entities_replaces_names() {
     let mut entities = HashMap::new();
     entities.insert("Alice".to_string(), "ALC".to_string());
     entities.insert("Bob".to_string(), "BOB".to_string());
-    let dialect = Dialect::new(&entities, vec![]);
+    let dialect = Dialect::new(&entities);
 
     let text = "Alice and Bob discussed the new database migration strategy \
         for the quarterly planning review session yesterday afternoon.";

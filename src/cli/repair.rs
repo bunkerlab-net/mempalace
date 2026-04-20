@@ -10,14 +10,20 @@ use crate::palace::drawer;
 
 /// Backup the palace database and rebuild the inverted word index.
 pub async fn run(connection: &Connection, palace_path: &Path) -> Result<()> {
-    // Backup: checkpoint WAL to ensure backup is self-contained.
+    run_create_backup(connection, palace_path).await?;
+    run_rebuild_index(connection).await
+}
+
+/// Checkpoint the WAL and copy the palace database (plus sidecar files) to `.db.bak`.
+async fn run_create_backup(connection: &Connection, palace_path: &Path) -> Result<()> {
+    // Checkpoint WAL to ensure backup is self-contained.
     // wal_checkpoint returns rows (busy, log, checkpointed) — must use query_all.
     query_all(connection, "PRAGMA wal_checkpoint(TRUNCATE)", ()).await?;
 
     let backup_path = palace_path.with_extension("db.bak");
     std::fs::copy(palace_path, &backup_path)?;
 
-    // Build backup sidecar names from backup_path to avoid overwriting source files
+    // Build backup sidecar names from backup_path to avoid overwriting source files.
     let backup_filename = backup_path
         .file_name()
         .and_then(|n| n.to_str())
@@ -38,10 +44,14 @@ pub async fn run(connection: &Connection, palace_path: &Path) -> Result<()> {
     }
 
     println!("Backup created: {}", backup_path.display());
+    Ok(())
+}
 
-    // Clear and rebuild within a transaction for atomicity.
-    // BEGIN IMMEDIATE is taken before the SELECT so the snapshot is protected
-    // by the same exclusive lock that performs the delete and rebuild.
+/// Clear and rebuild the inverted word index within a transaction.
+///
+/// BEGIN IMMEDIATE is taken before the SELECT so the snapshot is protected
+/// by the same exclusive lock that performs the delete and rebuild.
+async fn run_rebuild_index(connection: &Connection) -> Result<()> {
     connection.execute("BEGIN IMMEDIATE", ()).await?;
 
     if let Err(e) = async {
@@ -63,7 +73,7 @@ pub async fn run(connection: &Connection, palace_path: &Path) -> Result<()> {
         connection.execute("DELETE FROM drawer_words", ()).await?;
         println!("Cleared existing index");
 
-        // Rebuild
+        // Rebuild.
         for (i, (id, content)) in drawers.iter().enumerate() {
             drawer::index_words(connection, id, content).await?;
             if (i + 1) % 100 == 0 || i + 1 == total {
@@ -75,7 +85,7 @@ pub async fn run(connection: &Connection, palace_path: &Path) -> Result<()> {
     }
     .await
     {
-        // Attempt rollback and preserve the original error
+        // Attempt rollback and preserve the original error.
         if let Err(rollback_err) = connection.execute("ROLLBACK", ()).await {
             eprintln!("Rollback failed: {rollback_err}");
         }
@@ -83,7 +93,6 @@ pub async fn run(connection: &Connection, palace_path: &Path) -> Result<()> {
     }
 
     connection.execute("COMMIT", ()).await?;
-
     Ok(())
 }
 

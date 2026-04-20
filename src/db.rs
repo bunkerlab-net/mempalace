@@ -2,6 +2,10 @@
 
 use std::time::Duration;
 
+/// Generous upper bound on rows drained from a query result; prevents unbounded
+/// iteration when no explicit SQL LIMIT is present (e.g. PRAGMA responses).
+const ROWS_MAX: usize = 100_000;
+
 use turso::{Builder, Connection, Database};
 
 use crate::error::Result;
@@ -17,11 +21,11 @@ use crate::error::Result;
 pub async fn open_db(path: &str) -> Result<(Database, Connection)> {
     assert!(!path.is_empty(), "database path must not be empty");
 
-    let db = Builder::new_local(path)
+    let database = Builder::new_local(path)
         .experimental_triggers(true)
         .build()
         .await?;
-    let connection = db.connect()?;
+    let connection = database.connect()?;
 
     // Only enable WAL for file-backed databases; in-memory DBs do not support it.
     let is_in_memory = path == ":memory:"
@@ -30,7 +34,14 @@ pub async fn open_db(path: &str) -> Result<(Database, Connection)> {
     if !is_in_memory {
         let mut wal_rows = connection.query("PRAGMA journal_mode=WAL", ()).await?;
         // Upper bound: PRAGMA journal_mode returns exactly one row; drain it.
-        while wal_rows.next().await?.is_some() {}
+        let mut wal_row_count: usize = 0;
+        while wal_rows.next().await?.is_some() {
+            wal_row_count += 1;
+            assert!(
+                wal_row_count <= ROWS_MAX,
+                "open_db: exceeded ROWS_MAX ({ROWS_MAX}) rows draining WAL pragma result"
+            );
+        }
     }
 
     // Allow waiting up to 5 seconds for write locks when another process is
@@ -44,7 +55,7 @@ pub async fn open_db(path: &str) -> Result<(Database, Connection)> {
         "connection must be usable after open"
     );
 
-    Ok((db, connection))
+    Ok((database, connection))
 }
 
 /// Collect all rows from a query into a Vec.
@@ -57,7 +68,13 @@ pub async fn query_all(
 
     let mut rows = connection.query(sql, params).await?;
     let mut results = Vec::new();
+    let mut row_count: usize = 0;
     while let Some(row) = rows.next().await? {
+        row_count += 1;
+        assert!(
+            row_count <= ROWS_MAX,
+            "query_all: exceeded ROWS_MAX ({ROWS_MAX}) rows — add a SQL LIMIT to the calling query"
+        );
         results.push(row);
     }
     Ok(results)
@@ -77,34 +94,39 @@ mod tests {
             .to_str()
             .expect("tempdir path should be valid UTF-8");
 
-        let (_db, conn) = open_db(path_str)
+        let (_database, connection) = open_db(path_str)
             .await
             .expect("open_db should succeed for a fresh file path");
 
         // Verify the connection is usable by running a trivial query.
-        let rows = query_all(&conn, "SELECT 42 AS answer", ())
+        let rows = query_all(&connection, "SELECT 42 AS answer", ())
             .await
             .expect("trivial SELECT should succeed on newly opened connection");
         assert_eq!(rows.len(), 1, "SELECT 42 should return exactly 1 row");
-        let val: i64 = rows[0].get(0).expect("column 0 should be readable as i64");
-        assert_eq!(val, 42);
+        let answer: i64 = rows[0].get(0).expect("column 0 should be readable as i64");
+        assert_eq!(answer, 42);
     }
 
     #[tokio::test]
     async fn query_all_returns_rows() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
+        let (_database, connection) = crate::test_helpers::test_db().await;
 
         // Insert a row into the drawers table (schema is already applied).
-        conn.execute(
-            "INSERT INTO drawers (id, wing, room, content) VALUES ('d1', 'w', 'r', 'hello')",
+        connection
+            .execute(
+                "INSERT INTO drawers (id, wing, room, content) VALUES ('d1', 'w', 'r', 'hello')",
+                (),
+            )
+            .await
+            .expect("INSERT into drawers should succeed");
+
+        let rows = query_all(
+            &connection,
+            "SELECT id, content FROM drawers WHERE id = 'd1'",
             (),
         )
         .await
-        .expect("INSERT into drawers should succeed");
-
-        let rows = query_all(&conn, "SELECT id, content FROM drawers WHERE id = 'd1'", ())
-            .await
-            .expect("SELECT from drawers should succeed after insert");
+        .expect("SELECT from drawers should succeed after insert");
         assert_eq!(rows.len(), 1, "should find exactly the inserted row");
         let id: String = rows[0]
             .get(0)
@@ -114,10 +136,10 @@ mod tests {
 
     #[tokio::test]
     async fn query_all_empty_result() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
+        let (_database, connection) = crate::test_helpers::test_db().await;
 
         let rows = query_all(
-            &conn,
+            &connection,
             "SELECT id FROM drawers WHERE wing = 'nonexistent'",
             (),
         )

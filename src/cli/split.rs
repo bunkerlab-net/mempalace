@@ -6,20 +6,18 @@ use regex::Regex;
 
 use crate::error::Result;
 
-/// Collect `.txt` file paths from the top level of `directory`.
+/// Scan `directory` for `.txt` files, honouring or ignoring `.gitignore` rules.
 ///
-/// When `respect_gitignore` is `true`, files excluded by `.gitignore` rules are
-/// omitted (same engine as `mine --no-gitignore`). Depth is fixed at 1 to match
-/// the original `fs::read_dir` behaviour — sub-directories are never traversed.
-fn split_collect_txt_files(directory: &Path, respect_gitignore: bool) -> Result<Vec<PathBuf>> {
-    // Operating condition: filesystem state can change between the caller's
-    // is_dir() check and this call (TOCTOU) — return Err rather than panic.
-    if !directory.is_dir() {
-        return Err(crate::error::Error::Other(format!(
-            "split_collect_txt_files: '{}' is not an existing directory",
-            directory.display()
-        )));
-    }
+/// Depth is fixed at 1 — sub-directories are never traversed — matching the
+/// original `fs::read_dir` behaviour.
+fn split_collect_txt_files_from_dir(
+    directory: &Path,
+    respect_gitignore: bool,
+) -> Result<Vec<PathBuf>> {
+    assert!(
+        directory.is_dir(),
+        "split_collect_txt_files_from_dir: caller must pass a valid dir"
+    );
 
     let mut paths: Vec<PathBuf> = Vec::new();
 
@@ -58,6 +56,24 @@ fn split_collect_txt_files(directory: &Path, respect_gitignore: bool) -> Result<
     }
 
     Ok(paths)
+}
+
+/// Collect `.txt` file paths from the top level of `directory`.
+///
+/// When `respect_gitignore` is `true`, files excluded by `.gitignore` rules are
+/// omitted (same engine as `mine --no-gitignore`). Depth is fixed at 1 to match
+/// the original `fs::read_dir` behaviour — sub-directories are never traversed.
+fn split_collect_txt_files(directory: &Path, respect_gitignore: bool) -> Result<Vec<PathBuf>> {
+    // Operating condition: filesystem state can change between the caller's
+    // is_dir() check and this call (TOCTOU) — return Err rather than panic.
+    if !directory.is_dir() {
+        return Err(crate::error::Error::Other(format!(
+            "split_collect_txt_files: '{}' is not an existing directory",
+            directory.display()
+        )));
+    }
+
+    split_collect_txt_files_from_dir(directory, respect_gitignore)
 }
 
 // Regex statics are compile-time literals; .expect() cannot fail at runtime.
@@ -102,7 +118,7 @@ static MULTI_UNDERSCORE_RE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("multi-underscore regex is a compile-time literal and cannot fail to compile")
 });
 
-const MAX_SPLIT_FILE_SIZE: u64 = 500 * 1024 * 1024; // 500 MB safety limit
+const SPLIT_FILE_SIZE_MAX: u64 = 500 * 1024 * 1024; // 500 MB safety limit
 /// POSIX filename byte limit; used to compute the subject byte budget in `split_file`.
 const FILENAME_BYTE_LIMIT: usize = 255;
 
@@ -181,14 +197,120 @@ fn extract_subject(lines: &[&str]) -> String {
     "session".to_string()
 }
 
+/// Extract start and end timestamps from a session's lines.
+///
+/// Returns `Some((start_ts, end_ts))` where both are the same timestamp string
+/// when only one timestamp is found, or `None` when no timestamp is present.
+/// The caller uses the start timestamp as the filename component.
+fn split_file_extract_timestamps(lines: &[&str]) -> Option<(String, String)> {
+    let start = extract_timestamp(lines)?;
+    // End timestamp: scan from the tail; for now both are the same value because
+    // the filename only uses the start — kept as a pair for future extension.
+    let end = extract_timestamp(&lines.iter().rev().copied().collect::<Vec<_>>())
+        .unwrap_or_else(|| start.clone());
+    assert!(
+        !start.is_empty(),
+        "split_file_extract_timestamps: start timestamp must not be empty"
+    );
+    assert!(
+        !end.is_empty(),
+        "split_file_extract_timestamps: end timestamp must not be empty"
+    );
+    Some((start, end))
+}
+
+/// Truncate `subject` so its byte length does not exceed `byte_cap`.
+///
+/// Walks characters to avoid splitting a multi-byte UTF-8 sequence that
+/// byte-slicing would straddle.
+fn split_file_write_session_cap_subject(subject: String, byte_cap: usize) -> String {
+    assert!(
+        byte_cap > 0,
+        "split_file_write_session_cap_subject: byte_cap must be positive"
+    );
+    if subject.len() <= byte_cap {
+        return subject;
+    }
+    // Accumulate chars only while the byte budget allows.
+    let mut byte_count = 0usize;
+    let truncated: String = subject
+        .chars()
+        .take_while(|&character| {
+            byte_count += character.len_utf8();
+            byte_count <= byte_cap
+        })
+        .collect();
+    debug_assert!(
+        truncated.len() <= byte_cap,
+        "truncated byte length {len} exceeds cap {byte_cap}",
+        len = truncated.len()
+    );
+    truncated
+}
+
+/// Write one session chunk to disk and print a confirmation line.
+///
+/// Returns the path of the written file. `session_idx` is 1-based for display.
+fn split_file_write_session(
+    output_dir: &Path,
+    base_stem: &str,
+    session_idx: usize,
+    lines: &[&str],
+    dry_run: bool,
+    session_total: usize,
+) -> Result<PathBuf> {
+    assert!(
+        !base_stem.is_empty(),
+        "split_file_write_session: base_stem must not be empty"
+    );
+    assert!(
+        !lines.is_empty(),
+        "split_file_write_session: lines must not be empty"
+    );
+
+    let ts_part = split_file_extract_timestamps(lines)
+        .map_or_else(|| format!("part{session_idx:02}"), |(start, _end)| start);
+    let subject = extract_subject(lines);
+
+    // Truncate subject to keep the assembled filename within the POSIX byte limit.
+    // base_stem and ts_part are always ASCII after sanitization, so their byte
+    // lengths equal their char counts. Overhead: "__" (2) + "_" (1) + ".txt" (4).
+    let subject_byte_cap = FILENAME_BYTE_LIMIT
+        .saturating_sub(base_stem.len())
+        .saturating_sub(ts_part.len())
+        .saturating_sub(7);
+    assert!(
+        subject_byte_cap > 0,
+        "split_file_write_session: base_stem + ts_part overhead already exceeds filesystem limit"
+    );
+    let subject = split_file_write_session_cap_subject(subject, subject_byte_cap);
+
+    let name = format!("{base_stem}__{ts_part}_{subject}.txt");
+    let name = SANITIZE_RE.replace_all(&name, "_");
+    let name = MULTI_UNDERSCORE_RE.replace_all(&name, "_");
+    let out_path = output_dir.join(name.as_ref());
+
+    if dry_run {
+        println!(
+            "    [{session_idx}/{session_total}] {}  ({} lines)",
+            out_path.file_name().unwrap_or_default().to_string_lossy(),
+            lines.len()
+        );
+    } else {
+        fs::write(&out_path, lines.join("\n"))?;
+        println!(
+            "    + {}  ({} lines)",
+            out_path.file_name().unwrap_or_default().to_string_lossy(),
+            lines.len()
+        );
+    }
+
+    Ok(out_path)
+}
+
 /// Process a single mega-file: split it into per-session files and return the number written.
-// Sequential write loop with per-boundary state: file I/O, timestamp extraction, subject
-// extraction, dry-run branching, and backup rename — each step distinct but not extractable
-// without splitting across unrelated concerns.
-#[allow(clippy::too_many_lines)]
 fn split_file(path: &Path, output_dir: &Path, dry_run: bool) -> Result<usize> {
-    // These are operating conditions (filesystem state can change between scan and
-    // call), not programmer invariants — return Err rather than panic.
+    // Operating conditions (TOCTOU): return Err, not panic.
     if !path.is_file() {
         return Err(crate::error::Error::Other(format!(
             "split_file: '{}' is not an existing file",
@@ -201,7 +323,7 @@ fn split_file(path: &Path, output_dir: &Path, dry_run: bool) -> Result<usize> {
             output_dir.display()
         )));
     }
-    if fs::metadata(path).is_ok_and(|m| m.len() > MAX_SPLIT_FILE_SIZE) {
+    if fs::metadata(path).is_ok_and(|m| m.len() > SPLIT_FILE_SIZE_MAX) {
         println!("  SKIP: {} exceeds 500 MB limit", path.display());
         return Ok(0);
     }
@@ -225,15 +347,15 @@ fn split_file(path: &Path, output_dir: &Path, dry_run: bool) -> Result<usize> {
         .take(40)
         .collect::<String>();
     let src_stem = SANITIZE_RE.replace_all(&src_stem, "_");
+    let session_total = boundaries.len() - 1;
 
     println!(
-        "\n  {}  ({} sessions)",
+        "\n  {}  ({session_total} sessions)",
         path.file_name().unwrap_or_default().to_string_lossy(),
-        boundaries.len() - 1
     );
 
     let mut written = 0usize;
-    for i in 0..boundaries.len() - 1 {
+    for i in 0..session_total {
         let start = boundaries[i];
         let end = boundaries[i + 1];
         let chunk: Vec<&str> = lines[start..end].to_vec();
@@ -242,62 +364,7 @@ fn split_file(path: &Path, output_dir: &Path, dry_run: bool) -> Result<usize> {
             continue;
         }
 
-        let ts_part = extract_timestamp(&chunk).unwrap_or_else(|| format!("part{:02}", i + 1));
-        let subject = extract_subject(&chunk);
-
-        // Truncate subject to keep the assembled filename within the POSIX byte limit.
-        // src_stem and ts_part are always ASCII after sanitization, so their byte
-        // lengths equal their char counts. Overhead: "__" (2) + "_" (1) + ".txt" (4).
-        let subject_byte_cap = FILENAME_BYTE_LIMIT
-            .saturating_sub(src_stem.len())
-            .saturating_sub(ts_part.len())
-            .saturating_sub(7);
-        assert!(
-            subject_byte_cap > 0,
-            "split_file: src_stem + ts_part overhead already exceeds filesystem limit"
-        );
-        let subject: String = if subject.len() <= subject_byte_cap {
-            subject
-        } else {
-            // Accumulate chars only while the byte budget allows, preserving UTF-8
-            // boundaries that byte-slicing would straddle.
-            let mut byte_count = 0usize;
-            subject
-                .chars()
-                .take_while(|&character| {
-                    byte_count += character.len_utf8();
-                    byte_count <= subject_byte_cap
-                })
-                .collect()
-        };
-        debug_assert!(
-            subject.len() <= subject_byte_cap,
-            "subject byte length {len} exceeds cap {subject_byte_cap}",
-            len = subject.len()
-        );
-
-        let name = format!("{src_stem}__{ts_part}_{subject}.txt");
-        let name = SANITIZE_RE.replace_all(&name, "_");
-        let name = MULTI_UNDERSCORE_RE.replace_all(&name, "_");
-
-        let out_path = output_dir.join(name.as_ref());
-
-        if dry_run {
-            println!(
-                "    [{}/{}] {}  ({} lines)",
-                i + 1,
-                boundaries.len() - 1,
-                out_path.file_name().unwrap_or_default().to_string_lossy(),
-                chunk.len()
-            );
-        } else {
-            fs::write(&out_path, chunk.join("\n"))?;
-            println!(
-                "    + {}  ({} lines)",
-                out_path.file_name().unwrap_or_default().to_string_lossy(),
-                chunk.len()
-            );
-        }
+        split_file_write_session(output_dir, &src_stem, i + 1, &chunk, dry_run, session_total)?;
         written += 1;
     }
 
@@ -313,32 +380,29 @@ fn split_file(path: &Path, output_dir: &Path, dry_run: bool) -> Result<usize> {
     Ok(written)
 }
 
-/// Split mega-files in a directory into per-session files.
-// Scan loop, output-dir validation, per-file splitting, and dry-run summary
-// are each a distinct step with branching that cannot be cleanly extracted.
-#[allow(clippy::too_many_lines)]
-pub fn run(
+/// Collect all `.txt` mega-files from `directory` that meet `sessions_min`.
+///
+/// Returns a sorted vec of `(path, session_count)` pairs. Files exceeding the
+/// size limit are printed and skipped. The `respect_gitignore` flag is forwarded
+/// to `split_collect_txt_files`.
+fn run_collect_files(
     directory: &Path,
-    output_dir: Option<&Path>,
-    dry_run: bool,
-    min_sessions: usize,
+    sessions_min: usize,
     respect_gitignore: bool,
-) -> Result<()> {
-    if !directory.is_dir() {
-        return Err(crate::error::Error::Other(format!(
-            "split: '{}' is not an existing directory",
-            directory.display()
-        )));
-    }
-    if min_sessions < 2 {
-        return Err(crate::error::Error::Other(
-            "split: min_sessions must be at least 2".to_string(),
-        ));
-    }
+) -> Result<Vec<(PathBuf, usize)>> {
+    assert!(
+        directory.is_dir(),
+        "run_collect_files: caller must pass a valid directory"
+    );
+    assert!(
+        sessions_min >= 2,
+        "run_collect_files: sessions_min must be at least 2"
+    );
+
     let mut mega_files: Vec<(PathBuf, usize)> = Vec::new();
 
     for path in split_collect_txt_files(directory, respect_gitignore)? {
-        if fs::metadata(&path).is_ok_and(|m| m.len() > MAX_SPLIT_FILE_SIZE) {
+        if fs::metadata(&path).is_ok_and(|m| m.len() > SPLIT_FILE_SIZE_MAX) {
             println!("  SKIP: {} exceeds 500 MB limit", path.display());
             continue;
         }
@@ -347,10 +411,71 @@ pub fn run(
         })?;
         let lines: Vec<&str> = content.lines().collect();
         let boundaries = find_session_boundaries(&lines);
-        if boundaries.len() >= min_sessions {
+        if boundaries.len() >= sessions_min {
             mega_files.push((path, boundaries.len()));
         }
     }
+
+    mega_files.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(mega_files)
+}
+
+/// Resolve the output directory for one file and delegate to `split_file`.
+///
+/// When `output_dir` is `None`, falls back to the file's parent directory and
+/// validates it per-iteration — different files may have different parents.
+/// Returns the number of session files written (or zero for dry run count).
+fn run_process_file(
+    path: &Path,
+    output_dir: Option<&Path>,
+    directory: &Path,
+    dry_run: bool,
+) -> Result<usize> {
+    assert!(
+        path.is_file(),
+        "run_process_file: path must be an existing file"
+    );
+
+    // When output_dir was provided it is already validated by the caller; skip the
+    // redundant is_dir call. When falling back to the file's parent we must validate
+    // per-iteration because different files can have different parents.
+    let output_directory = if let Some(explicit_output_directory) = output_dir {
+        explicit_output_directory
+    } else {
+        let file_directory = path.parent().unwrap_or(directory);
+        if !file_directory.is_dir() {
+            return Err(crate::error::Error::Other(format!(
+                "split: output directory not found or not a directory: {}",
+                file_directory.display()
+            )));
+        }
+        file_directory
+    };
+
+    split_file(path, output_directory, dry_run)
+}
+
+/// Split mega-files in a directory into per-session files.
+pub fn run(
+    directory: &Path,
+    output_dir: Option<&Path>,
+    dry_run: bool,
+    sessions_min: usize,
+    respect_gitignore: bool,
+) -> Result<()> {
+    if !directory.is_dir() {
+        return Err(crate::error::Error::Other(format!(
+            "split: '{}' is not an existing directory",
+            directory.display()
+        )));
+    }
+    if sessions_min < 2 {
+        return Err(crate::error::Error::Other(
+            "split: sessions_min must be at least 2".to_string(),
+        ));
+    }
+
+    let mega_files = run_collect_files(directory, sessions_min, respect_gitignore)?;
 
     // Validate an explicit output directory up front. Without this, a caller that
     // provides --output-dir /nonexistent would silently receive Ok(()) when no
@@ -366,46 +491,28 @@ pub fn run(
 
     if mega_files.is_empty() {
         println!(
-            "No mega-files found in {} (min {min_sessions} sessions).",
+            "No mega-files found in {} (min {sessions_min} sessions).",
             directory.display()
         );
         return Ok(());
     }
 
-    mega_files.sort_by(|a, b| a.0.cmp(&b.0));
-
     println!("Found {} mega-files to split:", mega_files.len());
 
-    let mut total_written = 0usize;
-
+    let mut written_total = 0usize;
     for (path, _n_sessions) in &mega_files {
-        // When output_dir was provided it is already validated above; skip the
-        // redundant is_dir call.  When falling back to the file's parent we must
-        // validate per-iteration because different files can have different parents.
-        let output_directory = if let Some(explicit_output_directory) = output_dir {
-            explicit_output_directory
-        } else {
-            let file_directory = path.parent().unwrap_or(directory);
-            if !file_directory.is_dir() {
-                return Err(crate::error::Error::Other(format!(
-                    "split: output directory not found or not a directory: {}",
-                    file_directory.display()
-                )));
-            }
-            file_directory
-        };
-        total_written += split_file(path, output_directory, dry_run)?;
+        written_total += run_process_file(path, output_dir, directory, dry_run)?;
     }
 
     println!();
     if dry_run {
         println!(
-            "Dry run: would create {total_written} files from {} mega-files",
+            "Dry run: would create {written_total} files from {} mega-files",
             mega_files.len()
         );
     } else {
         println!(
-            "Done: created {total_written} files from {} mega-files",
+            "Done: created {written_total} files from {} mega-files",
             mega_files.len()
         );
     }
@@ -703,17 +810,17 @@ mod tests {
     // --- run ---
 
     #[test]
-    fn run_min_sessions_below_two_returns_error() {
-        // min_sessions=1 must be rejected immediately — callers must require at least two.
+    fn run_sessions_min_below_two_returns_error() {
+        // sessions_min=1 must be rejected immediately — callers must require at least two.
         let temp_directory = tempfile::tempdir()
-            .expect("failed to create temporary directory for min_sessions test");
+            .expect("failed to create temporary directory for sessions_min test");
         let result = run(temp_directory.path(), None, false, 1, false);
-        assert!(result.is_err(), "min_sessions < 2 must return Err");
+        assert!(result.is_err(), "sessions_min < 2 must return Err");
         assert!(
             result
                 .err()
-                .is_some_and(|error| error.to_string().contains("min_sessions")),
-            "error message must mention min_sessions"
+                .is_some_and(|error| error.to_string().contains("sessions_min")),
+            "error message must mention sessions_min"
         );
     }
 
@@ -738,10 +845,10 @@ mod tests {
 
     #[test]
     fn run_no_mega_files_returns_ok() {
-        // A directory with no .txt files meeting min_sessions must return Ok with no output.
+        // A directory with no .txt files meeting sessions_min must return Ok with no output.
         let temp_directory = tempfile::tempdir()
             .expect("failed to create temporary directory for no-mega-files test");
-        // One .txt file but only one session — does not meet min_sessions=2.
+        // One .txt file but only one session — does not meet sessions_min=2.
         fs::write(temp_directory.path().join("single.txt"), make_mega_file(1))
             .expect("failed to write single-session test file");
 
@@ -810,6 +917,141 @@ mod tests {
                 .err()
                 .is_some_and(|error| error.to_string().contains("output directory")),
             "error message must mention 'output directory'"
+        );
+    }
+
+    #[test]
+    fn split_collect_txt_files_non_dir_returns_error() {
+        // A non-directory path must return Err rather than panic.
+        let result =
+            split_collect_txt_files(std::path::Path::new("/nonexistent/path/to/no_dir"), false);
+        assert!(result.is_err(), "non-directory path must return Err");
+        assert!(
+            result
+                .err()
+                .is_some_and(|error| error.to_string().contains("not an existing directory")),
+            "error message must mention 'not an existing directory'"
+        );
+    }
+
+    #[test]
+    fn split_file_non_dir_output_dir_returns_error() {
+        // Passing a non-directory as output_dir must return Err.
+        let temp_directory =
+            tempfile::tempdir().expect("failed to create temporary directory for output-dir test");
+        let mega_file_path = temp_directory.path().join("mega.txt");
+        fs::write(&mega_file_path, make_mega_file(3))
+            .expect("failed to write three-session mega file");
+
+        let result = split_file(
+            &mega_file_path,
+            std::path::Path::new("/nonexistent/output"),
+            false,
+        );
+        assert!(
+            result.is_err(),
+            "non-directory output_dir must return Err from split_file"
+        );
+        assert!(
+            result
+                .err()
+                .is_some_and(|error| error.to_string().contains("not an existing directory")),
+            "error message must mention 'not an existing directory'"
+        );
+    }
+
+    #[test]
+    fn split_file_write_session_cap_subject_truncates_long_subject() {
+        // A subject longer than byte_cap must be truncated to fit within the cap.
+        let long_subject = "a".repeat(300);
+        let cap = 50usize;
+        let result = split_file_write_session_cap_subject(long_subject.clone(), cap);
+        assert!(
+            result.len() <= cap,
+            "truncated subject must not exceed byte cap (got {} bytes)",
+            result.len()
+        );
+        assert!(
+            !result.is_empty(),
+            "truncated subject must not be empty when input is non-empty"
+        );
+        assert!(
+            long_subject.starts_with(&result),
+            "truncated subject must be a prefix of the original"
+        );
+    }
+
+    #[test]
+    fn split_file_write_session_cap_subject_short_subject_unchanged() {
+        // A subject that fits within byte_cap must be returned unchanged.
+        let short = "hello_world".to_string();
+        let cap = 100usize;
+        let result = split_file_write_session_cap_subject(short.clone(), cap);
+        assert_eq!(
+            result, short,
+            "subject within cap must be returned unchanged"
+        );
+        assert!(result.len() <= cap, "result must not exceed cap");
+    }
+
+    #[test]
+    fn split_file_extract_timestamps_with_valid_timestamp() {
+        // Lines containing a valid timestamp must produce Some with non-empty strings.
+        let lines = &[
+            "╭──── Claude Code v1.0.0",
+            "⏺ 2:30 PM Monday, January 15, 2025",
+            "some content line here",
+        ];
+        let result = split_file_extract_timestamps(lines);
+        assert!(
+            result.is_some(),
+            "lines with a valid timestamp must produce Some"
+        );
+        let (start, end) = result.expect("timestamp must be parseable");
+        assert!(!start.is_empty(), "start timestamp must not be empty");
+        assert!(!end.is_empty(), "end timestamp must not be empty");
+        assert!(
+            start.contains("2025"),
+            "start timestamp must include the year 2025"
+        );
+    }
+
+    #[test]
+    fn run_non_dry_run_writes_and_renames_mega_file() {
+        // run with dry_run=false must write session files and rename the original.
+        let temp_directory =
+            tempfile::tempdir().expect("failed to create temporary directory for non-dry-run test");
+        let mega_file_path = temp_directory.path().join("mega.txt");
+        fs::write(&mega_file_path, make_mega_file(3))
+            .expect("failed to write three-session mega file for non-dry-run test");
+        let output_directory =
+            tempfile::tempdir().expect("failed to create output directory for non-dry-run test");
+
+        run(
+            temp_directory.path(),
+            Some(output_directory.path()),
+            false, // non-dry-run: must write files
+            2,
+            false,
+        )
+        .expect("non-dry-run with qualifying mega file must succeed");
+
+        // Original must be renamed to .mega_backup.
+        assert!(
+            !mega_file_path.exists(),
+            "original mega file must be renamed away after non-dry-run split"
+        );
+        assert!(
+            mega_file_path.with_extension("mega_backup").exists(),
+            "backup file must exist at .mega_backup extension"
+        );
+        // Output directory must contain session files.
+        let output_count = fs::read_dir(output_directory.path())
+            .expect("failed to read output directory after non-dry-run split")
+            .count();
+        assert!(
+            output_count >= 2,
+            "non-dry-run must write at least two session files (got {output_count})"
         );
     }
 

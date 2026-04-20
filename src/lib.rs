@@ -19,7 +19,6 @@ pub mod config;
 pub mod db;
 pub mod dialect;
 pub mod error;
-#[allow(dead_code)]
 pub mod extract;
 pub mod kg;
 pub mod mcp;

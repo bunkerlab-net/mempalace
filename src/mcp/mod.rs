@@ -22,7 +22,7 @@ const SUPPORTED_PROTOCOL_VERSIONS: &[&str] =
 /// Hard cap on a single newline-delimited request frame. A client-controlled
 /// line is buffered entirely before JSON parsing, so this bound prevents OOM
 /// before any validation runs. 1 MiB comfortably fits any real tool payload.
-const MAX_REQUEST_BYTES: usize = 1024 * 1024; // 1 MiB
+const REQUEST_BYTES_MAX: usize = 1024 * 1024; // 1 MiB
 
 /// Outcome of reading a single newline-delimited frame from the buffered reader.
 enum LineRead {
@@ -44,9 +44,9 @@ pub async fn run(connection: &Connection) -> Result<()> {
     // Reusable buffer for line reading — allocated once, cleared each iteration.
     let mut line_buffer: Vec<u8> = Vec::with_capacity(4096);
 
-    // Intentional server loop: runs until stdin closes (Eof signals EOF).
+    // Intentional: server loop runs until stdin closes.
     loop {
-        let line = match run_read_line(&mut reader, &mut line_buffer, MAX_REQUEST_BYTES).await {
+        let line = match run_read_line(&mut reader, &mut line_buffer, REQUEST_BYTES_MAX).await {
             Ok(LineRead::Eof) => break, // Client disconnected.
             Ok(LineRead::Overflow) => {
                 let err_response = json!({
@@ -54,10 +54,7 @@ pub async fn run(connection: &Connection) -> Result<()> {
                     "id": null,
                     "error": {"code": -32700, "message": "Request exceeds maximum frame size"}
                 });
-                let out = serde_json::to_string(&err_response).unwrap_or_default();
-                stdout.write_all(out.as_bytes()).await?;
-                stdout.write_all(b"\n").await?;
-                stdout.flush().await?;
+                run_write_response(&mut stdout, &err_response).await?;
                 continue;
             }
             Ok(LineRead::Invalid) => {
@@ -66,10 +63,7 @@ pub async fn run(connection: &Connection) -> Result<()> {
                     "id": null,
                     "error": {"code": -32700, "message": "Request contains invalid UTF-8"}
                 });
-                let out = serde_json::to_string(&err_response).unwrap_or_default();
-                stdout.write_all(out.as_bytes()).await?;
-                stdout.write_all(b"\n").await?;
-                stdout.flush().await?;
+                run_write_response(&mut stdout, &err_response).await?;
                 continue;
             }
             Err(e) => return Err(e.into()),
@@ -81,33 +75,49 @@ pub async fn run(connection: &Connection) -> Result<()> {
             continue;
         }
 
-        let request: Value = match serde_json::from_str(trimmed) {
-            Ok(v) => v,
-            Err(e) => {
-                let err_response = json!({
-                    "jsonrpc": "2.0",
-                    "id": null,
-                    "error": {"code": -32700, "message": format!("Parse error: {e}")}
-                });
-                let out = serde_json::to_string(&err_response).unwrap_or_default();
-                stdout.write_all(out.as_bytes()).await?;
-                stdout.write_all(b"\n").await?;
-                stdout.flush().await?;
+        let request = match run_parse_request(trimmed) {
+            Ok(parsed) => parsed,
+            Err(err_response) => {
+                run_write_response(&mut stdout, &err_response).await?;
                 continue;
             }
         };
 
         let response = handle_request(connection, &request).await;
 
-        if let Some(resp) = response {
-            let out = serde_json::to_string(&resp).unwrap_or_default();
-            stdout.write_all(out.as_bytes()).await?;
-            stdout.write_all(b"\n").await?;
-            stdout.flush().await?;
+        if let Some(response_body) = response {
+            run_write_response(&mut stdout, &response_body).await?;
         }
     }
 
     Ok(())
+}
+
+/// Parse a JSON-RPC request from a trimmed line of text.
+///
+/// Returns `Ok(Value)` on success, or `Err(Value)` containing a JSON-RPC
+/// parse-error response ready to send to the client.
+fn run_parse_request(trimmed: &str) -> std::result::Result<Value, Value> {
+    assert!(!trimmed.is_empty());
+    serde_json::from_str(trimmed).map_err(|e| {
+        json!({
+            "jsonrpc": "2.0",
+            "id": null,
+            "error": {"code": -32700, "message": format!("Parse error: {e}")}
+        })
+    })
+}
+
+/// Serialize `response` and write it as a newline-terminated frame to `stdout`.
+async fn run_write_response(
+    stdout: &mut tokio::io::Stdout,
+    response: &Value,
+) -> std::io::Result<()> {
+    let serialized_response = serde_json::to_string(response)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    stdout.write_all(serialized_response.as_bytes()).await?;
+    stdout.write_all(b"\n").await?;
+    stdout.flush().await
 }
 
 /// Read one newline-delimited line from stdin, enforcing a hard byte limit.
@@ -133,7 +143,16 @@ async fn run_read_line_impl<R: AsyncBufRead + Unpin>(
     assert!(limit > 0);
     buffer.clear();
 
+    let mut read_iterations: usize = 0;
     loop {
+        read_iterations += 1;
+        // debug_assert: iteration count is a proxy for bytes read; a 1-byte-per-chunk
+        // client could legitimately reach REQUEST_BYTES_MAX+1 iterations without being
+        // a logic error, so this fires only in debug builds as a sanity ceiling.
+        debug_assert!(
+            read_iterations <= REQUEST_BYTES_MAX,
+            "run_read_line_impl: exceeded REQUEST_BYTES_MAX ({REQUEST_BYTES_MAX}) read iterations"
+        );
         let available = reader.fill_buf().await?;
 
         // EOF: return accumulated buffer or signal end-of-stream.
@@ -191,7 +210,15 @@ async fn run_read_line_impl<R: AsyncBufRead + Unpin>(
 /// Drain bytes from the reader until the next newline or EOF.
 /// Called after detecting an overlong line to resync the stream.
 async fn run_read_line_drain<R: AsyncBufRead + Unpin>(reader: &mut R) -> std::io::Result<LineRead> {
+    let mut drain_iterations: usize = 0;
     loop {
+        drain_iterations += 1;
+        // debug_assert: same reasoning as run_read_line_impl — iteration count is not
+        // a byte count; a slow client could legitimately exceed this in production.
+        debug_assert!(
+            drain_iterations <= REQUEST_BYTES_MAX,
+            "run_read_line_drain: exceeded REQUEST_BYTES_MAX ({REQUEST_BYTES_MAX}) drain iterations"
+        );
         let available = reader.fill_buf().await?;
         if available.is_empty() {
             // EOF during drain — still report overflow so the error response is sent.
@@ -214,6 +241,9 @@ async fn run_read_line_drain<R: AsyncBufRead + Unpin>(reader: &mut R) -> std::io
     }
 }
 
+/// Validate request shape and dispatch to `handle_request_dispatch`.
+///
+/// Returns `None` for notifications (no response required per JSON-RPC 2.0).
 async fn handle_request(connection: &Connection, request: &Value) -> Option<Value> {
     // Malformed (non-object) requests get a JSON-RPC error rather than a panic;
     // the MCP server must stay alive for subsequent well-formed requests.
@@ -236,28 +266,21 @@ async fn handle_request(connection: &Connection, request: &Value) -> Option<Valu
     let params = request.get("params").cloned().unwrap_or(json!({}));
     let req_id = request.get("id").cloned().unwrap_or(Value::Null);
 
+    handle_request_dispatch(connection, method, &params, req_id).await
+}
+
+/// Dispatch a validated JSON-RPC method to the appropriate handler.
+///
+/// Called after `handle_request` has confirmed the request is a well-formed object
+/// with a string `method` field.
+async fn handle_request_dispatch(
+    connection: &Connection,
+    method: &str,
+    params: &Value,
+    req_id: Value,
+) -> Option<Value> {
     match method {
-        "initialize" => {
-            let client_version = params.get("protocolVersion").and_then(|v| v.as_str());
-            let negotiated = if let Some(cv) = client_version {
-                if SUPPORTED_PROTOCOL_VERSIONS.contains(&cv) {
-                    cv
-                } else {
-                    SUPPORTED_PROTOCOL_VERSIONS[0]
-                }
-            } else {
-                SUPPORTED_PROTOCOL_VERSIONS[0]
-            };
-            Some(json!({
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "result": {
-                    "protocolVersion": negotiated,
-                    "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "mempalace", "version": env!("CARGO_PKG_VERSION")},
-                }
-            }))
-        }
+        "initialize" => Some(handle_request_initialize(params, &req_id)),
 
         "ping" => Some(json!({
             "jsonrpc": "2.0",
@@ -276,7 +299,7 @@ async fn handle_request(connection: &Connection, request: &Value) -> Option<Valu
             }))
         }
 
-        "tools/call" => Some(handle_request_tools_call(connection, &params, req_id).await),
+        "tools/call" => Some(handle_request_tools_call(connection, params, req_id).await),
 
         _ => Some(json!({
             "jsonrpc": "2.0",
@@ -284,6 +307,31 @@ async fn handle_request(connection: &Connection, request: &Value) -> Option<Valu
             "error": {"code": -32601, "message": format!("Unknown method: {method}")}
         })),
     }
+}
+
+/// Handle the `initialize` method: negotiate protocol version and return server info.
+fn handle_request_initialize(params: &Value, req_id: &Value) -> Value {
+    let client_version = params
+        .get("protocolVersion")
+        .and_then(|proto_val| proto_val.as_str());
+    let negotiated = if let Some(cv) = client_version {
+        if SUPPORTED_PROTOCOL_VERSIONS.contains(&cv) {
+            cv
+        } else {
+            SUPPORTED_PROTOCOL_VERSIONS[0]
+        }
+    } else {
+        SUPPORTED_PROTOCOL_VERSIONS[0]
+    };
+    json!({
+        "jsonrpc": "2.0",
+        "id": req_id,
+        "result": {
+            "protocolVersion": negotiated,
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "mempalace", "version": env!("CARGO_PKG_VERSION")},
+        }
+    })
 }
 
 /// Dispatch a `tools/call` request and return a sanitized JSON-RPC response.
@@ -295,49 +343,71 @@ async fn handle_request_tools_call(
     // Validate params shape before dispatch — reject non-object params, a
     // missing or non-string name, and non-object arguments with Invalid Params
     // (-32602) rather than letting malformed input reach tools::dispatch.
+    let (tool_name, tool_args) = match handle_request_tools_call_validate(params, &req_id) {
+        Ok(validated) => validated,
+        Err(err_response) => return err_response,
+    };
+
+    let result = tools::dispatch(connection, tool_name, &tool_args).await;
+
+    handle_request_tools_call_respond(tool_name, result, &req_id)
+}
+
+/// Validate `tools/call` params and extract `(tool_name, tool_args)`.
+///
+/// Returns `Ok((name, args))` when the params are well-formed, or `Err(response)`
+/// with a ready-to-send JSON-RPC Invalid Params error when they are not.
+fn handle_request_tools_call_validate<'a>(
+    params: &'a Value,
+    req_id: &Value,
+) -> std::result::Result<(&'a str, Value), Value> {
     if !params.is_object() {
-        return json!({
+        return Err(json!({
             "jsonrpc": "2.0",
             "id": req_id,
             "error": {"code": -32602, "message": "Invalid params: expected object"}
-        });
+        }));
     }
     let Some(tool_name) = params
         .get("name")
         .and_then(|name_value| name_value.as_str())
     else {
-        return json!({
+        return Err(json!({
             "jsonrpc": "2.0",
             "id": req_id,
             "error": {"code": -32602, "message": "Invalid params: missing or non-string 'name'"}
-        });
+        }));
     };
     let arguments_value = params.get("arguments");
     if arguments_value.is_some_and(|arguments| !arguments.is_null() && !arguments.is_object()) {
-        return json!({
+        return Err(json!({
             "jsonrpc": "2.0",
             "id": req_id,
             "error": {"code": -32602, "message": "Invalid params: 'arguments' must be an object or null"}
-        });
+        }));
     }
     let tool_args = arguments_value
         .filter(|arguments| !arguments.is_null())
         .cloned()
         .unwrap_or(json!({}));
+    Ok((tool_name, tool_args))
+}
 
-    let result = tools::dispatch(connection, tool_name, &tool_args).await;
-
-    // Sanitize: only expose errors that tools explicitly mark as public.
-    // All other errors are masked so internal paths and database details
-    // are never leaked over the protocol.
+/// Build a sanitized JSON-RPC response from a raw tool dispatch result.
+///
+/// Sanitize: only expose errors that tools explicitly mark as public.
+/// All other errors are masked so internal paths and database details
+/// are never leaked over the protocol.
+fn handle_request_tools_call_respond(tool_name: &str, result: Value, req_id: &Value) -> Value {
     let sanitized = if let Some(error_val) = result.get("error") {
         let is_public = result
             .get("public")
             .and_then(Value::as_bool)
             .unwrap_or(false);
         // Extract the full error string before deciding what to expose.
-        // Truncate only for logging so we don't shorten public error messages.
-        let full_error = error_val.as_str().unwrap_or("unknown");
+        // Owned String so the borrow on `result` via `error_val` ends here,
+        // allowing `result` to be moved in the is_public arm below.
+        let full_error: String = error_val.as_str().unwrap_or("unknown").to_owned();
         let truncated: String = full_error.chars().take(100).collect();
         // Sanitize log fields: replace control characters so a hostile client
         // cannot inject newlines or terminal escape sequences into stderr.
@@ -351,7 +421,9 @@ async fn handle_request_tools_call(
             .collect();
         eprintln!("tool error: tool={tool_name_safe} error={error_safe}");
         if is_public {
-            json!({"error": full_error})
+            // Return the full result so sibling fields (e.g. "existing_drawer_id")
+            // are preserved alongside the "error" key.
+            result
         } else {
             json!({"error": "Internal tool error"})
         }
@@ -381,32 +453,32 @@ mod tests {
 
     #[tokio::test]
     async fn handle_request_initialize_supported_version() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        let req = json!({
+        let (_database, connection) = crate::test_helpers::test_db().await;
+        let request = json!({
             "method": "initialize",
             "params": {"protocolVersion": "2024-11-05"},
             "id": 1
         });
-        let resp = handle_request(&conn, &req)
+        let response = handle_request(&connection, &request)
             .await
             .expect("should return Some");
-        let result = &resp["result"];
+        let result = &response["result"];
         assert_eq!(result["protocolVersion"], "2024-11-05");
         assert_eq!(result["serverInfo"]["name"], "mempalace");
     }
 
     #[tokio::test]
     async fn handle_request_initialize_unsupported_falls_back() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        let req = json!({
+        let (_database, connection) = crate::test_helpers::test_db().await;
+        let request = json!({
             "method": "initialize",
             "params": {"protocolVersion": "9999-01-01"},
             "id": 1
         });
-        let resp = handle_request(&conn, &req)
+        let response = handle_request(&connection, &request)
             .await
             .expect("should return Some");
-        let result = &resp["result"];
+        let result = &response["result"];
         // Falls back to the latest supported version.
         assert_eq!(result["protocolVersion"], SUPPORTED_PROTOCOL_VERSIONS[0]);
         assert_eq!(result["serverInfo"]["name"], "mempalace");
@@ -414,16 +486,16 @@ mod tests {
 
     #[tokio::test]
     async fn handle_request_initialize_no_version() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        let req = json!({
+        let (_database, connection) = crate::test_helpers::test_db().await;
+        let request = json!({
             "method": "initialize",
             "params": {},
             "id": 1
         });
-        let resp = handle_request(&conn, &req)
+        let response = handle_request(&connection, &request)
             .await
             .expect("should return Some");
-        let result = &resp["result"];
+        let result = &response["result"];
         // Missing protocolVersion falls back to the latest supported version.
         assert_eq!(result["protocolVersion"], SUPPORTED_PROTOCOL_VERSIONS[0]);
         assert_eq!(result["serverInfo"]["name"], "mempalace");
@@ -431,35 +503,38 @@ mod tests {
 
     #[tokio::test]
     async fn handle_request_ping() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        let req = json!({"method": "ping", "id": 2});
-        let resp = handle_request(&conn, &req)
+        let (_database, connection) = crate::test_helpers::test_db().await;
+        let request = json!({"method": "ping", "id": 2});
+        let response = handle_request(&connection, &request)
             .await
             .expect("should return Some");
-        assert_eq!(resp["result"], json!({}));
-        assert_eq!(resp["id"], 2);
+        assert_eq!(response["result"], json!({}));
+        assert_eq!(response["id"], 2);
     }
 
     #[tokio::test]
     async fn handle_request_notification_returns_none() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        let req = json!({"method": "notifications/initialized"});
-        let resp = handle_request(&conn, &req).await;
-        assert!(resp.is_none(), "notifications must return None");
+        let (_database, connection) = crate::test_helpers::test_db().await;
+        let request = json!({"method": "notifications/initialized"});
+        let response = handle_request(&connection, &request).await;
+        assert!(response.is_none(), "notifications must return None");
         // Also verify a different notification prefix.
-        let req2 = json!({"method": "notifications/cancelled"});
-        let resp2 = handle_request(&conn, &req2).await;
-        assert!(resp2.is_none(), "all notifications/ must return None");
+        let request_notification = json!({"method": "notifications/cancelled"});
+        let response_notification = handle_request(&connection, &request_notification).await;
+        assert!(
+            response_notification.is_none(),
+            "all notifications/ must return None"
+        );
     }
 
     #[tokio::test]
     async fn handle_request_tools_list() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        let req = json!({"method": "tools/list", "id": 3});
-        let resp = handle_request(&conn, &req)
+        let (_database, connection) = crate::test_helpers::test_db().await;
+        let request = json!({"method": "tools/list", "id": 3});
+        let response = handle_request(&connection, &request)
             .await
             .expect("should return Some");
-        let tools = resp["result"]["tools"]
+        let tools = response["result"]["tools"]
             .as_array()
             .expect("tools should be an array");
         assert!(!tools.is_empty(), "tools list must not be empty");
@@ -478,21 +553,21 @@ mod tests {
         }
         // At least one well-known tool must be present.
         assert!(
-            tools.iter().any(|t| t["name"] == "mempalace_status"),
+            tools.iter().any(|tool| tool["name"] == "mempalace_status"),
             "tools list must include 'mempalace_status'"
         );
     }
 
     #[tokio::test]
     async fn handle_request_unknown_method() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        let req = json!({"method": "bogus", "id": 4});
-        let resp = handle_request(&conn, &req)
+        let (_database, connection) = crate::test_helpers::test_db().await;
+        let request = json!({"method": "bogus", "id": 4});
+        let response = handle_request(&connection, &request)
             .await
             .expect("should return Some");
-        assert_eq!(resp["error"]["code"], -32601);
+        assert_eq!(response["error"]["code"], -32601);
         assert!(
-            resp["error"]["message"]
+            response["error"]["message"]
                 .as_str()
                 .expect("message should be a string")
                 .contains("bogus"),
@@ -502,14 +577,14 @@ mod tests {
 
     #[tokio::test]
     async fn handle_request_non_object() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        let req = json!("string");
-        let resp = handle_request(&conn, &req)
+        let (_database, connection) = crate::test_helpers::test_db().await;
+        let request = json!("string");
+        let response = handle_request(&connection, &request)
             .await
             .expect("should return Some");
-        assert_eq!(resp["error"]["code"], -32600);
+        assert_eq!(response["error"]["code"], -32600);
         assert!(
-            resp["error"]["message"]
+            response["error"]["message"]
                 .as_str()
                 .expect("message should be a string")
                 .contains("Invalid Request"),
@@ -518,14 +593,14 @@ mod tests {
 
     #[tokio::test]
     async fn handle_request_missing_method() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        let req = json!({"id": 1});
-        let resp = handle_request(&conn, &req)
+        let (_database, connection) = crate::test_helpers::test_db().await;
+        let request = json!({"id": 1});
+        let response = handle_request(&connection, &request)
             .await
             .expect("should return Some");
-        assert_eq!(resp["error"]["code"], -32600);
+        assert_eq!(response["error"]["code"], -32600);
         assert!(
-            resp["error"]["message"]
+            response["error"]["message"]
                 .as_str()
                 .expect("message should be a string")
                 .contains("method"),
@@ -535,16 +610,16 @@ mod tests {
 
     #[tokio::test]
     async fn handle_request_tools_call_valid() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        let req = json!({
+        let (_database, connection) = crate::test_helpers::test_db().await;
+        let request = json!({
             "method": "tools/call",
             "params": {"name": "mempalace_status", "arguments": {}},
             "id": 5
         });
-        let resp = handle_request(&conn, &req)
+        let response = handle_request(&connection, &request)
             .await
             .expect("should return Some");
-        let content = resp["result"]["content"]
+        let content = response["result"]["content"]
             .as_array()
             .expect("content should be an array");
         assert!(!content.is_empty(), "content array must not be empty");
@@ -553,18 +628,18 @@ mod tests {
 
     #[tokio::test]
     async fn handle_request_tools_call_missing_name() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        let req = json!({
+        let (_database, connection) = crate::test_helpers::test_db().await;
+        let request = json!({
             "method": "tools/call",
             "params": {"arguments": {}},
             "id": 6
         });
-        let resp = handle_request(&conn, &req)
+        let response = handle_request(&connection, &request)
             .await
             .expect("should return Some");
-        assert_eq!(resp["error"]["code"], -32602);
+        assert_eq!(response["error"]["code"], -32602);
         assert!(
-            resp["error"]["message"]
+            response["error"]["message"]
                 .as_str()
                 .expect("message should be a string")
                 .contains("name"),
@@ -574,22 +649,59 @@ mod tests {
 
     #[tokio::test]
     async fn handle_request_tools_call_invalid_arguments() {
-        let (_db, conn) = crate::test_helpers::test_db().await;
-        let req = json!({
+        let (_database, connection) = crate::test_helpers::test_db().await;
+        let request = json!({
             "method": "tools/call",
             "params": {"name": "mempalace_status", "arguments": "string"},
             "id": 7
         });
-        let resp = handle_request(&conn, &req)
+        let response = handle_request(&connection, &request)
             .await
             .expect("should return Some");
-        assert_eq!(resp["error"]["code"], -32602);
+        assert_eq!(response["error"]["code"], -32602);
         assert!(
-            resp["error"]["message"]
+            response["error"]["message"]
                 .as_str()
                 .expect("message should be a string")
                 .contains("arguments"),
             "error message should mention invalid arguments"
+        );
+    }
+
+    // -- run_parse_request ---------------------------------------------------
+
+    #[test]
+    fn run_parse_request_valid_json_returns_ok() {
+        // A well-formed JSON object must be returned as a parsed Value.
+        let result = run_parse_request(r#"{"method":"ping","id":1}"#);
+        assert!(result.is_ok(), "valid JSON must return Ok");
+        let value = result.expect("valid JSON must parse");
+        assert_eq!(value["method"], "ping");
+        assert_eq!(value["id"], 1);
+    }
+
+    #[test]
+    fn run_parse_request_invalid_json_returns_error_response() {
+        // Invalid JSON must produce a JSON-RPC -32700 parse-error response.
+        let result = run_parse_request("not_valid{{{json");
+        assert!(result.is_err(), "invalid JSON must return Err");
+        let error_response = result.expect_err("invalid JSON must produce error");
+        assert_eq!(
+            error_response["error"]["code"], -32700,
+            "error code must be -32700 for a parse error"
+        );
+        assert!(
+            error_response["error"]["message"]
+                .as_str()
+                .expect("message must be a string")
+                .contains("Parse error"),
+            "error message must contain 'Parse error'"
+        );
+        // The id field must be null for parse errors (no id extracted).
+        assert_eq!(
+            error_response["id"],
+            serde_json::Value::Null,
+            "id must be null when the request cannot be parsed"
         );
     }
 
@@ -599,8 +711,8 @@ mod tests {
     async fn read_line_normal() {
         let cursor = Cursor::new(b"hello\n".to_vec());
         let mut reader = BufReader::new(cursor);
-        let mut buf = Vec::new();
-        let result = run_read_line_impl(&mut reader, &mut buf, 1024)
+        let mut buffer = Vec::new();
+        let result = run_read_line_impl(&mut reader, &mut buffer, 1024)
             .await
             .expect("read should succeed");
         let LineRead::Line(line) = result else {
@@ -608,22 +720,22 @@ mod tests {
         };
         assert_eq!(line, "hello");
         // Verify buffer was used for accumulation.
-        assert_eq!(buf.len(), 5, "buffer should contain 'hello' (5 bytes)");
+        assert_eq!(buffer.len(), 5, "buffer should contain 'hello' (5 bytes)");
     }
 
     #[tokio::test]
     async fn read_line_eof() {
         let cursor = Cursor::new(Vec::new());
         let mut reader = BufReader::new(cursor);
-        let mut buf = Vec::new();
-        let result = run_read_line_impl(&mut reader, &mut buf, 1024)
+        let mut buffer = Vec::new();
+        let result = run_read_line_impl(&mut reader, &mut buffer, 1024)
             .await
             .expect("read should succeed");
         assert!(
             matches!(result, LineRead::Eof),
             "expected Eof on empty input"
         );
-        assert!(buf.is_empty(), "buffer should remain empty on EOF");
+        assert!(buffer.is_empty(), "buffer should remain empty on EOF");
     }
 
     #[tokio::test]
@@ -634,8 +746,8 @@ mod tests {
         let input = "a".repeat(limit + 5) + "\n" + "ok\n";
         let cursor = Cursor::new(input.into_bytes());
         let mut reader = BufReader::new(cursor);
-        let mut buf = Vec::new();
-        let result = run_read_line_impl(&mut reader, &mut buf, limit)
+        let mut buffer = Vec::new();
+        let result = run_read_line_impl(&mut reader, &mut buffer, limit)
             .await
             .expect("read should succeed");
         assert!(
@@ -643,8 +755,8 @@ mod tests {
             "expected Overflow for line exceeding limit"
         );
         // After overflow drain, the reader must resync and return the next line.
-        buf.clear();
-        let next = run_read_line_impl(&mut reader, &mut buf, limit)
+        buffer.clear();
+        let next = run_read_line_impl(&mut reader, &mut buffer, limit)
             .await
             .expect("second read should succeed");
         let LineRead::Line(recovered) = next else {
@@ -665,8 +777,8 @@ mod tests {
         assert!(String::from_utf8(input.clone()).is_err());
         let cursor = Cursor::new(std::mem::take(&mut input));
         let mut reader = BufReader::new(cursor);
-        let mut buf = Vec::new();
-        let result = run_read_line_impl(&mut reader, &mut buf, 1024)
+        let mut buffer = Vec::new();
+        let result = run_read_line_impl(&mut reader, &mut buffer, 1024)
             .await
             .expect("read should succeed");
         assert!(
@@ -679,8 +791,8 @@ mod tests {
     async fn read_line_crlf_stripped() {
         let cursor = Cursor::new(b"hello\r\n".to_vec());
         let mut reader = BufReader::new(cursor);
-        let mut buf = Vec::new();
-        let result = run_read_line_impl(&mut reader, &mut buf, 1024)
+        let mut buffer = Vec::new();
+        let result = run_read_line_impl(&mut reader, &mut buffer, 1024)
             .await
             .expect("read should succeed");
         let LineRead::Line(line) = result else {
@@ -688,7 +800,7 @@ mod tests {
         };
         assert_eq!(line, "hello", "\\r\\n should be stripped to just 'hello'");
         // Buffer should have 'hello' without the \r.
-        assert_eq!(buf.len(), 5, "buffer should be 5 bytes after \\r strip");
+        assert_eq!(buffer.len(), 5, "buffer should be 5 bytes after \\r strip");
     }
 
     #[tokio::test]
@@ -696,8 +808,8 @@ mod tests {
         // A stream that ends without a trailing newline must return the accumulated bytes as a line.
         let cursor = Cursor::new(b"no newline at end".to_vec());
         let mut reader = BufReader::new(cursor);
-        let mut buf = Vec::new();
-        let result = run_read_line_impl(&mut reader, &mut buf, 1024)
+        let mut buffer = Vec::new();
+        let result = run_read_line_impl(&mut reader, &mut buffer, 1024)
             .await
             .expect("read should succeed");
         let LineRead::Line(line) = result else {
@@ -707,7 +819,7 @@ mod tests {
             line, "no newline at end",
             "partial line at EOF must be returned"
         );
-        assert_eq!(buf.len(), 17, "buffer must contain all bytes");
+        assert_eq!(buffer.len(), 17, "buffer must contain all bytes");
     }
 
     #[tokio::test]
@@ -717,8 +829,8 @@ mod tests {
         let input = "a".repeat(limit + 10); // No newline — entire input is one oversized line.
         let cursor = Cursor::new(input.into_bytes());
         let mut reader = BufReader::new(cursor);
-        let mut buf = Vec::new();
-        let result = run_read_line_impl(&mut reader, &mut buf, limit)
+        let mut buffer = Vec::new();
+        let result = run_read_line_impl(&mut reader, &mut buffer, limit)
             .await
             .expect("read should succeed");
         assert!(
@@ -726,8 +838,8 @@ mod tests {
             "oversized line without newline must report Overflow"
         );
         // After drain the stream is at EOF; next read must return Eof.
-        buf.clear();
-        let next = run_read_line_impl(&mut reader, &mut buf, limit)
+        buffer.clear();
+        let next = run_read_line_impl(&mut reader, &mut buffer, limit)
             .await
             .expect("second read should succeed");
         assert!(

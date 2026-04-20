@@ -3,6 +3,9 @@
 pub mod emotions;
 pub mod topics;
 
+/// UTF-8 code points are at most 4 bytes, so a char-boundary snap never takes more than 3 steps.
+const CHAR_BOUNDARY_SNAP_MAX: usize = 4;
+
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::LazyLock;
@@ -12,16 +15,18 @@ use regex::Regex;
 use emotions::{emotion_signals, flag_signals};
 use topics::{extract_topics, stop_words};
 
+// Regex literal is a compile-time constant; cannot fail to compile.
 #[allow(clippy::expect_used)]
-// Splits text into sentences on punctuation or newlines.
 static SENTENCE_SPLIT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    // Splits text into sentences on punctuation or newlines.
     Regex::new(r"[.!?\n]+")
         .expect("sentence-split regex is a compile-time literal and cannot fail to compile")
 });
 
+// Regex literal is a compile-time constant; cannot fail to compile.
 #[allow(clippy::expect_used)]
-// Strips non-alphabetic characters when extracting entity codes from words.
 static NON_ALPHA_RE: LazyLock<Regex> = LazyLock::new(|| {
+    // Strips non-alphabetic characters when extracting entity codes from words.
     Regex::new(r"[^a-zA-Z]")
         .expect("non-alpha strip regex is a compile-time literal and cannot fail to compile")
 });
@@ -30,8 +35,6 @@ static NON_ALPHA_RE: LazyLock<Regex> = LazyLock::new(|| {
 pub struct Dialect {
     /// Known entity name → short code mappings.
     entity_codes: HashMap<String, String>,
-    #[allow(dead_code)]
-    skip_names: Vec<String>,
 }
 
 /// Optional metadata attached to the AAAK header line.
@@ -84,7 +87,7 @@ fn extract_key_sentence(text: &str) -> String {
     let sentences: Vec<&str> = SENTENCE_SPLIT_RE
         .split(text)
         .map(str::trim)
-        .filter(|s| s.len() > 10)
+        .filter(|sentence| sentence.len() > 10)
         .collect();
 
     if sentences.is_empty() {
@@ -114,24 +117,24 @@ fn extract_key_sentence(text: &str) -> String {
 
     let mut scored: Vec<(i32, &str)> = sentences
         .into_iter()
-        .map(|s| {
-            let s_lower = s.to_lowercase();
+        .map(|sentence| {
+            let sentence_lower = sentence.to_lowercase();
             let mut score: i32 = 0;
             for w in &decision_words {
-                if s_lower.contains(w) {
+                if sentence_lower.contains(w) {
                     score += 2;
                 }
             }
-            if s.len() < 80 {
+            if sentence.len() < 80 {
                 score += 1;
             }
-            if s.len() < 40 {
+            if sentence.len() < 40 {
                 score += 1;
             }
-            if s.len() > 150 {
+            if sentence.len() > 150 {
                 score -= 2;
             }
-            (score, s)
+            (score, sentence)
         })
         .collect();
 
@@ -140,7 +143,13 @@ fn extract_key_sentence(text: &str) -> String {
 
     if best.len() > 55 {
         let mut end = 52;
+        let mut snap_steps: usize = 0;
         while end < best.len() && !best.is_char_boundary(end) {
+            snap_steps += 1;
+            assert!(
+                snap_steps < CHAR_BOUNDARY_SNAP_MAX,
+                "extract_key_sentence: exceeded CHAR_BOUNDARY_SNAP_MAX ({CHAR_BOUNDARY_SNAP_MAX}) snap steps"
+            );
             end += 1;
         }
         format!("{}...", &best[..end])
@@ -150,22 +159,18 @@ fn extract_key_sentence(text: &str) -> String {
 }
 
 impl Dialect {
-    pub fn new(entities: &HashMap<String, String>, skip_names: Vec<String>) -> Self {
+    pub fn new(entities: &HashMap<String, String>) -> Self {
         let mut entity_codes = HashMap::new();
         for (name, code) in entities {
             entity_codes.insert(name.clone(), code.clone());
             entity_codes.insert(name.to_lowercase(), code.clone());
         }
-        Self {
-            entity_codes,
-            skip_names: skip_names.into_iter().map(|n| n.to_lowercase()).collect(),
-        }
+        Self { entity_codes }
     }
 
     pub fn empty() -> Self {
         Self {
             entity_codes: HashMap::new(),
-            skip_names: Vec::new(),
         }
     }
 
@@ -177,7 +182,7 @@ impl Dialect {
         let text_lower = text.to_lowercase();
         let mut found = Vec::new();
 
-        // Check known entities
+        // Check known entities.
         for (name, code) in &self.entity_codes {
             if !name.chars().next().is_some_and(char::is_lowercase)
                 && text_lower.contains(&name.to_lowercase())
@@ -190,7 +195,7 @@ impl Dialect {
             return found;
         }
 
-        // Fallback: capitalized words that look like names
+        // Fallback: capitalized words that look like names.
         let stops = stop_words();
         let words: Vec<&str> = text.split_whitespace().collect();
         for (i, w) in words.iter().enumerate() {
@@ -236,7 +241,7 @@ impl Dialect {
 
         let mut lines = Vec::new();
 
-        // Header line (if metadata available)
+        // Header line (if metadata available).
         if let Some(meta) = metadata
             && (!meta.source_file.is_empty() || !meta.wing.is_empty())
         {
@@ -245,7 +250,7 @@ impl Dialect {
             } else {
                 Path::new(meta.source_file)
                     .file_stem()
-                    .and_then(|s| s.to_str())
+                    .and_then(|stem| stem.to_str())
                     .unwrap_or("?")
             };
             let header = format!(
@@ -258,7 +263,7 @@ impl Dialect {
             lines.push(header);
         }
 
-        // Content line
+        // Content line.
         let mut parts = vec![format!("0:{entity_str}"), topic_str];
         if !quote.is_empty() {
             parts.push(format!("\"{quote}\""));
@@ -329,7 +334,7 @@ mod tests {
         let mut entities = HashMap::new();
         entities.insert("Alice".to_string(), "ALC".to_string());
         entities.insert("Bob".to_string(), "BOB".to_string());
-        let dialect = Dialect::new(&entities, vec![]);
+        let dialect = Dialect::new(&entities);
         let found = dialect.detect_entities("Alice told Bob about the new architecture");
         assert!(found.contains(&"ALC".to_string()));
         assert!(found.contains(&"BOB".to_string()));

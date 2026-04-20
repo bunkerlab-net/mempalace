@@ -54,11 +54,11 @@ pub fn config_dir() -> PathBuf {
 ///
 /// A relative or empty `$XDG_DATA_HOME` is treated as unset, per XDG spec intent.
 fn xdg_data_dir() -> PathBuf {
-    let base_directory = if let Ok(val) = std::env::var("XDG_DATA_HOME")
-        && !val.is_empty()
-        && PathBuf::from(&val).is_absolute()
+    let base_directory = if let Ok(xdg_data_home) = std::env::var("XDG_DATA_HOME")
+        && !xdg_data_home.is_empty()
+        && PathBuf::from(&xdg_data_home).is_absolute()
     {
-        PathBuf::from(val)
+        PathBuf::from(xdg_data_home)
     } else {
         home_dir().join(".local").join("share")
     };
@@ -173,8 +173,8 @@ impl Default for MempalaceConfig {
 /// or `MEMPALACE_DIR` is set.
 fn maybe_migrate() -> Result<()> {
     // MEMPALACE_DIR means the caller manages paths — skip migration entirely.
-    if let Ok(val) = std::env::var("MEMPALACE_DIR")
-        && !val.is_empty()
+    if let Ok(mempalace_dir) = std::env::var("MEMPALACE_DIR")
+        && !mempalace_dir.is_empty()
     {
         return Ok(());
     }
@@ -249,8 +249,8 @@ fn maybe_migrate_inner(source: &Path, destination: &Path) -> Result<()> {
     let source_config = source.join("config.json");
     if source_config.exists() {
         let legacy_db = source.join("palace.db");
-        let new_db = destination.join("palace.db");
-        maybe_migrate_patch_config(&source_config, &legacy_db, &new_db)?;
+        let database_new = destination.join("palace.db");
+        maybe_migrate_patch_config(&source_config, &legacy_db, &database_new)?;
         maybe_migrate_move_file(&source_config, &destination.join("config.json"))?;
     }
 
@@ -317,9 +317,13 @@ fn maybe_migrate_move_file(source: &Path, destination: &Path) -> Result<()> {
 }
 
 /// Update `palace_path` in config.json if it still points to the legacy DB location.
-fn maybe_migrate_patch_config(config_path: &Path, legacy_db: &Path, new_db: &Path) -> Result<()> {
+fn maybe_migrate_patch_config(
+    config_path: &Path,
+    legacy_db: &Path,
+    database_new: &Path,
+) -> Result<()> {
     assert!(config_path.exists());
-    assert_ne!(legacy_db, new_db);
+    assert_ne!(legacy_db, database_new);
 
     let data = std::fs::read_to_string(config_path)?;
     let mut config: MempalaceConfig = match serde_json::from_str(&data) {
@@ -329,13 +333,13 @@ fn maybe_migrate_patch_config(config_path: &Path, legacy_db: &Path, new_db: &Pat
     };
 
     if config.palace_path == legacy_db {
-        config.palace_path = new_db.to_path_buf();
+        config.palace_path = database_new.to_path_buf();
         let patched = serde_json::to_string_pretty(&config)?;
         std::fs::write(config_path, &patched)?;
         // Pair assertion: patched value must round-trip correctly.
         debug_assert!(
             serde_json::from_str::<MempalaceConfig>(&patched)
-                .is_ok_and(|c| c.palace_path.as_path() == new_db)
+                .is_ok_and(|c| c.palace_path.as_path() == database_new)
         );
     }
 
@@ -664,7 +668,7 @@ mod tests {
                 maybe_migrate().expect("migration should succeed");
 
                 let destination = home.path().join(".local").join("share").join("mempalace");
-                let new_db = destination.join("palace.db");
+                let database_new = destination.join("palace.db");
 
                 let data = std::fs::read_to_string(destination.join("config.json"))
                     .expect("read migrated config.json");
@@ -672,7 +676,7 @@ mod tests {
                     serde_json::from_str(&data).expect("parse migrated config.json");
 
                 // palace_path must now point to the XDG location, not the legacy one.
-                assert_eq!(config.palace_path, new_db);
+                assert_eq!(config.palace_path, database_new);
                 assert!(!config.palace_path.to_string_lossy().contains(".mempalace"));
             },
         );
@@ -966,9 +970,9 @@ mod tests {
         std::fs::write(&config_path, "not valid json {{{{")
             .expect("failed to write corrupted config.json for test");
         let legacy_db = std::path::Path::new("/old/palace.db");
-        let new_db = std::path::Path::new("/new/palace.db");
+        let database_new = std::path::Path::new("/new/palace.db");
 
-        let result = maybe_migrate_patch_config(&config_path, legacy_db, new_db);
+        let result = maybe_migrate_patch_config(&config_path, legacy_db, database_new);
 
         // Corrupted JSON must be left unchanged (Ok returned, not Err).
         assert!(
@@ -1002,7 +1006,7 @@ rooms:
         assert_eq!(config.rooms[0].name, "backend");
         assert!(config.rooms[0].keywords.contains(&"api".to_string()));
 
-        // Serialize back and deserialize to verify round-trip
+        // Serialize back and deserialize to verify round-trip.
         let serialized = serde_yaml::to_string(&config).expect("serialize yaml");
         let config_roundtrip: ProjectConfig =
             serde_yaml::from_str(&serialized).expect("parse roundtrip yaml");

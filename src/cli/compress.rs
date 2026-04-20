@@ -16,20 +16,15 @@ fn run_load_dialect(config_path: Option<&str>) -> Result<Dialect> {
         .and_then(|e| e.as_object())
         .map(|obj| {
             obj.iter()
-                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .filter_map(|(k, entity_val)| {
+                    entity_val
+                        .as_str()
+                        .map(|code| (k.clone(), code.to_string()))
+                })
                 .collect()
         })
         .unwrap_or_default();
-    let skip = config
-        .get("skip_names")
-        .and_then(|s| s.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-    Ok(Dialect::new(&entities, skip))
+    Ok(Dialect::new(&entities))
 }
 
 /// Compress one drawer row and persist or preview it. Returns `(original_len, compressed_len)`.
@@ -111,20 +106,20 @@ pub async fn run(
         return Ok(());
     }
 
-    let mut total_original = 0usize;
-    let mut total_compressed = 0usize;
+    let mut original_total = 0usize;
+    let mut compressed_total = 0usize;
 
     for (count, row) in rows.iter().enumerate() {
         let (orig, comp) = run_compress_row(connection, row, &dialect, dry_run, count + 1).await?;
-        total_original += orig;
-        total_compressed += comp;
+        original_total += orig;
+        compressed_total += comp;
     }
 
     let count = rows.len();
     // Byte lengths for display-only ratio; precision loss negligible for practical sizes.
     #[allow(clippy::cast_precision_loss)]
-    let overall_ratio = if total_compressed > 0 {
-        total_original as f64 / total_compressed as f64
+    let overall_ratio = if compressed_total > 0 {
+        original_total as f64 / compressed_total as f64
     } else {
         0.0
     };
@@ -135,7 +130,7 @@ pub async fn run(
         println!("Compressed {count} drawers into AAAK dialect");
     }
     println!(
-        "  Total: {total_original} → {total_compressed} bytes ({overall_ratio:.1}x compression)"
+        "  Total: {original_total} → {compressed_total} bytes ({overall_ratio:.1}x compression)"
     );
 
     Ok(())
@@ -170,7 +165,7 @@ mod tests {
         let config_path = dir.path().join("dialect.json");
         std::fs::write(
             &config_path,
-            r#"{"entities": {"Rust": "RS", "Python": "PY"}, "skip_names": ["test"]}"#,
+            r#"{"entities": {"Rust": "RS", "Python": "PY"}}"#,
         )
         .expect("must write config file");
 
@@ -241,5 +236,113 @@ mod async_tests {
             .expect("compress row must succeed");
         assert!(orig > 0, "original size must be positive");
         assert!(comp > 0, "compressed size must be positive");
+    }
+
+    #[tokio::test]
+    async fn run_compress_row_non_dry_run_inserts_into_compressed() {
+        // When dry_run=false, run_compress_row must INSERT the result into the compressed table.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        seed_drawer(&connection).await;
+
+        let rows = crate::db::query_all(
+            &connection,
+            "SELECT id, content, wing, room, source_file, filed_at FROM drawers LIMIT 1",
+            (),
+        )
+        .await
+        .expect("query for compress row must succeed");
+        let row = rows.first().expect("at least one row must exist");
+
+        let dialect = Dialect::empty();
+        let (orig, comp) = run_compress_row(&connection, row, &dialect, false, 1)
+            .await
+            .expect("non-dry-run compress row must succeed");
+        assert!(orig > 0, "original length must be positive");
+        assert!(comp > 0, "compressed length must be positive");
+
+        // Pair assertion: the compressed row must appear in the database.
+        let compressed_rows = crate::db::query_all(
+            &connection,
+            "SELECT id FROM compressed WHERE wing = 'test_wing'",
+            (),
+        )
+        .await
+        .expect("query for compressed rows must succeed");
+        assert!(
+            !compressed_rows.is_empty(),
+            "non-dry-run must insert into compressed table"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_compress_no_drawers_returns_ok() {
+        // When the palace has no drawers, run must print and return Ok without processing.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let result = run(&connection, None, false, None).await;
+        assert!(result.is_ok(), "run with no drawers must return Ok");
+    }
+
+    #[tokio::test]
+    async fn run_compress_all_dry_run_prints_without_inserting() {
+        // run with dry_run=true must not write to the compressed table.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        seed_drawer(&connection).await;
+
+        run(&connection, None, true, None)
+            .await
+            .expect("dry-run compress must succeed");
+
+        let compressed_rows = crate::db::query_all(&connection, "SELECT id FROM compressed", ())
+            .await
+            .expect("query for compressed rows after dry run must succeed");
+        assert!(
+            compressed_rows.is_empty(),
+            "dry-run compress must not insert into compressed table"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_compress_with_wing_filter_processes_only_that_wing() {
+        // run with a wing filter must query and compress only matching drawers.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        seed_drawer(&connection).await;
+        // Seed a drawer in a different wing — must not be compressed.
+        crate::palace::drawer::add_drawer(
+            &connection,
+            &crate::palace::drawer::DrawerParams {
+                id: "compress-other-wing-1",
+                wing: "other_wing",
+                room: "other_room",
+                content: "Other wing content that should not be compressed here",
+                source_file: "other.txt",
+                chunk_index: 0,
+                added_by: "test",
+                ingest_mode: "projects",
+                source_mtime: None,
+            },
+        )
+        .await
+        .expect("seeding other-wing drawer must succeed");
+
+        run(&connection, Some("test_wing"), false, None)
+            .await
+            .expect("wing-filtered compress must succeed");
+
+        // Only test_wing must appear in the compressed table.
+        let compressed_rows = crate::db::query_all(&connection, "SELECT wing FROM compressed", ())
+            .await
+            .expect("query for compressed wings must succeed");
+        assert_eq!(
+            compressed_rows.len(),
+            1,
+            "only one drawer (from test_wing) must be compressed"
+        );
+        let wing_value: String = compressed_rows[0]
+            .get(0)
+            .expect("wing column must be readable");
+        assert_eq!(
+            wing_value, "test_wing",
+            "compressed drawer must belong to test_wing"
+        );
     }
 }

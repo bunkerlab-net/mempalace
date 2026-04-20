@@ -24,7 +24,7 @@ pub struct MineParams {
 }
 
 /// Files larger than this are skipped — prevents OOM on huge files.
-const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
+const FILE_SIZE_MAX: u64 = 10 * 1024 * 1024; // 10 MB
 
 use super::WALK_DEPTH_LIMIT;
 
@@ -95,10 +95,10 @@ fn walk_dir_gitignore(project_dir: &Path) -> Vec<PathBuf> {
         }
         let path = entry.path();
 
-        // Check all path components against SKIP_DIRS
-        let skip = path.components().any(|c| {
-            let s = c.as_os_str().to_string_lossy();
-            is_skip_dir(s.as_ref())
+        // Check all path components against SKIP_DIRS.
+        let skip = path.components().any(|component| {
+            let component_name = component.as_os_str().to_string_lossy();
+            is_skip_dir(component_name.as_ref())
         });
         if skip {
             continue;
@@ -119,7 +119,7 @@ fn walk_dir_gitignore(project_dir: &Path) -> Vec<PathBuf> {
             .unwrap_or("")
             .to_lowercase();
         if READABLE_EXTENSIONS.contains(&extension.as_str()) {
-            if entry.metadata().is_ok_and(|m| m.len() > MAX_FILE_SIZE) {
+            if entry.metadata().is_ok_and(|m| m.len() > FILE_SIZE_MAX) {
                 continue;
             }
             files.push(path.to_path_buf());
@@ -162,7 +162,7 @@ fn walk_dir(directory: &Path, files: &mut Vec<PathBuf>) {
                 if READABLE_EXTENSIONS.contains(&extension_lower.as_str())
                     && !is_skip_file(name.as_str())
                 {
-                    if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_FILE_SIZE) {
+                    if std::fs::metadata(&path).is_ok_and(|m| m.len() > FILE_SIZE_MAX) {
                         continue;
                     }
                     files.push(path);
@@ -190,7 +190,7 @@ fn mine_print_header(
         "  Rooms:   {}",
         rooms
             .iter()
-            .map(|r| r.name.as_str())
+            .map(|room| room.name.as_str())
             .collect::<Vec<_>>()
             .join(", ")
     );
@@ -203,7 +203,7 @@ fn mine_print_summary(
     file_count: usize,
     files_skipped: usize,
     files_unreadable_or_too_short: usize,
-    total_drawers: usize,
+    drawers_total: usize,
     room_counts: &HashMap<String, usize>,
 ) {
     println!("\n=======================================================");
@@ -221,7 +221,7 @@ fn mine_print_summary(
         println!("  Files skipped (empty/unreadable/too short): {files_unreadable_or_too_short}");
     }
     println!(
-        "  Drawers {}: {total_drawers}",
+        "  Drawers {}: {drawers_total}",
         if dry_run { "would be filed" } else { "filed" }
     );
     println!("\n  By room:");
@@ -247,6 +247,20 @@ async fn mine_write_chunks(
     source_mtime: Option<f64>,
     opts: &MineParams,
 ) -> Result<()> {
+    // Preconditions: callers must supply at least one chunk and a non-empty destination.
+    assert!(
+        !chunks.is_empty(),
+        "mine_write_chunks: chunks must not be empty"
+    );
+    assert!(
+        !wing.is_empty(),
+        "mine_write_chunks: wing must not be empty"
+    );
+    assert!(
+        !room.is_empty(),
+        "mine_write_chunks: room must not be empty"
+    );
+
     for chunk in chunks {
         let id = format!(
             "drawer_{wing}_{room}_{}",
@@ -288,7 +302,7 @@ fn mine_read_file(filepath: &Path) -> Option<String> {
     Some(content)
 }
 
-/// Process all files in the mine loop. Returns `(total_drawers, files_skipped, files_unreadable_or_too_short, room_counts)`.
+/// Process all files in the mine loop. Returns `(drawers_total, files_skipped, files_unreadable_or_too_short, room_counts)`.
 async fn mine_process_files(
     connection: &Connection,
     files: &[PathBuf],
@@ -297,7 +311,7 @@ async fn mine_process_files(
     project_dir: &Path,
     opts: &MineParams,
 ) -> Result<(usize, usize, usize, HashMap<String, usize>)> {
-    let mut total_drawers: usize = 0;
+    let mut drawers_total: usize = 0;
     let mut files_skipped: usize = 0;
     let mut files_unreadable_or_too_short: usize = 0;
     let mut room_counts: HashMap<String, usize> = HashMap::new();
@@ -325,9 +339,13 @@ async fn mine_process_files(
             // Capture mtime now so all chunks from the same file share the same timestamp.
             let source_mtime: Option<f64> = std::fs::metadata(filepath)
                 .ok()
-                .and_then(|m| m.modified().ok())
-                .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs_f64());
+                .and_then(|metadata| metadata.modified().ok())
+                .and_then(|system_time| {
+                    system_time
+                        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                        .ok()
+                })
+                .map(|duration| duration.as_secs_f64());
             mine_write_chunks(
                 connection,
                 &chunks,
@@ -340,7 +358,7 @@ async fn mine_process_files(
             .await?;
         }
 
-        total_drawers += drawers_added;
+        drawers_total += drawers_added;
         *room_counts.entry(room.clone()).or_insert(0) += 1;
         println!(
             "  [{:4}/{}] {:50} +{drawers_added}",
@@ -351,7 +369,7 @@ async fn mine_process_files(
     }
 
     Ok((
-        total_drawers,
+        drawers_total,
         files_skipped,
         files_unreadable_or_too_short,
         room_counts,
@@ -467,7 +485,7 @@ pub async fn mine(connection: &Connection, project_dir: &Path, opts: &MineParams
 
     mine_print_header(wing, &rooms, files.len(), opts.dry_run);
 
-    let (total_drawers, files_skipped, files_unreadable_or_too_short, room_counts) =
+    let (drawers_total, files_skipped, files_unreadable_or_too_short, room_counts) =
         mine_process_files(connection, &files, wing, &rooms, &project_dir, opts).await?;
 
     mine_print_summary(
@@ -475,7 +493,7 @@ pub async fn mine(connection: &Connection, project_dir: &Path, opts: &MineParams
         files.len(),
         files_skipped,
         files_unreadable_or_too_short,
-        total_drawers,
+        drawers_total,
         &room_counts,
     );
     Ok(())

@@ -145,7 +145,7 @@ async fn stats_reflect_operations() {
     assert_eq!(stats_after_add.entities, 2, "should have 2 entities");
     assert_eq!(stats_after_add.triples, 1, "should have 1 triple");
     assert_eq!(
-        stats_after_add.current_facts, 1,
+        stats_after_add.facts_current, 1,
         "1 current fact before invalidation"
     );
 
@@ -162,7 +162,7 @@ async fn stats_reflect_operations() {
         "total triples unchanged after invalidation"
     );
     assert_eq!(
-        stats_after_invalidate.current_facts, 0,
+        stats_after_invalidate.facts_current, 0,
         "no current facts after invalidation"
     );
     assert_eq!(

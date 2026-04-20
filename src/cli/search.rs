@@ -22,8 +22,8 @@ pub async fn run(
     if let Some(w) = wing {
         println!("  Wing: {w}");
     }
-    if let Some(r) = room {
-        println!("  Room: {r}");
+    if let Some(room_name) = room {
+        println!("  Room: {room_name}");
     }
     println!("============================================================\n");
 

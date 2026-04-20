@@ -250,7 +250,7 @@ mod async_tests {
         .await
         .expect("add_triple should succeed for valid subject/predicate/object params");
 
-        // Both entities should exist
+        // Both entities should exist.
         let entities = crate::db::query_all(&connection, "SELECT id FROM entities ORDER BY id", ())
             .await
             .expect(
@@ -326,6 +326,9 @@ mod async_tests {
 }
 
 /// Add or update an entity node.
+// Used by integration tests in `tests/kg_workflow.rs`; the binary never calls it.
+// `#[cfg(test)]` would hide it from integration tests (which build the non-test lib),
+// so `#[allow(dead_code)]` is the correct suppression here.
 #[allow(dead_code)]
 pub async fn add_entity(
     connection: &Connection,
@@ -333,21 +336,26 @@ pub async fn add_entity(
     entity_type: &str,
     properties: Option<&str>,
 ) -> Result<String> {
-    let eid = entity_id(name);
+    let entity_identifier = entity_id(name);
     // entity_id can return "" for inputs like "'"; reject before writing a blank key.
-    if eid.is_empty() {
+    if entity_identifier.is_empty() {
         return Err(crate::error::Error::Other(
             "empty normalized entity id".to_string(),
         ));
     }
-    let props = properties.unwrap_or("{}");
+    let properties_json = properties.unwrap_or("{}");
     connection
         .execute(
             "INSERT OR REPLACE INTO entities (id, name, type, properties) VALUES (?1, ?2, ?3, ?4)",
-            turso::params![eid.as_str(), name, entity_type, props],
+            turso::params![
+                entity_identifier.as_str(),
+                name,
+                entity_type,
+                properties_json
+            ],
         )
         .await?;
-    Ok(eid)
+    Ok(entity_identifier)
 }
 
 /// Parameters for [`add_triple`].
@@ -381,16 +389,18 @@ fn add_triple_validate_params(params: &TripleParams<'_>) -> Result<()> {
     }
     let valid_from_date = params
         .valid_from
-        .map(|v| {
-            chrono::NaiveDate::parse_from_str(v, "%Y-%m-%d")
-                .map_err(|_| crate::error::Error::Other(format!("invalid valid_from date: {v}")))
+        .map(|date_str| {
+            chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d").map_err(|_| {
+                crate::error::Error::Other(format!("invalid valid_from date: {date_str}"))
+            })
         })
         .transpose()?;
     let valid_to_date = params
         .valid_to
-        .map(|v| {
-            chrono::NaiveDate::parse_from_str(v, "%Y-%m-%d")
-                .map_err(|_| crate::error::Error::Other(format!("invalid valid_to date: {v}")))
+        .map(|date_str| {
+            chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d").map_err(|_| {
+                crate::error::Error::Other(format!("invalid valid_to date: {date_str}"))
+            })
         })
         .transpose()?;
     if let (Some(from), Some(to)) = (valid_from_date, valid_to_date)
@@ -403,6 +413,61 @@ fn add_triple_validate_params(params: &TripleParams<'_>) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// Upsert subject and object entities into the graph (INSERT OR IGNORE).
+/// Called by `add_triple` to keep that function within the 70-line limit.
+async fn add_triple_ensure_entities(
+    connection: &Connection,
+    subject_id: &str,
+    subject_name: &str,
+    object_id: &str,
+    object_name: &str,
+) -> Result<()> {
+    assert!(!subject_id.is_empty(), "subject_id must not be empty");
+    assert!(!object_id.is_empty(), "object_id must not be empty");
+
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO entities (id, name) VALUES (?1, ?2)",
+            turso::params![subject_id, subject_name],
+        )
+        .await?;
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO entities (id, name) VALUES (?1, ?2)",
+            turso::params![object_id, object_name],
+        )
+        .await?;
+    Ok(())
+}
+
+/// Check whether an active triple already exists and return its ID if so.
+/// Called by `add_triple` to keep that function within the 70-line limit.
+async fn add_triple_check_duplicate(
+    connection: &Connection,
+    subject_id: &str,
+    predicate: &str,
+    object_id: &str,
+) -> Result<Option<String>> {
+    assert!(!subject_id.is_empty(), "subject_id must not be empty");
+    assert!(!predicate.is_empty(), "predicate must not be empty");
+    assert!(!object_id.is_empty(), "object_id must not be empty");
+
+    let existing = db::query_all(
+        connection,
+        "SELECT id FROM triples WHERE subject=?1 AND predicate=?2 AND object=?3 AND valid_to IS NULL",
+        turso::params![subject_id, predicate, object_id],
+    )
+    .await?;
+
+    if let Some(row) = existing.first()
+        && let Ok(val) = row.get_value(0)
+        && let Some(id) = val.as_text()
+    {
+        return Ok(Some(id.clone()));
+    }
+    Ok(None)
 }
 
 /// Add a relationship triple. Auto-creates entities if they don't exist.
@@ -421,73 +486,64 @@ pub async fn add_triple(connection: &Connection, params: &TripleParams<'_>) -> R
 
     add_triple_validate_params(params)?;
 
-    let sub_id = entity_id(params.subject);
-    let obj_id = entity_id(params.object);
-    let pred = params.predicate.to_lowercase().replace(' ', "_");
+    let subject_id = entity_id(params.subject);
+    let object_id = entity_id(params.object);
+    let predicate = params.predicate.to_lowercase().replace(' ', "_");
 
     // Pair assertions: entity_id can return "" for inputs like "'".
     // An empty normalized ID would silently corrupt the graph with a blank key.
-    assert!(!sub_id.is_empty(), "triple subject normalizes to empty ID");
-    assert!(!obj_id.is_empty(), "triple object normalizes to empty ID");
-    assert!(!pred.is_empty(), "triple predicate normalizes to empty ID");
+    assert!(
+        !subject_id.is_empty(),
+        "triple subject normalizes to empty ID"
+    );
+    assert!(
+        !object_id.is_empty(),
+        "triple object normalizes to empty ID"
+    );
+    assert!(
+        !predicate.is_empty(),
+        "triple predicate normalizes to empty ID"
+    );
 
-    // Auto-create entities
-    connection
-        .execute(
-            "INSERT OR IGNORE INTO entities (id, name) VALUES (?1, ?2)",
-            turso::params![sub_id.as_str(), params.subject],
-        )
-        .await?;
-    connection
-        .execute(
-            "INSERT OR IGNORE INTO entities (id, name) VALUES (?1, ?2)",
-            turso::params![obj_id.as_str(), params.object],
-        )
-        .await?;
-
-    // Check for existing identical active triple
-    let existing = db::query_all(
+    add_triple_ensure_entities(
         connection,
-        "SELECT id FROM triples WHERE subject=?1 AND predicate=?2 AND object=?3 AND valid_to IS NULL",
-        turso::params![sub_id.as_str(), pred.as_str(), obj_id.as_str()],
+        &subject_id,
+        params.subject,
+        &object_id,
+        params.object,
     )
     .await?;
 
-    if let Some(row) = existing.first()
-        && let Ok(val) = row.get_value(0)
-        && let Some(id) = val.as_text()
+    if let Some(existing_id) =
+        add_triple_check_duplicate(connection, &subject_id, &predicate, &object_id).await?
     {
-        return Ok(id.clone());
+        return Ok(existing_id);
     }
 
     let triple_id = format!(
-        "t_{sub_id}_{pred}_{obj_id}_{}",
+        "t_{subject_id}_{predicate}_{object_id}_{}",
         &uuid::Uuid::new_v4().to_string().replace('-', "")[..8]
     );
-
-    let valid_from_value: turso::Value = match params.valid_from {
-        Some(v) => turso::Value::from(v),
-        None => turso::Value::Null,
-    };
-    let valid_to_value: turso::Value = match params.valid_to {
-        Some(v) => turso::Value::from(v),
-        None => turso::Value::Null,
-    };
-    let source_closet_value: turso::Value = match params.source_closet {
-        Some(v) => turso::Value::from(v),
-        None => turso::Value::Null,
-    };
-    let source_file_value: turso::Value = match params.source_file {
-        Some(v) => turso::Value::from(v),
-        None => turso::Value::Null,
-    };
 
     // Postcondition: triple ID follows naming convention.
     assert!(triple_id.starts_with("t_"), "triple_id must start with t_");
 
+    let valid_from_value: turso::Value = params
+        .valid_from
+        .map_or(turso::Value::Null, turso::Value::from);
+    let valid_to_value: turso::Value = params
+        .valid_to
+        .map_or(turso::Value::Null, turso::Value::from);
+    let source_closet_value: turso::Value = params
+        .source_closet
+        .map_or(turso::Value::Null, turso::Value::from);
+    let source_file_value: turso::Value = params
+        .source_file
+        .map_or(turso::Value::Null, turso::Value::from);
+
     connection.execute(
         "INSERT INTO triples (id, subject, predicate, object, valid_from, valid_to, confidence, source_closet, source_file) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-        turso::params![triple_id.as_str(), sub_id.as_str(), pred.as_str(), obj_id.as_str(), valid_from_value, valid_to_value, params.confidence, source_closet_value, source_file_value],
+        turso::params![triple_id.as_str(), subject_id.as_str(), predicate.as_str(), object_id.as_str(), valid_from_value, valid_to_value, params.confidence, source_closet_value, source_file_value],
     )
     .await?;
 
@@ -510,22 +566,22 @@ pub async fn invalidate(
     );
     assert!(!object.is_empty(), "invalidate: object must not be empty");
 
-    let sub_id = entity_id(subject);
-    let obj_id = entity_id(object);
-    let pred = predicate.to_lowercase().replace(' ', "_");
+    let subject_id = entity_id(subject);
+    let object_id = entity_id(object);
+    let predicate_normalized = predicate.to_lowercase().replace(' ', "_");
 
     // Pair assertions: entity_id can return "" for apostrophe-only inputs.
     // An empty normalized ID would silently run an UPDATE with a blank key.
     assert!(
-        !sub_id.is_empty(),
+        !subject_id.is_empty(),
         "invalidate: subject normalizes to empty ID"
     );
     assert!(
-        !obj_id.is_empty(),
+        !object_id.is_empty(),
         "invalidate: object normalizes to empty ID"
     );
     assert!(
-        !pred.is_empty(),
+        !predicate_normalized.is_empty(),
         "invalidate: predicate normalizes to empty ID"
     );
 
@@ -537,7 +593,7 @@ pub async fn invalidate(
 
     connection.execute(
         "UPDATE triples SET valid_to=?1 WHERE subject=?2 AND predicate=?3 AND object=?4 AND valid_to IS NULL",
-        turso::params![persisted_ended.as_str(), sub_id.as_str(), pred.as_str(), obj_id.as_str()],
+        turso::params![persisted_ended.as_str(), subject_id.as_str(), predicate_normalized.as_str(), object_id.as_str()],
     )
     .await?;
 

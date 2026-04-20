@@ -13,7 +13,7 @@ use crate::error::Result;
 /// Normalize a file to transcript format.
 /// Detects format automatically and converts to `> user\nresponse\n\n` format.
 pub fn normalize(filepath: &Path) -> Result<String> {
-    const MAX_SIZE: u64 = 500 * 1024 * 1024; // 500 MB safety limit
+    const SIZE_MAX: u64 = 500 * 1024 * 1024; // 500 MB safety limit
     if !filepath.exists() {
         return Err(crate::error::Error::Other(format!(
             "normalize: file not found: {}",
@@ -25,7 +25,7 @@ pub fn normalize(filepath: &Path) -> Result<String> {
             crate::error::Error::Other(format!("could not read {}: {e}", filepath.display()))
         })?
         .len();
-    if file_size > MAX_SIZE {
+    if file_size > SIZE_MAX {
         return Err(crate::error::Error::Other(format!(
             "file too large ({} MB): {}",
             file_size / (1024 * 1024),
@@ -74,20 +74,20 @@ pub fn normalize(filepath: &Path) -> Result<String> {
 }
 
 fn try_normalize_json(content: &str) -> Option<String> {
-    // Try Claude Code JSONL first
+    // Try Claude Code JSONL first.
     if let Some(result) = claude_code::try_parse(content) {
         return Some(result);
     }
 
-    // Try Codex CLI JSONL
+    // Try Codex CLI JSONL.
     if let Some(result) = codex::try_parse(content) {
         return Some(result);
     }
 
-    // Try parsing as JSON
+    // Try parsing as JSON.
     let data: serde_json::Value = serde_json::from_str(content).ok()?;
 
-    // Try each format
+    // Try each format.
     for parser in [claude_ai::try_parse, chatgpt::try_parse, slack::try_parse] {
         if let Some(result) = parser(&data) {
             return Some(result);
@@ -156,7 +156,7 @@ mod tests {
 
     #[test]
     fn normalize_passthrough_with_markers() {
-        // Text with >= 3 lines starting with > should pass through
+        // Text with >= 3 lines starting with > should pass through.
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         let path = temp_dir.path().join("test.txt");
         std::fs::write(
@@ -166,7 +166,7 @@ mod tests {
         .expect("write test file");
         let result = normalize(&path).expect("normalize");
         assert!(result.contains("> hello"));
-        // TempDir auto-cleans up when dropped
+        // TempDir auto-cleans up when dropped.
     }
 
     #[test]
@@ -348,15 +348,15 @@ mod tests {
     #[test]
     fn normalize_file_too_large_returns_error() {
         // Files exceeding the 500 MB safety limit must be rejected. Create a sparse
-        // file (no disk space consumed) whose metadata reports a size above MAX_SIZE.
+        // file (no disk space consumed) whose metadata reports a size above SIZE_MAX.
         let temp_directory =
             tempfile::tempdir().expect("failed to create temporary directory for size-limit test");
         let filepath = temp_directory.path().join("huge.json");
         let file = std::fs::File::create(&filepath)
             .expect("failed to create sparse file for size-limit test");
-        // 500 MB + 1 byte exceeds the MAX_SIZE constant (500 * 1024 * 1024).
+        // 500 MB + 1 byte exceeds the SIZE_MAX constant (500 * 1024 * 1024).
         file.set_len(500 * 1024 * 1024 + 1)
-            .expect("failed to set sparse file length above MAX_SIZE");
+            .expect("failed to set sparse file length above SIZE_MAX");
         drop(file);
 
         let result = normalize(&filepath);

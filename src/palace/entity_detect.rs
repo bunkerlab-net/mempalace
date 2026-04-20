@@ -18,6 +18,7 @@ static SINGLE_RE: LazyLock<Regex> = LazyLock::new(|| {
     )
 });
 
+// Regex pattern is a compile-time literal and cannot fail to compile at runtime.
 #[allow(clippy::expect_used)]
 // Matches two or more consecutive capitalized words (multi-word entity names).
 static MULTI_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -26,6 +27,7 @@ static MULTI_RE: LazyLock<Regex> = LazyLock::new(|| {
     )
 });
 
+// Regex pattern is a compile-time literal and cannot fail to compile at runtime.
 #[allow(clippy::expect_used)]
 // Matches gendered and plural pronouns to score person-like proximity.
 static PRONOUN_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -39,7 +41,6 @@ pub struct DetectedEntity {
     pub entity_type: String, // "person", "project", or "uncertain"
     pub confidence: f64,
     pub frequency: usize,
-    pub signals: Vec<String>,
 }
 
 /// Detection results grouped by type.
@@ -50,19 +51,26 @@ pub struct DetectionResult {
 }
 
 /// Scan files and detect entity candidates.
-pub fn detect_entities(file_paths: &[&Path], max_files: usize) -> DetectionResult {
-    assert!(max_files > 0, "detect_entities: max_files must be positive");
+pub fn detect_entities(file_paths: &[&Path], files_max: usize) -> DetectionResult {
+    assert!(files_max > 0, "detect_entities: files_max must be positive");
     let mut all_text = String::new();
     let mut all_lines = Vec::new();
-    let max_bytes_per_file = 5000;
+    let bytes_per_file_max = 5000;
 
     for (i, path) in file_paths.iter().enumerate() {
-        if i >= max_files {
+        if i >= files_max {
             break;
         }
         if let Ok(content) = fs::read_to_string(path) {
-            let truncated = if content.len() > max_bytes_per_file {
-                &content[..max_bytes_per_file]
+            let truncated = if content.len() > bytes_per_file_max {
+                // Walk backward from the byte limit to find a valid UTF-8 char
+                // boundary.  Slicing at a raw byte offset can land mid-codepoint
+                // for multi-byte characters (emoji, CJK, accented letters) and panic.
+                let mut end = bytes_per_file_max;
+                while end > 0 && !content.is_char_boundary(end) {
+                    end -= 1;
+                }
+                &content[..end]
             } else {
                 &content
             };
@@ -72,6 +80,15 @@ pub fn detect_entities(file_paths: &[&Path], max_files: usize) -> DetectionResul
         }
     }
 
+    // Guard against the case where no files were readable: extract_candidates
+    // has an assert!(!text.is_empty()) that would panic on empty input.
+    if all_text.is_empty() {
+        return DetectionResult {
+            people: vec![],
+            projects: vec![],
+            uncertain: vec![],
+        };
+    }
     let candidates = extract_candidates(&all_text);
     if candidates.is_empty() {
         return DetectionResult {
@@ -99,6 +116,29 @@ pub fn detect_entities(file_paths: &[&Path], max_files: usize) -> DetectionResul
         }
     }
 
+    detect_entities_sort_and_truncate(&mut people, &mut projects, &mut uncertain);
+
+    DetectionResult {
+        people,
+        projects,
+        uncertain,
+    }
+}
+
+/// Called by `detect_entities` to keep that function within the 70-line limit.
+///
+/// Sort each result list by descending confidence (people, projects) or descending
+/// frequency (uncertain), then truncate to the per-category caps of 15/10/8.
+fn detect_entities_sort_and_truncate(
+    people: &mut Vec<DetectedEntity>,
+    projects: &mut Vec<DetectedEntity>,
+    uncertain: &mut Vec<DetectedEntity>,
+) {
+    assert!(
+        people.len() + projects.len() + uncertain.len() > 0,
+        "at least one entity must be present"
+    );
+
     people.sort_by(|a, b| {
         b.confidence
             .partial_cmp(&a.confidence)
@@ -119,12 +159,6 @@ pub fn detect_entities(file_paths: &[&Path], max_files: usize) -> DetectionResul
     debug_assert!(people.len() <= 15);
     debug_assert!(projects.len() <= 10);
     debug_assert!(uncertain.len() <= 8);
-
-    DetectionResult {
-        people,
-        projects,
-        uncertain,
-    }
 }
 
 /// Build the stop word set for entity candidate extraction.
@@ -175,6 +209,8 @@ fn extract_candidates_stop_words() -> HashSet<&'static str> {
     stops
 }
 
+/// Extract capitalized-word candidates from `text`, filtered by stop words and a
+/// minimum frequency of 3 occurrences.  Returns a map of candidate name to count.
 fn extract_candidates(text: &str) -> HashMap<String, usize> {
     assert!(
         !text.is_empty(),
@@ -204,10 +240,10 @@ fn extract_candidates(text: &str) -> HashMap<String, usize> {
     // Require at least 3 occurrences before treating a name as an entity.
     // Once or twice is likely a passing reference; three times suggests the
     // name is a recurring actor or concept worth storing.
-    counts.retain(|_, v| *v >= 3);
+    counts.retain(|_, freq| *freq >= 3);
 
     // Postcondition: all surviving candidates have frequency >= 3.
-    debug_assert!(counts.values().all(|&v| v >= 3));
+    debug_assert!(counts.values().all(|&freq| freq >= 3));
 
     counts
 }
@@ -215,32 +251,34 @@ fn extract_candidates(text: &str) -> HashMap<String, usize> {
 struct EntityScores {
     person_score: i32,
     project_score: i32,
-    person_signals: Vec<String>,
-    project_signals: Vec<String>,
+    // Count of distinct person-signal categories (verb, dialogue, pronoun, addressed)
+    // used by classify_entity to require corroboration before committing to "person".
+    person_category_count: usize,
 }
 
 /// Score person-related signals: verb patterns, dialogue markers, pronouns, direct address.
-fn score_entity_person(
-    name: &str,
-    escaped: &str,
-    text: &str,
-    lines: &[String],
-) -> (i32, Vec<String>) {
+/// Returns `(score, category_count)` where `category_count` is the number of distinct
+/// signal categories that fired (verb, dialogue, pronoun, addressed — max 4).
+fn score_entity_person(name: &str, escaped: &str, text: &str, lines: &[String]) -> (i32, usize) {
     let mut score = 0i32;
-    let mut signals = Vec::new();
+    let mut category_count: usize = 0;
 
     let person_verbs = [
         "said", "asked", "told", "replied", "laughed", "smiled", "cried", "felt", "thinks?",
         "wants?", "loves?", "hates?", "knows?", "decided", "pushed", "wrote",
     ];
+    let mut verb_hit = false;
     for verb in person_verbs {
         if let Ok(re) = Regex::new(&format!(r"(?i)\b{escaped}\s+{verb}\b")) {
             let count = re.find_iter(text).count();
             if count > 0 {
                 score += i32::try_from(count).unwrap_or(i32::MAX) * 2;
-                signals.push(format!("'{name} {verb}' ({count}x)"));
+                verb_hit = true;
             }
         }
+    }
+    if verb_hit {
+        category_count += 1;
     }
 
     let dialogue_pats = [
@@ -248,31 +286,24 @@ fn score_entity_person(
         format!(r"(?im)^{escaped}:\s"),
         format!(r"(?im)^\[{escaped}\]"),
     ];
+    let mut dialogue_hit = false;
     for pat in &dialogue_pats {
         if let Ok(re) = Regex::new(pat) {
             let count = re.find_iter(text).count();
             if count > 0 {
                 score += i32::try_from(count).unwrap_or(i32::MAX) * 3;
-                signals.push(format!("dialogue marker ({count}x)"));
+                dialogue_hit = true;
             }
         }
+    }
+    if dialogue_hit {
+        category_count += 1;
     }
 
-    let name_lower = name.to_lowercase();
-    let mut pronoun_hits = 0;
-    for (i, line) in lines.iter().enumerate() {
-        if line.to_lowercase().contains(&name_lower) {
-            let start = i.saturating_sub(2);
-            let end = (i + 3).min(lines.len());
-            let window: String = lines[start..end].join(" ");
-            if PRONOUN_RE.is_match(&window) {
-                pronoun_hits += 1;
-            }
-        }
-    }
+    let pronoun_hits = score_entity_person_pronoun_score(name, lines);
     if pronoun_hits > 0 {
         score += pronoun_hits * 2;
-        signals.push(format!("pronoun nearby ({pronoun_hits}x)"));
+        category_count += 1;
     }
 
     if let Ok(re) = Regex::new(&format!(
@@ -281,18 +312,48 @@ fn score_entity_person(
         let count = re.find_iter(text).count();
         if count > 0 {
             score += i32::try_from(count).unwrap_or(i32::MAX) * 4;
-            signals.push(format!("addressed directly ({count}x)"));
+            category_count += 1;
         }
     }
 
-    signals.truncate(3);
-    (score, signals)
+    (score, category_count)
 }
 
-/// Score project-related signals: build/deploy verbs, versioned references.
-fn score_entity_project(escaped: &str, text: &str) -> (i32, Vec<String>) {
+/// Called by `score_entity_person` to keep that function within the 70-line limit.
+///
+/// Scan `lines` for lines containing `name` and count how many have a gendered or
+/// plural pronoun within a ±2-line window, indicating a person-like antecedent.
+/// Returns the raw hit count (caller multiplies by weight).
+fn score_entity_person_pronoun_score(name: &str, lines: &[String]) -> i32 {
+    assert!(!name.is_empty(), "name must not be empty");
+
+    let name_lower = name.to_lowercase();
+    // Build a word-boundary regex so "al" does not match inside "palantir".
+    // Compile once outside the loop; fall back to no matches if the name yields
+    // an invalid pattern (cannot happen with regex::escape, but handle gracefully).
+    let escaped = regex::escape(&name_lower);
+    let name_re = Regex::new(&format!(r"(?i)\b{escaped}\b")).ok();
+    let mut pronoun_hits = 0i32;
+    for (i, line) in lines.iter().enumerate() {
+        if name_re.as_ref().is_some_and(|re| re.is_match(line)) {
+            let start = i.saturating_sub(2);
+            let end = (i + 3).min(lines.len());
+            let window: String = lines[start..end].join(" ");
+            if PRONOUN_RE.is_match(&window) {
+                pronoun_hits += 1;
+            }
+        }
+    }
+
+    // Postcondition: hit count is non-negative.
+    debug_assert!(pronoun_hits >= 0);
+
+    pronoun_hits
+}
+
+/// Score project-related signals for `escaped` against `text`: build/deploy verbs and versioned references.
+fn score_entity_project(escaped: &str, text: &str) -> i32 {
     let mut score = 0i32;
-    let mut signals = Vec::new();
 
     let project_pats = [
         format!(r"(?i)\bbuilding\s+{escaped}\b"),
@@ -311,7 +372,6 @@ fn score_entity_project(escaped: &str, text: &str) -> (i32, Vec<String>) {
             let count = re.find_iter(text).count();
             if count > 0 {
                 score += i32::try_from(count).unwrap_or(i32::MAX) * 2;
-                signals.push(format!("project verb ({count}x)"));
             }
         }
     }
@@ -320,33 +380,34 @@ fn score_entity_project(escaped: &str, text: &str) -> (i32, Vec<String>) {
         let count = re.find_iter(text).count();
         if count > 0 {
             score += i32::try_from(count).unwrap_or(i32::MAX) * 3;
-            signals.push(format!("versioned ({count}x)"));
         }
     }
 
-    signals.truncate(3);
-    (score, signals)
+    score
 }
 
+/// Compute person and project signal scores for `name` against `text` and `lines`.
+///
+/// Returns an [`EntityScores`] combining the outputs of `score_entity_person`
+/// and `score_entity_project`.
 fn score_entity(name: &str, text: &str, lines: &[String]) -> EntityScores {
     assert!(!name.is_empty(), "score_entity: name must not be empty");
     let escaped = regex::escape(name);
 
-    let (person_score, person_signals) = score_entity_person(name, &escaped, text, lines);
-    let (project_score, project_signals) = score_entity_project(&escaped, text);
-
+    let (person_score, person_category_count) = score_entity_person(name, &escaped, text, lines);
     EntityScores {
         person_score,
-        project_score,
-        person_signals,
-        project_signals,
+        project_score: score_entity_project(&escaped, text),
+        person_category_count,
     }
 }
 
+/// Classify `name` into `"person"`, `"project"`, or `"uncertain"` based on its signal scores
+/// and occurrence frequency.
 fn classify_entity(name: &str, frequency: usize, scores: &EntityScores) -> DetectedEntity {
-    let ps = scores.person_score;
-    let prs = scores.project_score;
-    let total = ps + prs;
+    let person_score = scores.person_score;
+    let project_score = scores.project_score;
+    let total = person_score + project_score;
 
     if total == 0 {
         // frequency is a name occurrence count, always small enough for exact f64 representation
@@ -357,63 +418,41 @@ fn classify_entity(name: &str, frequency: usize, scores: &EntityScores) -> Detec
             entity_type: "uncertain".to_string(),
             confidence,
             frequency,
-            signals: vec![format!("appears {frequency}x, no strong type signals")],
         };
     }
 
-    let person_ratio = f64::from(ps) / f64::from(total);
+    let person_ratio = f64::from(person_score) / f64::from(total);
 
-    // Count distinct signal categories to distinguish corroborated person signals
-    // from pronoun-only matches, which are too weak for a confident classification.
-    let mut signal_cats: HashSet<&str> = HashSet::new();
-    for s in &scores.person_signals {
-        if s.contains("dialogue") {
-            signal_cats.insert("dialogue");
-        } else if s.contains("action") || s.contains("said") || s.contains("asked") {
-            signal_cats.insert("action");
-        } else if s.contains("pronoun") {
-            signal_cats.insert("pronoun");
-        } else if s.contains("addressed") {
-            signal_cats.insert("addressed");
-        }
-    }
-    let has_two = signal_cats.len() >= 2;
+    // Require at least two distinct signal categories to distinguish corroborated
+    // person signals from pronoun-only matches, which are too weak alone.
+    let has_two = scores.person_category_count >= 2;
 
-    classify_entity_build(name, frequency, scores, person_ratio, has_two, ps)
+    classify_entity_build(name, frequency, person_ratio, has_two, person_score)
 }
 
-/// Build the `DetectedEntity` once `person_ratio` and `has_two` are known.
+/// Called by [`classify_entity`] to keep that function within the 70-line limit.
+///
+/// Constructs the [`DetectedEntity`] from pre-computed ratio and corroboration flags.
 fn classify_entity_build(
     name: &str,
     frequency: usize,
-    scores: &EntityScores,
     person_ratio: f64,
     has_two: bool,
-    ps: i32,
+    person_score: i32,
 ) -> DetectedEntity {
-    if person_ratio >= 0.7 && has_two && ps >= 5 {
+    if person_ratio >= 0.7 && has_two && person_score >= 5 {
         DetectedEntity {
             name: name.to_string(),
             entity_type: "person".to_string(),
             confidence: (0.5 + person_ratio * 0.5).min(0.99),
             frequency,
-            signals: if scores.person_signals.is_empty() {
-                vec![format!("appears {frequency}x")]
-            } else {
-                scores.person_signals.clone()
-            },
         }
-    } else if person_ratio >= 0.7 && (!has_two || ps < 5) {
+    } else if person_ratio >= 0.7 && (!has_two || person_score < 5) {
         DetectedEntity {
             name: name.to_string(),
             entity_type: "uncertain".to_string(),
             confidence: 0.4,
             frequency,
-            signals: {
-                let mut s = scores.person_signals.clone();
-                s.push(format!("appears {frequency}x — pronoun-only match"));
-                s
-            },
         }
     } else if person_ratio <= 0.3 {
         DetectedEntity {
@@ -421,23 +460,13 @@ fn classify_entity_build(
             entity_type: "project".to_string(),
             confidence: (0.5 + (1.0 - person_ratio) * 0.5).min(0.99),
             frequency,
-            signals: if scores.project_signals.is_empty() {
-                vec![format!("appears {frequency}x")]
-            } else {
-                scores.project_signals.clone()
-            },
         }
     } else {
-        let mut signals: Vec<String> = scores.person_signals.clone();
-        signals.extend(scores.project_signals.clone());
-        signals.truncate(3);
-        signals.push("mixed signals — needs review".to_string());
         DetectedEntity {
             name: name.to_string(),
             entity_type: "uncertain".to_string(),
             confidence: 0.5,
             frequency,
-            signals,
         }
     }
 }
@@ -528,8 +557,8 @@ mod tests {
             "Person score should be positive when speech verbs are present"
         );
         assert!(
-            !scores.person_signals.is_empty(),
-            "Person signals should be non-empty for speech verb matches"
+            scores.person_category_count > 0,
+            "Person category count should be positive for speech verb matches"
         );
     }
 
@@ -543,24 +572,16 @@ mod tests {
             scores.project_score > 0,
             "Project score should be positive when build verbs are present"
         );
-        assert!(
-            !scores.project_signals.is_empty(),
-            "Project signals should be non-empty for build verb matches"
-        );
     }
 
     #[test]
     fn classify_entity_as_person() {
         // High person score with multiple signal categories triggers person classification.
+        // person_category_count >= 2 satisfies the has_two corroboration requirement.
         let scores = EntityScores {
             person_score: 12,
             project_score: 0,
-            person_signals: vec![
-                "'Alice said' (3x)".to_string(),
-                "dialogue marker (2x)".to_string(),
-                "pronoun nearby (1x)".to_string(),
-            ],
-            project_signals: vec![],
+            person_category_count: 3,
         };
         let entity = classify_entity("Alice", 10, &scores);
         assert_eq!(
@@ -579,8 +600,7 @@ mod tests {
         let scores = EntityScores {
             person_score: 0,
             project_score: 10,
-            person_signals: vec![],
-            project_signals: vec!["project verb (5x)".to_string()],
+            person_category_count: 0,
         };
         let entity = classify_entity("Mempalace", 8, &scores);
         assert_eq!(
@@ -617,13 +637,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn detect_entities_with_project_entities() {
-        // Exercises the project classification branch in detect_entities.
-        // Each project name appears 4+ times with build/deploy verbs and zero
-        // person signals, pushing person_ratio <= 0.3 so classify_entity picks
-        // the "project" branch. Person names get speech verbs and pronouns to
-        // land in the "person" bucket and verify both arms fire in one call.
+    /// Called by `detect_entities_with_project_entities` to keep that function within the 70-line limit.
+    ///
+    /// Create two temp files with content designed to trigger project and person
+    /// classification branches.  Returns `(tempdir, path_one, path_two)`; the
+    /// caller must keep `tempdir` alive for the duration of the test.
+    fn detect_entities_with_project_entities_setup_files()
+    -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
         let temp_directory = tempfile::tempdir()
             .expect("failed to create temporary directory for entity detection test");
 
@@ -664,13 +684,26 @@ Clara said the migration is complete. He agreed.\n";
             .write_all(content_two.as_bytes())
             .expect("failed to write second temp file for project entity test");
 
+        (temp_directory, file_path_one, file_path_two)
+    }
+
+    #[test]
+    fn detect_entities_with_project_entities() {
+        // Exercises the project classification branch in detect_entities.
+        // Each project name appears 4+ times with build/deploy verbs and zero
+        // person signals, pushing person_ratio <= 0.3 so classify_entity picks
+        // the "project" branch. Person names get speech verbs and pronouns to
+        // land in the "person" bucket and verify both arms fire in one call.
+        let (_temp_directory, file_path_one, file_path_two) =
+            detect_entities_with_project_entities_setup_files();
+
         let paths: Vec<&Path> = vec![file_path_one.as_path(), file_path_two.as_path()];
         let result = detect_entities(&paths, 10);
 
         // Postcondition: detection found entities across multiple categories.
-        let total_entities = result.people.len() + result.projects.len() + result.uncertain.len();
+        let entities_total = result.people.len() + result.projects.len() + result.uncertain.len();
         assert!(
-            total_entities > 0,
+            entities_total > 0,
             "detection should find at least one entity across all categories"
         );
 

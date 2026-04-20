@@ -4,15 +4,12 @@ mod config;
 mod db;
 mod dialect;
 mod error;
-#[allow(dead_code)]
-mod extract;
 mod kg;
 mod mcp;
 mod normalize;
 mod palace;
 mod schema;
 #[cfg(test)]
-#[allow(dead_code)]
 mod test_helpers;
 
 use clap::Parser;

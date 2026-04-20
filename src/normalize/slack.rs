@@ -73,16 +73,16 @@ pub fn try_parse(data: &serde_json::Value) -> Option<String> {
         let role = if let Some(existing_role) = seen_users.get(&user_id) {
             existing_role.clone()
         } else {
-            let new_role = if seen_users.is_empty() {
+            let role_new = if seen_users.is_empty() {
                 "user".to_string()
             } else if last_role.as_deref() == Some("user") {
                 "assistant".to_string()
             } else {
                 "user".to_string()
             };
-            seen_users.insert(user_id.clone(), new_role.clone());
-            last_role = Some(new_role.clone());
-            new_role
+            seen_users.insert(user_id.clone(), role_new.clone());
+            last_role = Some(role_new.clone());
+            role_new
         };
         // Prefix with speaker ID so the original author is preserved in the transcript.
         messages.push((role, format!("[{user_id}] {text}")));
@@ -91,7 +91,7 @@ pub fn try_parse(data: &serde_json::Value) -> Option<String> {
     if messages.len() >= 2 {
         let refs: Vec<(&str, &str)> = messages
             .iter()
-            .map(|(r, t)| (r.as_str(), t.as_str()))
+            .map(|(role, text)| (role.as_str(), text.as_str()))
             .collect();
         Some(messages_to_transcript(&refs) + PROVENANCE_FOOTER)
     } else {
@@ -143,7 +143,7 @@ mod tests {
         let result = try_parse(&data).expect("should parse");
         let lines: Vec<&str> = result.lines().collect();
 
-        // Filter out empty lines to check role markers
+        // Filter out empty lines to check role markers.
         let non_empty_lines: Vec<&str> = lines.iter().copied().filter(|l| !l.is_empty()).collect();
         assert!(
             non_empty_lines.len() >= 5,
@@ -151,24 +151,24 @@ mod tests {
             non_empty_lines.len()
         );
 
-        // Verify role alternation by checking > markers
-        // U1 is "user" (has > marker)
+        // Verify role alternation by checking > markers.
+        // U1 is "user" (has > marker).
         assert!(
             non_empty_lines[0].starts_with('>') && non_empty_lines[0].contains("first message")
         );
-        // U2 is "assistant" (no > marker)
+        // U2 is "assistant" (no > marker).
         assert!(
             !non_empty_lines[1].starts_with('>') && non_empty_lines[1].contains("second message")
         );
-        // U3 is "user" (has > marker)
+        // U3 is "user" (has > marker).
         assert!(
             non_empty_lines[2].starts_with('>') && non_empty_lines[2].contains("third message")
         );
-        // U1 remains "user" (has > marker)
+        // U1 remains "user" (has > marker).
         assert!(
             non_empty_lines[3].starts_with('>') && non_empty_lines[3].contains("back to first")
         );
-        // U2 remains "assistant" (no > marker)
+        // U2 remains "assistant" (no > marker).
         assert!(
             !non_empty_lines[4].starts_with('>') && non_empty_lines[4].contains("back to second")
         );

@@ -36,7 +36,7 @@ pub struct KgStats {
     /// Total triple count.
     pub triples: i64,
     /// Triples with no `valid_to` (still active).
-    pub current_facts: i64,
+    pub facts_current: i64,
     /// Triples with a `valid_to` set.
     pub expired_facts: i64,
     /// Distinct predicate values across all triples.
@@ -54,14 +54,20 @@ fn query_entity_row_to_fact(
     let predicate = row
         .get_value(1)
         .ok()
-        .and_then(|v| v.as_text().cloned())
+        .and_then(|cell| cell.as_text().cloned())
         .unwrap_or_default();
-    let valid_from = row.get_value(3).ok().and_then(|v| v.as_text().cloned());
-    let valid_to = row.get_value(4).ok().and_then(|v| v.as_text().cloned());
+    let valid_from = row
+        .get_value(3)
+        .ok()
+        .and_then(|cell| cell.as_text().cloned());
+    let valid_to = row
+        .get_value(4)
+        .ok()
+        .and_then(|cell| cell.as_text().cloned());
     let confidence = row
         .get_value(5)
         .ok()
-        .and_then(|v| v.as_real().copied())
+        .and_then(|cell| cell.as_real().copied())
         .unwrap_or(1.0);
 
     Fact {
@@ -124,30 +130,30 @@ pub async fn query_entity(
         ));
     }
 
-    let eid = entity_id(name);
+    let entity_identifier = entity_id(name);
     let mut results = Vec::new();
 
     if direction == "outgoing" || direction == "both" {
-        let (sql, params) = query_entity_sql(&eid, as_of, "object", "subject");
+        let (sql, params) = query_entity_sql(&entity_identifier, as_of, "object", "subject");
         let rows = db::query_all(connection, &sql, turso::params_from_iter(params)).await?;
         for row in &rows {
             let obj_name = row
                 .get_value(6)
                 .ok()
-                .and_then(|v| v.as_text().cloned())
+                .and_then(|cell| cell.as_text().cloned())
                 .unwrap_or_default();
             results.push(query_entity_row_to_fact(row, "outgoing", name, &obj_name));
         }
     }
 
     if direction == "incoming" || direction == "both" {
-        let (sql, params) = query_entity_sql(&eid, as_of, "subject", "object");
+        let (sql, params) = query_entity_sql(&entity_identifier, as_of, "subject", "object");
         let rows = db::query_all(connection, &sql, turso::params_from_iter(params)).await?;
         for row in &rows {
             let sub_name = row
                 .get_value(6)
                 .ok()
-                .and_then(|v| v.as_text().cloned())
+                .and_then(|cell| cell.as_text().cloned())
                 .unwrap_or_default();
             results.push(query_entity_row_to_fact(row, "incoming", &sub_name, name));
         }
@@ -158,8 +164,14 @@ pub async fn query_entity(
 
 /// Get chronological timeline of facts.
 pub async fn timeline(connection: &Connection, entity: Option<&str>) -> Result<Vec<Fact>> {
+    // Precondition: when provided, the entity filter must be a non-empty, trimmed name.
+    if let Some(name) = entity {
+        assert!(!name.is_empty(), "timeline: entity name must not be empty");
+        assert!(name == name.trim(), "timeline: entity name must be trimmed");
+    }
+
     let (sql, params) = if let Some(name) = entity {
-        let eid = entity_id(name);
+        let entity_identifier = entity_id(name);
         (
             "SELECT t.predicate, t.valid_from, t.valid_to, s.name, o.name \
              FROM triples t \
@@ -168,7 +180,7 @@ pub async fn timeline(connection: &Connection, entity: Option<&str>) -> Result<V
              WHERE t.subject = ?1 OR t.object = ?1 \
              ORDER BY t.valid_from ASC"
                 .to_string(),
-            vec![turso::Value::from(eid.as_str())],
+            vec![turso::Value::from(entity_identifier.as_str())],
         )
     } else {
         (
@@ -190,19 +202,25 @@ pub async fn timeline(connection: &Connection, entity: Option<&str>) -> Result<V
         let predicate = row
             .get_value(0)
             .ok()
-            .and_then(|v| v.as_text().cloned())
+            .and_then(|cell| cell.as_text().cloned())
             .unwrap_or_default();
-        let valid_from = row.get_value(1).ok().and_then(|v| v.as_text().cloned());
-        let valid_to = row.get_value(2).ok().and_then(|v| v.as_text().cloned());
+        let valid_from = row
+            .get_value(1)
+            .ok()
+            .and_then(|cell| cell.as_text().cloned());
+        let valid_to = row
+            .get_value(2)
+            .ok()
+            .and_then(|cell| cell.as_text().cloned());
         let sub_name = row
             .get_value(3)
             .ok()
-            .and_then(|v| v.as_text().cloned())
+            .and_then(|cell| cell.as_text().cloned())
             .unwrap_or_default();
         let obj_name = row
             .get_value(4)
             .ok()
-            .and_then(|v| v.as_text().cloned())
+            .and_then(|cell| cell.as_text().cloned())
             .unwrap_or_default();
 
         facts.push(Fact {
@@ -225,15 +243,15 @@ pub async fn stats(connection: &Connection) -> Result<KgStats> {
     let entity_rows = db::query_all(connection, "SELECT COUNT(*) FROM entities", ()).await?;
     let entities = entity_rows
         .first()
-        .and_then(|r| r.get_value(0).ok())
-        .and_then(|v| v.as_integer().copied())
+        .and_then(|row| row.get_value(0).ok())
+        .and_then(|cell| cell.as_integer().copied())
         .unwrap_or(0);
 
     let triple_rows = db::query_all(connection, "SELECT COUNT(*) FROM triples", ()).await?;
     let triples = triple_rows
         .first()
-        .and_then(|r| r.get_value(0).ok())
-        .and_then(|v| v.as_integer().copied())
+        .and_then(|row| row.get_value(0).ok())
+        .and_then(|cell| cell.as_integer().copied())
         .unwrap_or(0);
 
     let current_rows = db::query_all(
@@ -244,8 +262,8 @@ pub async fn stats(connection: &Connection) -> Result<KgStats> {
     .await?;
     let current = current_rows
         .first()
-        .and_then(|r| r.get_value(0).ok())
-        .and_then(|v| v.as_integer().copied())
+        .and_then(|row| row.get_value(0).ok())
+        .and_then(|cell| cell.as_integer().copied())
         .unwrap_or(0);
 
     let pred_rows = db::query_all(
@@ -256,7 +274,11 @@ pub async fn stats(connection: &Connection) -> Result<KgStats> {
     .await?;
     let relationship_types: Vec<String> = pred_rows
         .iter()
-        .filter_map(|r| r.get_value(0).ok().and_then(|v| v.as_text().cloned()))
+        .filter_map(|row| {
+            row.get_value(0)
+                .ok()
+                .and_then(|cell| cell.as_text().cloned())
+        })
         .collect();
 
     let expired = triples - current;
@@ -269,7 +291,7 @@ pub async fn stats(connection: &Connection) -> Result<KgStats> {
     Ok(KgStats {
         entities,
         triples,
-        current_facts: current,
+        facts_current: current,
         expired_facts: expired,
         relationship_types,
     })
@@ -416,11 +438,11 @@ mod tests {
     async fn stats_empty() {
         let (_db, conn) = crate::test_helpers::test_db().await;
 
-        let s = stats(&conn)
+        let kg_stats = stats(&conn)
             .await
             .expect("stats should succeed on empty database");
-        assert_eq!(s.entities, 0, "fresh DB should have 0 entities");
-        assert_eq!(s.triples, 0, "fresh DB should have 0 triples");
+        assert_eq!(kg_stats.entities, 0, "fresh DB should have 0 entities");
+        assert_eq!(kg_stats.triples, 0, "fresh DB should have 0 triples");
     }
 
     #[tokio::test]
@@ -428,11 +450,14 @@ mod tests {
         let (_db, conn) = crate::test_helpers::test_db().await;
         seed_alice_knows_bob(&conn).await;
 
-        let s = stats(&conn)
+        let kg_stats = stats(&conn)
             .await
             .expect("stats should succeed after seeding data");
-        assert!(s.entities > 0, "seeded DB should have entities");
-        assert!(s.triples > 0, "seeded DB should have triples");
-        assert_eq!(s.current_facts, s.triples, "no expired facts yet");
+        assert!(kg_stats.entities > 0, "seeded DB should have entities");
+        assert!(kg_stats.triples > 0, "seeded DB should have triples");
+        assert_eq!(
+            kg_stats.facts_current, kg_stats.triples,
+            "no expired facts yet"
+        );
     }
 }

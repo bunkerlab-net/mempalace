@@ -12,8 +12,27 @@ use super::messages_to_transcript;
 /// — one-sided transcripts (e.g. system-prompt-only files) are rejected.
 pub fn try_parse(data: &serde_json::Value) -> Option<String> {
     let mapping = data.as_object()?.get("mapping")?.as_object()?;
+    let root = try_parse_find_root(mapping)?;
+    let messages = try_parse_walk_tree(root, mapping)?;
 
-    // Find root node (parent=null, no message)
+    // Require at least one user turn AND at least one assistant turn so we
+    // never store a one-sided transcript (e.g. a file with only system prompts).
+    let has_user = messages.iter().any(|(role, _)| role == "user");
+    let has_assistant = messages.iter().any(|(role, _)| role == "assistant");
+    if has_user && has_assistant {
+        let refs: Vec<(&str, &str)> = messages
+            .iter()
+            .map(|(role, text)| (role.as_str(), text.as_str()))
+            .collect();
+        Some(messages_to_transcript(&refs))
+    } else {
+        None
+    }
+}
+
+/// Find the root node ID in a `ChatGPT` mapping — the node with `parent=null`
+/// and no message body. Falls back to the first null-parent node with a message.
+fn try_parse_find_root(mapping: &serde_json::Map<String, serde_json::Value>) -> Option<&str> {
     let mut root_id: Option<&str> = None;
     let mut fallback_root: Option<&str> = None;
 
@@ -28,20 +47,30 @@ pub fn try_parse(data: &serde_json::Value) -> Option<String> {
         }
     }
 
-    let root = root_id.or(fallback_root)?;
+    root_id.or(fallback_root)
+}
+
+/// Walk the linear path of the message tree from `root`, collecting (role, text) pairs.
+///
+/// Returns `None` if any node lookup fails (malformed export). Always follows the
+/// first child so branching edits are ignored — see the comment in `try_parse`.
+fn try_parse_walk_tree(
+    root: &str,
+    mapping: &serde_json::Map<String, serde_json::Value>,
+) -> Option<Vec<(String, String)>> {
     let mut messages: Vec<(String, String)> = Vec::new();
-    let mut current_id = root.to_string();
+    let mut id_current = root.to_string();
     let mut visited = HashSet::new();
 
     // Upper bound: each node in `mapping` can be visited at most once, so this
     // loop runs at most mapping.len() times regardless of the tree structure.
-    while !visited.contains(&current_id) {
+    while !visited.contains(&id_current) {
         assert!(
             visited.len() <= mapping.len(),
             "visited set cannot exceed mapping size — cycle guard is broken"
         );
-        visited.insert(current_id.clone());
-        let node = mapping.get(&current_id)?;
+        visited.insert(id_current.clone());
+        let node = mapping.get(&id_current)?;
 
         if let Some(msg) = node.get("message")
             && !msg.is_null()
@@ -78,7 +107,7 @@ pub fn try_parse(data: &serde_json::Value) -> Option<String> {
         let children = node.get("children").and_then(|c| c.as_array());
         if let Some(kids) = children {
             if let Some(first) = kids.first().and_then(|k| k.as_str()) {
-                current_id = first.to_string();
+                id_current = first.to_string();
             } else {
                 break;
             }
@@ -87,19 +116,7 @@ pub fn try_parse(data: &serde_json::Value) -> Option<String> {
         }
     }
 
-    // Require at least one user turn AND at least one assistant turn so we
-    // never store a one-sided transcript (e.g. a file with only system prompts).
-    let has_user = messages.iter().any(|(r, _)| r == "user");
-    let has_assistant = messages.iter().any(|(r, _)| r == "assistant");
-    if has_user && has_assistant {
-        let refs: Vec<(&str, &str)> = messages
-            .iter()
-            .map(|(r, t)| (r.as_str(), t.as_str()))
-            .collect();
-        Some(messages_to_transcript(&refs))
-    } else {
-        None
-    }
+    Some(messages)
 }
 
 #[cfg(test)]

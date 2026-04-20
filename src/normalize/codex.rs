@@ -20,14 +20,17 @@ pub fn try_parse(content: &str) -> Option<String> {
             continue;
         }
         let entry: serde_json::Value = match serde_json::from_str(line) {
-            Ok(v) => v,
+            Ok(parsed) => parsed,
             Err(_) => continue,
         };
         let Some(obj) = entry.as_object() else {
             continue;
         };
 
-        let entry_type = obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        let entry_type = obj
+            .get("type")
+            .and_then(|type_val| type_val.as_str())
+            .unwrap_or("");
 
         if entry_type == "session_meta" {
             has_session_meta = true;
@@ -38,13 +41,19 @@ pub fn try_parse(content: &str) -> Option<String> {
             continue;
         }
 
-        let Some(payload) = obj.get("payload").and_then(|v| v.as_object()) else {
+        let Some(payload) = obj
+            .get("payload")
+            .and_then(|payload_val| payload_val.as_object())
+        else {
             continue;
         };
 
-        let payload_type = payload.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        let text = match payload.get("message").and_then(|v| v.as_str()) {
-            Some(s) => s.trim().to_string(),
+        let payload_type = payload
+            .get("type")
+            .and_then(|type_val| type_val.as_str())
+            .unwrap_or("");
+        let text = match payload.get("message").and_then(|msg_val| msg_val.as_str()) {
+            Some(message) => message.trim().to_string(),
             None => continue,
         };
 
@@ -62,7 +71,7 @@ pub fn try_parse(content: &str) -> Option<String> {
     if has_session_meta && messages.len() >= 2 {
         let refs: Vec<(&str, &str)> = messages
             .iter()
-            .map(|(r, t)| (r.as_str(), t.as_str()))
+            .map(|(role, text)| (role.as_str(), text.as_str()))
             .collect();
         Some(messages_to_transcript(&refs))
     } else {

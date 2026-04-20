@@ -16,12 +16,12 @@ use super::protocol::{AAAK_SPEC, PALACE_PROTOCOL};
 
 /// Largest integer exactly representable as an f64 (2^53 − 1).
 /// Values above this lose precision when stored in f64, so we reject them.
-const MAX_EXACT_INT_F64: f64 = 9_007_199_254_740_991.0;
+const EXACT_INT_F64_MAX: f64 = 9_007_199_254_740_991.0;
 
 /// Maximum byte length for a tunnel label.  Labels are free-form strings stored
 /// in `SQLite`; without a cap an unbounded value could waste DB space or overflow
 /// index rows.  255 characters is generous for a short descriptive label.
-const MAX_LABEL_LEN: usize = 255;
+const LABEL_LEN_MAX: usize = 255;
 
 /// Exact character length of a tunnel ID.  Tunnel IDs are the first 16 hex
 /// characters of a SHA256 digest (see `canonical_tunnel_id` in graph.rs).
@@ -69,8 +69,12 @@ pub async fn dispatch(connection: &Connection, name: &str, args: &Value) -> Valu
     }
 }
 
+/// Extract a string argument from the tool args JSON object.
+/// Returns an empty string when the key is absent or the value is not a string.
 fn str_arg<'a>(args: &'a Value, key: &str) -> &'a str {
-    args.get(key).and_then(|v| v.as_str()).unwrap_or("")
+    args.get(key)
+        .and_then(|arg_val| arg_val.as_str())
+        .unwrap_or("")
 }
 
 /// Extract a positive integer argument, coercing floats and strings.
@@ -80,13 +84,14 @@ fn str_arg<'a>(args: &'a Value, key: &str) -> &'a str {
 /// of what the client sends. Only accepts finite, whole, positive integers (>0).
 fn int_arg(args: &Value, key: &str, default: i64) -> i64 {
     args.get(key)
-        .and_then(|v| {
-            v.as_i64()
+        .and_then(|arg_val| {
+            arg_val
+                .as_i64()
                 .filter(|&n| n > 0)
                 .or_else(|| {
-                    v.as_f64().and_then(|f| {
-                        if f.is_finite() && f > 0.0 && f <= MAX_EXACT_INT_F64 && f.fract() == 0.0 {
-                            // Safe: MAX_EXACT_INT_F64 (2^53-1) < i64::MAX, so the value fits exactly
+                    arg_val.as_f64().and_then(|f| {
+                        if f.is_finite() && f > 0.0 && f <= EXACT_INT_F64_MAX && f.fract() == 0.0 {
+                            // Safe: EXACT_INT_F64_MAX (2^53-1) < i64::MAX, so the value fits exactly
                             #[allow(clippy::cast_possible_truncation)]
                             Some(f as i64)
                         } else {
@@ -95,15 +100,15 @@ fn int_arg(args: &Value, key: &str, default: i64) -> i64 {
                     })
                 })
                 .or_else(|| {
-                    v.as_str().and_then(|s| {
-                        s.parse::<i64>().ok().filter(|&n| n > 0).or_else(|| {
-                            s.parse::<f64>().ok().and_then(|f| {
+                    arg_val.as_str().and_then(|str_val| {
+                        str_val.parse::<i64>().ok().filter(|&n| n > 0).or_else(|| {
+                            str_val.parse::<f64>().ok().and_then(|f| {
                                 if f.is_finite()
                                     && f > 0.0
-                                    && f <= MAX_EXACT_INT_F64
+                                    && f <= EXACT_INT_F64_MAX
                                     && f.fract() == 0.0
                                 {
-                                    // Safe: MAX_EXACT_INT_F64 (2^53-1) < i64::MAX, so the value fits exactly
+                                    // Safe: EXACT_INT_F64_MAX (2^53-1) < i64::MAX, so the value fits exactly
                                     #[allow(clippy::cast_possible_truncation)]
                                     Some(f as i64)
                                 } else {
@@ -125,28 +130,36 @@ fn int_arg(args: &Value, key: &str, default: i64) -> i64 {
 /// empty, too long, contains path-traversal sequences, null bytes, an invalid
 /// first character, or characters outside `[a-zA-Z0-9_ .'-]`.
 fn sanitize_name(value: &str, field_name: &str) -> Result<String, Value> {
-    let v = value.trim();
-    if v.is_empty() {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
         return Err(
             json!({"success": false, "error": format!("{field_name} must be a non-empty string"), "public": true}),
         );
     }
-    if v.len() > 128 {
+    if trimmed.len() > 128 {
         return Err(
             json!({"success": false, "error": format!("{field_name} exceeds maximum length of 128 characters"), "public": true}),
         );
     }
-    if v.contains("..") || v.contains('/') || v.contains('\\') || v.contains('\x00') {
+    if trimmed.contains("..")
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains('\x00')
+    {
         return Err(
             json!({"success": false, "error": format!("{field_name} contains invalid characters"), "public": true}),
         );
     }
-    if !v.chars().next().is_some_and(|c| c.is_ascii_alphanumeric()) {
+    if !trimmed
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric())
+    {
         return Err(
             json!({"success": false, "error": format!("{field_name} must start with an alphanumeric character"), "public": true}),
         );
     }
-    if !v
+    if !trimmed
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | ' ' | '.' | '\'' | '-'))
     {
@@ -154,7 +167,7 @@ fn sanitize_name(value: &str, field_name: &str) -> Result<String, Value> {
             json!({"success": false, "error": format!("{field_name} contains invalid characters"), "public": true}),
         );
     }
-    let result = v.to_string();
+    let result = trimmed.to_string();
 
     // Postconditions: result is non-empty, trimmed, and has no path-traversal chars.
     debug_assert!(!result.is_empty());
@@ -234,9 +247,9 @@ fn sanitize_label(value: &str) -> Result<String, Value> {
             json!({"success": false, "error": "label must be a non-empty string", "public": true}),
         );
     }
-    if trimmed.len() > MAX_LABEL_LEN {
+    if trimmed.chars().count() > LABEL_LEN_MAX {
         return Err(
-            json!({"success": false, "error": format!("label exceeds maximum length of {MAX_LABEL_LEN} characters"), "public": true}),
+            json!({"success": false, "error": format!("label exceeds maximum length of {LABEL_LEN_MAX} characters"), "public": true}),
         );
     }
     if trimmed.contains('\0') {
@@ -250,7 +263,7 @@ fn sanitize_label(value: &str) -> Result<String, Value> {
     debug_assert!(!result.is_empty());
     debug_assert!(result == result.trim());
     debug_assert!(!result.contains('\0'));
-    debug_assert!(result.len() <= MAX_LABEL_LEN);
+    debug_assert!(result.chars().count() <= LABEL_LEN_MAX);
 
     Ok(result)
 }
@@ -354,12 +367,13 @@ async fn wal_log(operation: &str, params: Value) {
                     eprintln!("WAL write failed: {e}");
                 }
             }
-            Err(e) => eprintln!("WAL write failed: {e}"),
+            Err(error) => eprintln!("WAL write failed: {error}"),
         }
     })
     .await;
 }
 
+/// Return a summary of all wings, rooms, and total drawer count.
 async fn tool_status(connection: &Connection) -> Value {
     let rows = query_all(
         connection,
@@ -369,8 +383,8 @@ async fn tool_status(connection: &Connection) -> Value {
     .await;
 
     let rows = match rows {
-        Ok(r) => r,
-        Err(e) => return json!({"error": e.to_string()}),
+        Ok(rows) => rows,
+        Err(error) => return json!({"error": error.to_string()}),
     };
 
     let mut wings: HashMap<String, i64> = HashMap::new();
@@ -395,6 +409,7 @@ async fn tool_status(connection: &Connection) -> Value {
     })
 }
 
+/// Return all wings with their drawer counts.
 async fn tool_list_wings(connection: &Connection) -> Value {
     let rows = query_all(
         connection,
@@ -413,14 +428,15 @@ async fn tool_list_wings(connection: &Connection) -> Value {
             }
             json!({"wings": wings})
         }
-        Err(e) => json!({"error": e.to_string()}),
+        Err(error) => json!({"error": error.to_string()}),
     }
 }
 
+/// Return rooms and their drawer counts, optionally filtered by wing.
 async fn tool_list_rooms(connection: &Connection, args: &Value) -> Value {
     let wing = match sanitize_opt_name(str_arg(args, "wing"), "wing") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
 
     let rows = if let Some(ref w) = wing {
@@ -449,10 +465,11 @@ async fn tool_list_rooms(connection: &Connection, args: &Value) -> Value {
             }
             json!({"wing": wing.as_deref().unwrap_or("all"), "rooms": rooms})
         }
-        Err(e) => json!({"error": e.to_string()}),
+        Err(error) => json!({"error": error.to_string()}),
     }
 }
 
+/// Return the full wing → room → drawer-count taxonomy tree.
 async fn tool_get_taxonomy(connection: &Connection) -> Value {
     let rows = query_all(
         connection,
@@ -472,10 +489,11 @@ async fn tool_get_taxonomy(connection: &Connection) -> Value {
             }
             json!({"taxonomy": taxonomy})
         }
-        Err(e) => json!({"error": e.to_string()}),
+        Err(error) => json!({"error": error.to_string()}),
     }
 }
 
+/// Full-text search the palace, returning ranked drawer results.
 async fn tool_search(connection: &Connection, args: &Value) -> Value {
     let raw_query = str_arg(args, "query").trim();
     if raw_query.is_empty() {
@@ -484,12 +502,12 @@ async fn tool_search(connection: &Connection, args: &Value) -> Value {
     let limit = usize::try_from(int_arg(args, "limit", 5).clamp(1, 100)).unwrap_or(5);
     let context_received = !str_arg(args, "context").trim().is_empty();
     let wing = match sanitize_opt_name(str_arg(args, "wing"), "wing") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
     let room = match sanitize_opt_name(str_arg(args, "room"), "room") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
 
     // Mitigate system prompt contamination before the search (mempalace-py issue #333).
@@ -507,22 +525,22 @@ async fn tool_search(connection: &Connection, args: &Value) -> Value {
         Ok(results) => {
             let items: Vec<Value> = results
                 .iter()
-                .map(|r| {
+                .map(|result| {
                     json!({
-                        "wing": r.wing,
-                        "room": r.room,
-                        "content": r.text,
-                        "source_file": r.source_file,
-                        "created_at": r.created_at,
-                        "similarity": r.relevance,
+                        "wing": result.wing,
+                        "room": result.room,
+                        "content": result.text,
+                        "source_file": result.source_file,
+                        "created_at": result.created_at,
+                        "similarity": result.relevance,
                     })
                 })
                 .collect();
             let count = items.len();
-            let mut out = json!({"results": items, "count": count});
+            let mut output = json!({"results": items, "count": count});
             if sanitized.was_sanitized {
-                out["query_sanitized"] = json!(true);
-                out["sanitizer"] = json!({
+                output["query_sanitized"] = json!(true);
+                output["sanitizer"] = json!({
                     "method": sanitized.method,
                     "original_length": sanitized.original_length,
                     "clean_length": sanitized.clean_length,
@@ -530,31 +548,32 @@ async fn tool_search(connection: &Connection, args: &Value) -> Value {
                 });
             }
             if context_received {
-                out["context_received"] = json!(true);
+                output["context_received"] = json!(true);
             }
-            out
+            output
         }
-        Err(e) => json!({"error": e.to_string()}),
+        Err(error) => json!({"error": error.to_string()}),
     }
 }
 
+/// Check whether content is a near-duplicate of an existing drawer.
 async fn tool_check_duplicate(connection: &Connection, args: &Value) -> Value {
     let content = str_arg(args, "content");
-    // Simple keyword overlap check since we don't have vector similarity
+    // Simple keyword overlap check since we don't have vector similarity.
     match search::search_memories(connection, content, None, None, 5).await {
         Ok(results) => {
             let matches: Vec<Value> = results
                 .iter()
-                .filter(|r| r.relevance > 3.0) // high word overlap
-                .map(|r| {
-                    let preview = if r.text.chars().count() > 200 {
-                        format!("{}...", r.text.chars().take(200).collect::<String>())
+                .filter(|result| result.relevance > 3.0) // high word overlap
+                .map(|result| {
+                    let preview = if result.text.chars().count() > 200 {
+                        format!("{}...", result.text.chars().take(200).collect::<String>())
                     } else {
-                        r.text.clone()
+                        result.text.clone()
                     };
                     json!({
-                        "wing": r.wing,
-                        "room": r.room,
+                        "wing": result.wing,
+                        "room": result.room,
                         "content": preview,
                     })
                 })
@@ -564,40 +583,45 @@ async fn tool_check_duplicate(connection: &Connection, args: &Value) -> Value {
                 "matches": matches,
             })
         }
-        Err(e) => json!({"error": e.to_string()}),
+        Err(error) => json!({"error": error.to_string()}),
     }
 }
 
+/// Insert a new drawer into the palace, computing a deterministic SHA256-based ID.
 async fn tool_add_drawer(connection: &Connection, args: &Value) -> Value {
     let wing = str_arg(args, "wing");
     let room = str_arg(args, "room");
     let content = str_arg(args, "content");
     let source_file = str_arg(args, "source_file");
     let added_by = {
-        let a = str_arg(args, "added_by");
-        if a.is_empty() { "mcp" } else { a }
+        let added_by_raw = str_arg(args, "added_by");
+        if added_by_raw.is_empty() {
+            "mcp"
+        } else {
+            added_by_raw
+        }
     };
 
     let wing = match sanitize_name(wing, "wing") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
     let room = match sanitize_name(room, "room") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
     let content = match sanitize_content(content) {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
 
     // Deterministic ID: sha256(wing+room+content) so the same content in
     // the same wing/room always produces the same ID, making the call idempotent.
     let hash = sha2::Sha256::digest(format!("{wing}\u{1f}{room}\u{1f}{content}").as_bytes());
-    let hex: String = hash.iter().fold(String::new(), |mut s, b| {
+    let hex: String = hash.iter().fold(String::new(), |mut hex_string, byte| {
         use std::fmt::Write as _;
-        let _ = write!(s, "{b:02x}");
-        s
+        let _ = write!(hex_string, "{byte:02x}");
+        hex_string
     });
     let id = format!("drawer_{wing}_{room}_{}", &hex[..24]);
     // Postcondition: deterministic ID follows naming convention.
@@ -661,14 +685,15 @@ async fn tool_add_drawer_insert(
             "wing": wing,
             "room": room,
         }),
-        Err(e) => json!({"success": false, "error": e.to_string()}),
+        Err(error) => json!({"success": false, "error": error.to_string()}),
     }
 }
 
+/// Delete a drawer and its inverted-index entries by ID.
 async fn tool_delete_drawer(connection: &Connection, args: &Value) -> Value {
     let drawer_id = match sanitize_name(str_arg(args, "drawer_id"), "drawer_id") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
     if !drawer_id.starts_with("drawer_") {
         return json!({"success": false, "error": "drawer_id has invalid format", "public": true});
@@ -681,7 +706,7 @@ async fn tool_delete_drawer(connection: &Connection, args: &Value) -> Value {
         .await
     {
         Ok(_) => {
-            // Also clean up inverted index
+            // Also clean up inverted index.
             let _ = connection
                 .execute(
                     "DELETE FROM drawer_words WHERE drawer_id = ?",
@@ -690,15 +715,15 @@ async fn tool_delete_drawer(connection: &Connection, args: &Value) -> Value {
                 .await;
             json!({"success": true, "drawer_id": drawer_id})
         }
-        Err(e) => json!({"success": false, "error": e.to_string()}),
+        Err(error) => json!({"success": false, "error": error.to_string()}),
     }
 }
 
 /// Fetch a single drawer by ID, returning its full content and metadata.
 async fn tool_get_drawer(connection: &Connection, args: &Value) -> Value {
     let drawer_id = match sanitize_name(str_arg(args, "drawer_id"), "drawer_id") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
     if !drawer_id.starts_with("drawer_") {
         return json!({"error": "drawer_id has invalid format", "public": true});
@@ -731,22 +756,22 @@ async fn tool_get_drawer(connection: &Connection, args: &Value) -> Value {
                 "filed_at": filed_at,
             })
         }
-        Err(e) => json!({"error": e.to_string()}),
+        Err(error) => json!({"error": error.to_string()}),
     }
 }
 
 /// List drawers with optional wing/room filtering and cursor-style pagination.
 async fn tool_list_drawers(connection: &Connection, args: &Value) -> Value {
-    const MAX_LIMIT: i64 = 100;
-    let limit = int_arg(args, "limit", 20).clamp(1, MAX_LIMIT);
+    const LIMIT_MAX: i64 = 100;
+    let limit = int_arg(args, "limit", 20).clamp(1, LIMIT_MAX);
     let offset = int_arg(args, "offset", 0).max(0);
     let wing = match sanitize_opt_name(str_arg(args, "wing"), "wing") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
     let room = match sanitize_opt_name(str_arg(args, "room"), "room") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
 
     match tool_list_drawers_query(connection, wing.as_ref(), room.as_ref(), limit, offset).await {
@@ -779,7 +804,7 @@ async fn tool_list_drawers(connection: &Connection, args: &Value) -> Value {
                 "limit": limit,
             })
         }
-        Err(e) => json!({"error": e.to_string()}),
+        Err(error) => json!({"error": error.to_string()}),
     }
 }
 
@@ -796,14 +821,14 @@ async fn tool_list_drawers_query(
     offset: i64,
 ) -> crate::error::Result<Vec<turso::Row>> {
     match (wing, room) {
-        (Some(w), Some(r)) => {
-            query_all(connection, "SELECT id, content, wing, room FROM drawers WHERE wing = ?1 AND room = ?2 AND (ingest_mode IS NULL OR ingest_mode != 'diary') ORDER BY filed_at DESC, id DESC LIMIT ?3 OFFSET ?4", (w.as_str(), r.as_str(), limit, offset)).await
+        (Some(wing_value), Some(room_value)) => {
+            query_all(connection, "SELECT id, content, wing, room FROM drawers WHERE wing = ?1 AND room = ?2 AND (ingest_mode IS NULL OR ingest_mode != 'diary') ORDER BY filed_at DESC, id DESC LIMIT ?3 OFFSET ?4", (wing_value.as_str(), room_value.as_str(), limit, offset)).await
         }
-        (Some(w), None) => {
-            query_all(connection, "SELECT id, content, wing, room FROM drawers WHERE wing = ?1 AND (ingest_mode IS NULL OR ingest_mode != 'diary') ORDER BY filed_at DESC, id DESC LIMIT ?2 OFFSET ?3", (w.as_str(), limit, offset)).await
+        (Some(wing_value), None) => {
+            query_all(connection, "SELECT id, content, wing, room FROM drawers WHERE wing = ?1 AND (ingest_mode IS NULL OR ingest_mode != 'diary') ORDER BY filed_at DESC, id DESC LIMIT ?2 OFFSET ?3", (wing_value.as_str(), limit, offset)).await
         }
-        (None, Some(r)) => {
-            query_all(connection, "SELECT id, content, wing, room FROM drawers WHERE room = ?1 AND (ingest_mode IS NULL OR ingest_mode != 'diary') ORDER BY filed_at DESC, id DESC LIMIT ?2 OFFSET ?3", (r.as_str(), limit, offset)).await
+        (None, Some(room_value)) => {
+            query_all(connection, "SELECT id, content, wing, room FROM drawers WHERE room = ?1 AND (ingest_mode IS NULL OR ingest_mode != 'diary') ORDER BY filed_at DESC, id DESC LIMIT ?2 OFFSET ?3", (room_value.as_str(), limit, offset)).await
         }
         (None, None) => {
             query_all(connection, "SELECT id, content, wing, room FROM drawers WHERE (ingest_mode IS NULL OR ingest_mode != 'diary') ORDER BY filed_at DESC, id DESC LIMIT ?1 OFFSET ?2", (limit, offset)).await
@@ -811,205 +836,260 @@ async fn tool_list_drawers_query(
     }
 }
 
+/// Parsed and validated arguments for `tool_update_drawer`.
+struct UpdateDrawerArgs {
+    drawer_id: String,
+    content_new: Option<String>,
+    wing_new: Option<String>,
+    room_new: Option<String>,
+}
+
+/// Parse and validate all input args for `tool_update_drawer`.
+///
+/// Returns `Ok(UpdateDrawerArgs)` on success.  Returns `Err(Value)` on
+/// validation failure **or** when no fields were supplied (noop), so the
+/// caller can return the value directly in both cases.
+fn tool_update_drawer_validate_args(args: &Value) -> Result<UpdateDrawerArgs, Value> {
+    let drawer_id = sanitize_name(str_arg(args, "drawer_id"), "drawer_id")?;
+    // Diary entries use UUID IDs; they must not be mutated via this handler.
+    if !drawer_id.starts_with("drawer_") {
+        return Err(
+            json!({"success": false, "error": "drawer_id has invalid format", "public": true}),
+        );
+    }
+    let content_new = match args.get("content") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(content_raw)) => Some(sanitize_content(content_raw)?),
+        Some(_) => {
+            return Err(
+                json!({"success": false, "error": "content must be a string", "public": true}),
+            );
+        }
+    };
+    let wing_new = match args.get("wing") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(wing_raw)) => sanitize_opt_name(wing_raw, "wing")?,
+        Some(_) => {
+            return Err(
+                json!({"success": false, "error": "wing must be a string", "public": true}),
+            );
+        }
+    };
+    let room_new = match args.get("room") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(room_raw)) => sanitize_opt_name(room_raw, "room")?,
+        Some(_) => {
+            return Err(
+                json!({"success": false, "error": "room must be a string", "public": true}),
+            );
+        }
+    };
+    // No-op: nothing to change.  Return as Err so the caller can return early.
+    if content_new.is_none() && wing_new.is_none() && room_new.is_none() {
+        return Err(json!({"success": true, "drawer_id": drawer_id, "noop": true}));
+    }
+    Ok(UpdateDrawerArgs {
+        drawer_id,
+        content_new,
+        wing_new,
+        room_new,
+    })
+}
+
+/// Compute the deterministic SHA256-based drawer ID from wing, room, and content.
+///
+/// Mirrors the ID computation in `tool_add_drawer` so that IDs stay consistent
+/// across add and update operations.
+fn tool_update_drawer_recompute_id(wing: &str, room: &str, content: &str) -> String {
+    let hash = sha2::Sha256::digest(format!("{wing}\u{1f}{room}\u{1f}{content}").as_bytes());
+    let hex: String = hash.iter().fold(String::new(), |mut hex_string, byte| {
+        use std::fmt::Write as _;
+        let _ = write!(hex_string, "{byte:02x}");
+        hex_string
+    });
+    format!("drawer_{wing}_{room}_{}", &hex[..24])
+}
+
+/// Check whether `new_id` already belongs to a different drawer, rejecting
+/// updates that would silently duplicate an existing entry.
+///
+/// Returns `Some(error_json)` if the update must be rejected, `None` if safe.
+async fn tool_update_drawer_check_duplicate(
+    connection: &Connection,
+    old_id: &str,
+    new_id: &str,
+) -> Option<Value> {
+    if new_id == old_id {
+        return None;
+    }
+    let existing = query_all(connection, "SELECT id FROM drawers WHERE id = ?", [new_id]).await;
+    match existing {
+        Ok(rows) if !rows.is_empty() => Some(json!({
+            "success": false,
+            "error": "A drawer with this wing/room/content already exists",
+            "existing_drawer_id": new_id,
+            "public": true,
+        })),
+        Err(error) => Some(json!({"success": false, "error": error.to_string()})),
+        Ok(_) => None,
+    }
+}
+
+/// Execute the transactional reindex: update the drawers row to its new ID,
+/// wing, room, and content, then rebuild the `drawer_words` full-text index.
+///
+/// Wraps all mutations in BEGIN/COMMIT so drawers and `drawer_words` cannot
+/// diverge if any step fails mid-flight.
+async fn tool_update_drawer_reindex(
+    connection: &Connection,
+    old_id: &str,
+    new_id: &str,
+    final_wing: &str,
+    final_room: &str,
+    final_content: &str,
+) -> Result<(), Value> {
+    if let Err(e) = connection.execute("BEGIN", ()).await {
+        return Err(json!({"success": false, "error": e.to_string()}));
+    }
+    if let Err(e) = connection
+        .execute(
+            "UPDATE drawers SET id = ?1, wing = ?2, room = ?3, content = ?4 WHERE id = ?5",
+            turso::params![new_id, final_wing, final_room, final_content, old_id],
+        )
+        .await
+    {
+        let _ = connection.execute("ROLLBACK", ()).await;
+        return Err(json!({"success": false, "error": e.to_string()}));
+    }
+    // Re-index words: always needed when the ID changes or content changes.
+    if let Err(e) = connection
+        .execute("DELETE FROM drawer_words WHERE drawer_id = ?", [old_id])
+        .await
+    {
+        let _ = connection.execute("ROLLBACK", ()).await;
+        return Err(json!({"success": false, "error": e.to_string()}));
+    }
+    if new_id != old_id {
+        // drawer_words rows for old_id were deleted above; if new_id already
+        // had entries (shouldn't happen — we checked above), clean those too.
+        let _ = connection
+            .execute("DELETE FROM drawer_words WHERE drawer_id = ?", [new_id])
+            .await;
+    }
+    if let Err(e) = drawer::index_words(connection, new_id, final_content).await {
+        let _ = connection.execute("ROLLBACK", ()).await;
+        return Err(json!({"success": false, "error": e.to_string()}));
+    }
+    if let Err(e) = connection.execute("COMMIT", ()).await {
+        let _ = connection.execute("ROLLBACK", ()).await;
+        return Err(json!({"success": false, "error": e.to_string()}));
+    }
+    Ok(())
+}
+
 /// Update an existing drawer's content and/or location (wing/room).
 ///
 /// Recomputes the deterministic SHA256 ID after any change to keep it
 /// consistent with `tool_add_drawer`.  Rejects updates that would collide
 /// with an existing drawer.
-// The complexity comes from: ID recomputation, duplicate detection, conditional
-// reindex, and error propagation — each a distinct correctness concern that
-// cannot be collapsed without obscuring the logic.
-#[allow(clippy::too_many_lines)]
 async fn tool_update_drawer(connection: &Connection, args: &Value) -> Value {
-    let drawer_id = match sanitize_name(str_arg(args, "drawer_id"), "drawer_id") {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
-    // Diary entries use UUID IDs; they must not be mutated via this handler.
-    if !drawer_id.starts_with("drawer_") {
-        return json!({"success": false, "error": "drawer_id has invalid format", "public": true});
-    }
-
-    let new_content = {
-        let s = str_arg(args, "content");
-        if s.is_empty() {
-            None
-        } else {
-            match sanitize_content(s) {
-                Ok(v) => Some(v),
-                Err(e) => return e,
-            }
-        }
-    };
-    let new_wing = match sanitize_opt_name(str_arg(args, "wing"), "wing") {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
-    let new_room = match sanitize_opt_name(str_arg(args, "room"), "room") {
-        Ok(v) => v,
-        Err(e) => return e,
+    let parsed = match tool_update_drawer_validate_args(args) {
+        Ok(parsed) => parsed,
+        Err(early) => return early,
     };
 
-    // No-op: nothing to change
-    if new_content.is_none() && new_wing.is_none() && new_room.is_none() {
-        return json!({"success": true, "drawer_id": drawer_id, "noop": true});
-    }
-
-    // Fetch existing drawer
+    // Fetch existing drawer to resolve final wing, room, and content values.
     let rows = query_all(
         connection,
         "SELECT wing, room, content FROM drawers WHERE id = ?",
-        [drawer_id.as_str()],
+        [parsed.drawer_id.as_str()],
     )
     .await;
-
     let rows = match rows {
-        Ok(r) => r,
-        Err(e) => return json!({"success": false, "error": e.to_string()}),
+        Ok(rows) => rows,
+        Err(error) => return json!({"success": false, "error": error.to_string()}),
     };
-
     if rows.is_empty() {
-        return json!({"success": false, "error": format!("Drawer not found: {drawer_id}"), "public": true});
+        return json!({"success": false, "error": format!("Drawer not found: {}", parsed.drawer_id), "public": true});
     }
 
-    let old_wing: String = rows[0].get(0).unwrap_or_default();
-    let old_room: String = rows[0].get(1).unwrap_or_default();
-    let old_content: String = rows[0].get(2).unwrap_or_default();
-
-    let final_wing = new_wing.as_deref().unwrap_or(&old_wing);
-    let final_room = new_room.as_deref().unwrap_or(&old_room);
-    let final_content = new_content.as_deref().unwrap_or(&old_content);
+    let wing_old: String = rows[0].get(0).unwrap_or_default();
+    let room_old: String = rows[0].get(1).unwrap_or_default();
+    let content_old: String = rows[0].get(2).unwrap_or_default();
+    let final_wing = parsed.wing_new.as_deref().unwrap_or(&wing_old);
+    let final_room = parsed.room_new.as_deref().unwrap_or(&room_old);
+    let final_content = parsed.content_new.as_deref().unwrap_or(&content_old);
 
     // Recompute the deterministic ID to keep it consistent with tool_add_drawer.
     // wing/room/content are all baked into the ID, so any change means a new ID.
-    let hash = sha2::Sha256::digest(
-        format!("{final_wing}\u{1f}{final_room}\u{1f}{final_content}").as_bytes(),
-    );
-    let hex: String = hash.iter().fold(String::new(), |mut s, b| {
-        use std::fmt::Write as _;
-        let _ = write!(s, "{b:02x}");
-        s
-    });
-    let new_id = format!("drawer_{final_wing}_{final_room}_{}", &hex[..24]);
+    let id_new = tool_update_drawer_recompute_id(final_wing, final_room, final_content);
 
+    // If the recomputed ID already exists (and differs), the new wing+room+content
+    // is a duplicate of another drawer — reject to prevent silent duplication.
+    if let Some(error) =
+        tool_update_drawer_check_duplicate(connection, &parsed.drawer_id, &id_new).await
+    {
+        return error;
+    }
+
+    if let Err(error) = tool_update_drawer_reindex(
+        connection,
+        &parsed.drawer_id,
+        &id_new,
+        final_wing,
+        final_room,
+        final_content,
+    )
+    .await
+    {
+        return error;
+    }
+
+    // WAL entry is written only after both validation and the transaction commit
+    // succeed — a bogus log entry would be written if wal_log ran before either check.
     wal_log(
         "update_drawer",
         json!({
-            "drawer_id": drawer_id,
-            "new_drawer_id": new_id,
-            "old_wing": old_wing,
-            "old_room": old_room,
+            "drawer_id": parsed.drawer_id,
+            "new_drawer_id": id_new,
+            "old_wing": wing_old,
+            "old_room": room_old,
             "new_wing": final_wing,
             "new_room": final_room,
-            "content_changed": new_content.is_some(),
+            "content_changed": parsed.content_new.is_some(),
         }),
     )
     .await;
 
-    // If the recomputed ID already exists (and differs), the new wing+room+content
-    // is a duplicate of another drawer — reject to prevent silent duplication.
-    if new_id != drawer_id {
-        let existing = query_all(
-            connection,
-            "SELECT id FROM drawers WHERE id = ?",
-            [new_id.as_str()],
-        )
-        .await;
-        match existing {
-            Ok(rows) if !rows.is_empty() => {
-                return json!({
-                    "success": false,
-                    "error": "A drawer with this wing/room/content already exists",
-                    "existing_drawer_id": new_id,
-                    "public": true,
-                });
-            }
-            Err(e) => return json!({"success": false, "error": e.to_string()}),
-            Ok(_) => {}
-        }
-    }
-
-    // Wrap the row update and index rebuild in a transaction so drawers and
-    // drawer_words cannot diverge if any step fails mid-flight.
-    if let Err(e) = connection.execute("BEGIN", ()).await {
-        return json!({"success": false, "error": e.to_string()});
-    }
-
-    if let Err(e) = connection
-        .execute(
-            "UPDATE drawers SET id = ?1, wing = ?2, room = ?3, content = ?4 WHERE id = ?5",
-            turso::params![
-                new_id.as_str(),
-                final_wing,
-                final_room,
-                final_content,
-                drawer_id.as_str()
-            ],
-        )
-        .await
-    {
-        let _ = connection.execute("ROLLBACK", ()).await;
-        return json!({"success": false, "error": e.to_string()});
-    }
-
-    // Re-index words: always needed when the ID changes or content changes.
-    if let Err(e) = connection
-        .execute(
-            "DELETE FROM drawer_words WHERE drawer_id = ?",
-            [drawer_id.as_str()],
-        )
-        .await
-    {
-        let _ = connection.execute("ROLLBACK", ()).await;
-        return json!({"success": false, "error": e.to_string()});
-    }
-
-    if new_id != drawer_id {
-        // drawer_words rows for the old ID were deleted above; if the new
-        // ID already had entries (shouldn't happen — we checked above),
-        // clean those too.
-        let _ = connection
-            .execute(
-                "DELETE FROM drawer_words WHERE drawer_id = ?",
-                [new_id.as_str()],
-            )
-            .await;
-    }
-
-    if let Err(e) = drawer::index_words(connection, &new_id, final_content).await {
-        let _ = connection.execute("ROLLBACK", ()).await;
-        return json!({"success": false, "error": e.to_string()});
-    }
-
-    if let Err(e) = connection.execute("COMMIT", ()).await {
-        let _ = connection.execute("ROLLBACK", ()).await;
-        return json!({"success": false, "error": e.to_string()});
-    }
-
     json!({
         "success": true,
-        "drawer_id": new_id,
+        "drawer_id": id_new,
         "wing": final_wing,
         "room": final_room,
     })
 }
 
+/// Query all knowledge-graph facts for an entity, with optional direction and as-of filters.
 async fn tool_kg_query(connection: &Connection, args: &Value) -> Value {
     let entity = match sanitize_kg_value(str_arg(args, "entity"), "entity") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
     let as_of = {
-        let a = str_arg(args, "as_of");
-        if a.is_empty() {
+        let as_of_raw = str_arg(args, "as_of");
+        if as_of_raw.is_empty() {
             None
         } else {
-            Some(a.to_string())
+            Some(as_of_raw.to_string())
         }
     };
     let direction = {
-        let d = str_arg(args, "direction");
-        if d.is_empty() { "both" } else { d }
+        let direction_raw = str_arg(args, "direction");
+        if direction_raw.is_empty() {
+            "both"
+        } else {
+            direction_raw
+        }
     };
     if !matches!(direction, "outgoing" | "incoming" | "both") {
         return json!({"error": "direction must be 'outgoing', 'incoming', or 'both'", "public": true});
@@ -1020,42 +1100,43 @@ async fn tool_kg_query(connection: &Connection, args: &Value) -> Value {
             let count = facts.len();
             json!({"entity": entity, "as_of": as_of, "facts": facts, "count": count})
         }
-        Err(e) => json!({"error": e.to_string()}),
+        Err(error) => json!({"error": error.to_string()}),
     }
 }
 
+/// Add a subject–predicate–object triple to the knowledge graph.
 async fn tool_kg_add(connection: &Connection, args: &Value) -> Value {
     let subject = str_arg(args, "subject");
     let predicate = str_arg(args, "predicate");
     let object = str_arg(args, "object");
     let valid_from = {
-        let v = str_arg(args, "valid_from");
-        if v.is_empty() {
+        let valid_from_raw = str_arg(args, "valid_from");
+        if valid_from_raw.is_empty() {
             None
         } else {
-            Some(v.to_string())
+            Some(valid_from_raw.to_string())
         }
     };
     let source_closet = {
-        let s = str_arg(args, "source_closet");
-        if s.is_empty() {
+        let source_closet_raw = str_arg(args, "source_closet");
+        if source_closet_raw.is_empty() {
             None
         } else {
-            Some(s.to_string())
+            Some(source_closet_raw.to_string())
         }
     };
 
     let subject = match sanitize_kg_value(subject, "subject") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
     let predicate = match sanitize_name(predicate, "predicate") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
     let object = match sanitize_kg_value(object, "object") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
 
     wal_log(
@@ -1090,34 +1171,35 @@ async fn tool_kg_add(connection: &Connection, args: &Value) -> Value {
             "triple_id": triple_id,
             "fact": format!("{subject} → {predicate} → {object}"),
         }),
-        Err(e) => json!({"success": false, "error": e.to_string()}),
+        Err(error) => json!({"success": false, "error": error.to_string()}),
     }
 }
 
+/// End-date a knowledge-graph triple by setting its `valid_to` field.
 async fn tool_kg_invalidate(connection: &Connection, args: &Value) -> Value {
     let subject = str_arg(args, "subject");
     let predicate = str_arg(args, "predicate");
     let object = str_arg(args, "object");
     let ended = {
-        let e = str_arg(args, "ended");
-        if e.is_empty() {
+        let ended_raw = str_arg(args, "ended");
+        if ended_raw.is_empty() {
             None
         } else {
-            Some(e.to_string())
+            Some(ended_raw.to_string())
         }
     };
 
     let subject = match sanitize_kg_value(subject, "subject") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
     let predicate = match sanitize_name(predicate, "predicate") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
     let object = match sanitize_kg_value(object, "object") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
 
     // Perform the mutation first so the WAL records persisted_ended — the value
@@ -1136,10 +1218,11 @@ async fn tool_kg_invalidate(connection: &Connection, args: &Value) -> Value {
                 "ended": persisted_ended,
             })
         }
-        Err(e) => json!({"success": false, "error": e.to_string()}),
+        Err(error) => json!({"success": false, "error": error.to_string()}),
     }
 }
 
+/// Return all knowledge-graph facts sorted by validity date, optionally filtered by entity.
 async fn tool_kg_timeline(connection: &Connection, args: &Value) -> Value {
     let entity = {
         let raw_entity = str_arg(args, "entity").trim();
@@ -1147,8 +1230,8 @@ async fn tool_kg_timeline(connection: &Connection, args: &Value) -> Value {
             None
         } else {
             match sanitize_kg_value(raw_entity, "entity") {
-                Ok(v) => Some(v),
-                Err(e) => return e,
+                Ok(sanitized_val) => Some(sanitized_val),
+                Err(error) => return error,
             }
         }
     };
@@ -1162,83 +1245,88 @@ async fn tool_kg_timeline(connection: &Connection, args: &Value) -> Value {
                 "count": count,
             })
         }
-        Err(e) => json!({"error": e.to_string()}),
+        Err(error) => json!({"error": error.to_string()}),
     }
 }
 
+/// Return aggregate statistics for the knowledge graph (entity count, triple count, etc.).
 async fn tool_kg_stats(connection: &Connection) -> Value {
     match kg::query::stats(connection).await {
         Ok(stats) => json!(stats),
-        Err(e) => json!({"error": e.to_string()}),
+        Err(error) => json!({"error": error.to_string()}),
     }
 }
 
+/// BFS-traverse the palace graph from a starting room up to `max_hops` hops.
 async fn tool_traverse(connection: &Connection, args: &Value) -> Value {
     let start_room = match sanitize_name(str_arg(args, "start_room"), "start_room") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
-    let max_hops = usize::try_from(int_arg(args, "max_hops", 2).clamp(1, 10)).unwrap_or(2);
+    let hops_max = usize::try_from(int_arg(args, "max_hops", 2).clamp(1, 10)).unwrap_or(2);
 
-    match graph::traverse(connection, &start_room, max_hops).await {
+    match graph::traverse(connection, &start_room, hops_max).await {
         Ok((results, truncated)) => json!({"results": results, "truncated": truncated}),
-        Err(e) => json!({"error": e.to_string()}),
+        Err(error) => json!({"error": error.to_string()}),
     }
 }
 
+/// Find rooms that bridge two wings, optionally filtering by wing names.
 async fn tool_find_tunnels(connection: &Connection, args: &Value) -> Value {
     let wing_a = match sanitize_opt_name(str_arg(args, "wing_a"), "wing_a") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
     let wing_b = match sanitize_opt_name(str_arg(args, "wing_b"), "wing_b") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
 
     match graph::find_tunnels(connection, wing_a.as_deref(), wing_b.as_deref()).await {
         Ok((tunnels, truncated)) => json!({"tunnels": tunnels, "truncated": truncated}),
-        Err(e) => json!({"error": e.to_string()}),
+        Err(error) => json!({"error": error.to_string()}),
     }
 }
 
+/// Return aggregate statistics about the palace graph (room count, tunnel count, etc.).
 async fn tool_graph_stats(connection: &Connection) -> Value {
     match graph::graph_stats(connection).await {
         Ok(stats) => json!(stats),
-        Err(e) => json!({"error": e.to_string()}),
+        Err(error) => json!({"error": error.to_string()}),
     }
 }
 
+/// Create an explicit (agent-annotated) tunnel linking two palace locations.
 async fn tool_create_tunnel(connection: &Connection, args: &Value) -> Value {
     let source_wing = match sanitize_name(str_arg(args, "source_wing"), "source_wing") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
     let source_room = match sanitize_name(str_arg(args, "source_room"), "source_room") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
     let target_wing = match sanitize_name(str_arg(args, "target_wing"), "target_wing") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
     let target_room = match sanitize_name(str_arg(args, "target_room"), "target_room") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
     let label = match sanitize_label(str_arg(args, "label")) {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
     let source_drawer_id =
         match sanitize_opt_name(str_arg(args, "source_drawer_id"), "source_drawer_id") {
-            Ok(v) => v,
-            Err(e) => return e,
+            Ok(value) => value,
+            Err(error) => return error,
         };
     let target_drawer_id =
         match sanitize_opt_name(str_arg(args, "target_drawer_id"), "target_drawer_id") {
-            Ok(v) => v,
-            Err(e) => return e,
+            Ok(value) => value,
+            Err(error) => return error,
         };
 
     match graph::create_tunnel(
@@ -1272,22 +1360,24 @@ async fn tool_create_tunnel(connection: &Connection, args: &Value) -> Value {
             .await;
             json!(tunnel)
         }
-        Err(e) => json!({"error": e.to_string()}),
+        Err(error) => json!({"error": error.to_string()}),
     }
 }
 
+/// Return all explicit tunnels, optionally filtered to those involving a specific wing.
 async fn tool_list_tunnels(connection: &Connection, args: &Value) -> Value {
     let wing = match sanitize_opt_name(str_arg(args, "wing"), "wing") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
 
     match graph::list_tunnels(connection, wing.as_deref()).await {
         Ok(tunnels) => json!({"tunnels": tunnels, "count": tunnels.len()}),
-        Err(e) => json!({"error": e.to_string()}),
+        Err(error) => json!({"error": error.to_string()}),
     }
 }
 
+/// Delete an explicit tunnel by its 16-character hex ID.
 async fn tool_delete_tunnel(connection: &Connection, args: &Value) -> Value {
     // Trim before validation to avoid spurious failures from surrounding whitespace.
     let tunnel_id = str_arg(args, "tunnel_id").trim();
@@ -1304,48 +1394,50 @@ async fn tool_delete_tunnel(connection: &Connection, args: &Value) -> Value {
 
     match graph::delete_tunnel(connection, tunnel_id).await {
         Ok(deleted) => json!({"deleted": deleted, "tunnel_id": tunnel_id}),
-        Err(e) => json!({"error": e.to_string()}),
+        Err(error) => json!({"error": error.to_string()}),
     }
 }
 
+/// Return all explicit tunnel connections from a given wing and room.
 async fn tool_follow_tunnels(connection: &Connection, args: &Value) -> Value {
     let wing = match sanitize_name(str_arg(args, "wing"), "wing") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
     let room = match sanitize_name(str_arg(args, "room"), "room") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
 
     match graph::follow_tunnels(connection, &wing, &room).await {
         Ok(connections) => json!({"wing": wing, "room": room, "connections": connections}),
-        Err(e) => json!({"error": e.to_string()}),
+        Err(error) => json!({"error": error.to_string()}),
     }
 }
 
+/// Append a diary entry for an agent in its personal wing.
 async fn tool_diary_write(connection: &Connection, args: &Value) -> Value {
     let agent_name = str_arg(args, "agent_name");
     let entry = str_arg(args, "entry");
     let topic = {
-        let t = str_arg(args, "topic");
-        if t.is_empty() {
+        let topic_raw = str_arg(args, "topic");
+        if topic_raw.is_empty() {
             "general".to_string()
         } else {
-            match sanitize_name(t, "topic") {
-                Ok(v) => v,
-                Err(e) => return e,
+            match sanitize_name(topic_raw, "topic") {
+                Ok(value) => value,
+                Err(error) => return error,
             }
         }
     };
 
     let agent_name = match sanitize_name(agent_name, "agent_name") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
     let entry = match sanitize_content(entry) {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
 
     let wing = format!("wing_{}", agent_name.to_lowercase().replace(' ', "_"));
@@ -1363,7 +1455,7 @@ async fn tool_diary_write(connection: &Connection, args: &Value) -> Value {
     )
     .await;
 
-    // Use direct SQL to also set extract_mode (topic) which DrawerParams doesn't support
+    // Use direct SQL to also set extract_mode (topic) which DrawerParams doesn't support.
     match connection
         .execute(
             "INSERT OR IGNORE INTO drawers (id, wing, room, content, source_file, chunk_index, added_by, ingest_mode, extract_mode) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
@@ -1381,17 +1473,18 @@ async fn tool_diary_write(connection: &Connection, args: &Value) -> Value {
                 "timestamp": now.to_rfc3339(),
             })
         }
-        Err(e) => json!({"success": false, "error": e.to_string()}),
+        Err(error) => json!({"success": false, "error": error.to_string()}),
     }
 }
 
+/// Read the most recent diary entries for an agent, newest first.
 async fn tool_diary_read(connection: &Connection, args: &Value) -> Value {
     let agent_name = str_arg(args, "agent_name");
     let last_n = int_arg(args, "last_n", 10).clamp(1, 100);
 
     let agent_name = match sanitize_name(agent_name, "agent_name") {
-        Ok(v) => v,
-        Err(e) => return e,
+        Ok(value) => value,
+        Err(error) => return error,
     };
 
     let wing = format!("wing_{}", agent_name.to_lowercase().replace(' ', "_"));
@@ -1428,7 +1521,7 @@ async fn tool_diary_read(connection: &Connection, args: &Value) -> Value {
                 "showing": total,
             })
         }
-        Err(e) => json!({"error": e.to_string()}),
+        Err(error) => json!({"error": error.to_string()}),
     }
 }
 
@@ -1438,6 +1531,7 @@ async fn tool_diary_read(connection: &Connection, args: &Value) -> Value {
 mod tests {
     use super::*;
 
+    /// Open an in-memory test palace database and return the database + connection pair.
     async fn test_conn() -> (turso::Database, turso::Connection) {
         crate::test_helpers::test_db().await
     }
@@ -1537,25 +1631,25 @@ mod tests {
     #[tokio::test]
     async fn add_drawer_missing_required_fields_returns_error() {
         with_isolated_env(|connection| async move {
-            // Missing content
-            let r = tool_add_drawer(&connection, &json!({"wing": "w", "room": "r"})).await;
-            assert_eq!(r["success"], false);
+            // Missing content.
+            let result = tool_add_drawer(&connection, &json!({"wing": "w", "room": "r"})).await;
+            assert_eq!(result["success"], false);
 
-            // Missing wing
-            let r = tool_add_drawer(
+            // Missing wing.
+            let result = tool_add_drawer(
                 &connection,
                 &json!({"room": "r", "content": "some text here for testing"}),
             )
             .await;
-            assert_eq!(r["success"], false);
+            assert_eq!(result["success"], false);
 
-            // Missing room
-            let r = tool_add_drawer(
+            // Missing room.
+            let result = tool_add_drawer(
                 &connection,
                 &json!({"wing": "w", "content": "some text here for testing"}),
             )
             .await;
-            assert_eq!(r["success"], false);
+            assert_eq!(result["success"], false);
         })
         .await;
     }
@@ -1571,9 +1665,9 @@ mod tests {
 
     // --- Helper: isolated WAL dir + env override + fresh connection ---
 
-    // Wraps the three-line test setup (tempdir, async_with_vars, test_conn) so
-    // callers only express what is under test.  The connection is passed by value
-    // so the closure can borrow it as `&connection` without lifetime complications.
+    /// Wraps the three-line test setup (tempdir, `async_with_vars`, `test_conn`) so
+    /// callers only express what is under test.  The connection is passed by value
+    /// so the closure can borrow it as `&connection` without lifetime complications.
     async fn with_isolated_env<F, Fut>(test: F)
     where
         F: FnOnce(turso::Connection) -> Fut,
@@ -1842,7 +1936,7 @@ mod tests {
 
             let result = tool_search(&connection, &json!({"query": "rust", "wing": "tech"})).await;
             assert!(result.get("error").is_none(), "search must not error");
-            // All returned results should be from the "tech" wing
+            // All returned results should be from the "tech" wing.
             let results = result["results"].as_array().expect("results must be array");
             for r in results {
                 assert_eq!(r["wing"], "tech");
@@ -1883,14 +1977,14 @@ mod tests {
             )
             .await;
 
-            // Check with very similar content — duplicate detection uses word overlap
+            // Check with very similar content — duplicate detection uses word overlap.
             let result = tool_check_duplicate(
                 &connection,
                 &json!({"content": "rust programming language memory safety ownership borrowing lifetimes"}),
             )
             .await;
             assert!(result.get("error").is_none(), "must not error");
-            // is_duplicate is present regardless
+            // is_duplicate is present regardless.
             assert!(
                 result.get("is_duplicate").is_some(),
                 "is_duplicate key must exist"
@@ -1994,12 +2088,12 @@ mod tests {
             seed_drawer(&connection, "w", "r", "second content for pagination test").await;
             seed_drawer(&connection, "w", "r", "third content for pagination test").await;
 
-            // Limit to 2
+            // Limit to 2.
             let result = tool_list_drawers(&connection, &json!({"limit": 2})).await;
             assert_eq!(result["count"], 2);
             assert_eq!(result["limit"], 2);
 
-            // Offset to get the third
+            // Offset to get the third.
             let result2 = tool_list_drawers(&connection, &json!({"limit": 2, "offset": 2})).await;
             assert_eq!(result2["count"], 1);
             assert_eq!(result2["offset"], 2);
@@ -2021,8 +2115,8 @@ mod tests {
 
             let result = tool_list_drawers(&connection, &json!({"wing": "alpha"})).await;
             assert_eq!(result["count"], 1);
-            let d = &result["drawers"][0];
-            assert_eq!(d["wing"], "alpha");
+            let drawer = &result["drawers"][0];
+            assert_eq!(drawer["wing"], "alpha");
         })
         .await;
     }
@@ -2044,7 +2138,7 @@ mod tests {
             )
             .await;
             assert_eq!(result["success"], true);
-            // ID changes because content changed (deterministic ID includes content)
+            // ID changes because content changed (deterministic ID includes content).
             assert_ne!(
                 result["drawer_id"].as_str().expect("new id"),
                 old_id,
@@ -2085,10 +2179,70 @@ mod tests {
                 .as_str()
                 .expect("drawer_id must be string");
 
-            // Send update with no actual changes
+            // Send update with no actual changes.
             let result = tool_update_drawer(&connection, &json!({"drawer_id": drawer_id})).await;
             assert_eq!(result["success"], true);
             assert_eq!(result["noop"], true);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn update_drawer_wrong_type_fields_return_error() {
+        with_isolated_env(|connection| async move {
+            let seeded = seed_drawer(&connection, "proj", "code", "typed field test").await;
+            let drawer_id = seeded["drawer_id"]
+                .as_str()
+                .expect("drawer_id must be string");
+
+            // Non-string content must be rejected, not silently treated as absent.
+            let result_content = tool_update_drawer(
+                &connection,
+                &json!({"drawer_id": drawer_id, "content": 123}),
+            )
+            .await;
+            assert_eq!(
+                result_content["success"], false,
+                "integer content must be rejected"
+            );
+            assert!(
+                result_content["error"]
+                    .as_str()
+                    .expect("error must be a string")
+                    .contains("content"),
+                "error must mention the offending field"
+            );
+
+            // Non-string wing must be rejected.
+            let result_wing =
+                tool_update_drawer(&connection, &json!({"drawer_id": drawer_id, "wing": 42})).await;
+            assert_eq!(
+                result_wing["success"], false,
+                "integer wing must be rejected"
+            );
+            assert!(
+                result_wing["error"]
+                    .as_str()
+                    .expect("error must be a string")
+                    .contains("wing"),
+                "error must mention the offending field"
+            );
+
+            // Non-string room must be rejected.
+            let result_room =
+                tool_update_drawer(&connection, &json!({"drawer_id": drawer_id, "room": true}))
+                    .await;
+            assert_eq!(
+                result_room["success"], false,
+                "boolean room must be rejected"
+            );
+            assert!(
+                result_room["error"]
+                    .as_str()
+                    .expect("error must be a string")
+                    .contains("room"),
+                "error must mention the offending field"
+            );
         })
         .await;
     }
@@ -2119,7 +2273,7 @@ mod tests {
     #[tokio::test]
     async fn kg_add_missing_field_returns_error() {
         with_isolated_env(|connection| async move {
-            // Missing object
+            // Missing object.
             let result =
                 tool_kg_add(&connection, &json!({"subject": "Rust", "predicate": "is"})).await;
             assert_eq!(result["success"], false);
@@ -2133,7 +2287,7 @@ mod tests {
     #[tokio::test]
     async fn kg_query_entity() {
         with_isolated_env(|connection| async move {
-            // Add a triple first
+            // Add a triple first.
             tool_kg_add(
                 &connection,
                 &json!({"subject": "Rust", "predicate": "compilesTo", "object": "binary"}),
@@ -2381,7 +2535,7 @@ mod tests {
     #[tokio::test]
     async fn delete_tunnel_nonexistent_returns_false() {
         with_isolated_env(|connection| async move {
-            // Valid 16-char hex that doesn't exist
+            // Valid 16-char hex that doesn't exist.
             let result =
                 tool_delete_tunnel(&connection, &json!({"tunnel_id": "0000000000000000"})).await;
             assert!(result.get("error").is_none(), "must not error");
@@ -2417,7 +2571,7 @@ mod tests {
                 tool_follow_tunnels(&connection, &json!({"wing": "alpha", "room": "code"})).await;
             assert!(result.get("error").is_none(), "must not error");
             assert_eq!(result["wing"], "alpha");
-            // Should find at least one connection from the seeded tunnel
+            // Should find at least one connection from the seeded tunnel.
             let conns = result["connections"]
                 .as_array()
                 .expect("connections must be array");
@@ -2444,7 +2598,7 @@ mod tests {
     #[tokio::test]
     async fn traverse_with_shared_room() {
         with_isolated_env(|connection| async move {
-            // Two wings sharing the same room name creates a graph edge
+            // Two wings sharing the same room name creates a graph edge.
             seed_drawer(
                 &connection,
                 "alpha",
@@ -2486,7 +2640,7 @@ mod tests {
     #[tokio::test]
     async fn find_tunnels_between_wings() {
         with_isolated_env(|connection| async move {
-            // Create drawers in two wings sharing a room name
+            // Create drawers in two wings sharing a room name.
             seed_drawer(&connection, "alpha", "shared", "alpha shared content here").await;
             seed_drawer(&connection, "beta", "shared", "beta shared content here").await;
 
@@ -2509,8 +2663,8 @@ mod tests {
         with_isolated_env(|connection| async move {
             let result = tool_graph_stats(&connection).await;
             assert!(result.get("error").is_none(), "must not error");
-            assert_eq!(result["total_rooms"], 0);
-            assert_eq!(result["total_edges"], 0);
+            assert_eq!(result["rooms_total"], 0);
+            assert_eq!(result["edges_total"], 0);
         })
         .await;
     }
@@ -2524,7 +2678,7 @@ mod tests {
             let result = tool_graph_stats(&connection).await;
             assert!(result.get("error").is_none(), "must not error");
             assert!(
-                result["total_rooms"].as_i64().expect("total_rooms") >= 1,
+                result["rooms_total"].as_i64().expect("rooms_total") >= 1,
                 "must count at least one room"
             );
         })
@@ -2672,7 +2826,7 @@ mod tests {
     async fn dispatch_routes_to_correct_tool() {
         with_isolated_env(|connection| async move {
             let result = dispatch(&connection, "mempalace_status", &json!({})).await;
-            // tool_status returns total_drawers, proving it was routed correctly
+            // tool_status returns total_drawers, proving it was routed correctly.
             assert!(
                 result.get("total_drawers").is_some(),
                 "must route to tool_status"
@@ -2842,5 +2996,137 @@ mod tests {
             assert!(spec.contains("AAAK"), "spec must mention AAAK");
         })
         .await;
+    }
+
+    // --- sanitize_name ---
+
+    #[test]
+    fn sanitize_name_rejects_too_long_string() {
+        // A string longer than 128 characters must be rejected with a public error.
+        let long = "a".repeat(129);
+        let result = sanitize_name(&long, "field");
+        assert!(result.is_err(), "string > 128 chars must be rejected");
+        let error_json = result.expect_err("long string must fail");
+        assert!(
+            error_json["error"]
+                .as_str()
+                .expect("error must be string")
+                .contains("128"),
+            "error must mention the 128-char limit"
+        );
+        assert!(
+            error_json["public"].as_bool().unwrap_or(false),
+            "error must be public"
+        );
+    }
+
+    #[test]
+    fn sanitize_name_rejects_path_traversal_and_null() {
+        // Path-traversal sequences and null bytes are always invalid.
+        for input in &["a..b", "a/b", "a\\b", "a\x00b"] {
+            let result = sanitize_name(input, "field");
+            assert!(result.is_err(), "'{input}' must be rejected");
+            assert!(
+                result.expect_err("path traversal must fail")["public"]
+                    .as_bool()
+                    .unwrap_or(false),
+                "error must be public for '{input}'"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_name_rejects_non_alphanumeric_first_char() {
+        // Names must start with an ASCII alphanumeric character.
+        // Note: leading spaces are stripped by trim(), so they are not tested here.
+        for input in &["_leading", "-leading", ".leading"] {
+            let result = sanitize_name(input, "field");
+            assert!(
+                result.is_err(),
+                "name starting with non-alphanumeric '{input}' must be rejected"
+            );
+            assert!(
+                result.expect_err("invalid start must fail")["public"]
+                    .as_bool()
+                    .unwrap_or(false),
+                "error must be public for '{input}'"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_name_rejects_invalid_chars() {
+        // Characters outside [a-zA-Z0-9_ .'-] must be rejected.
+        for input in &["foo@bar", "foo!bar", "foo#bar", "foo$bar"] {
+            let result = sanitize_name(input, "field");
+            assert!(
+                result.is_err(),
+                "name with invalid character '{input}' must be rejected"
+            );
+            assert!(
+                result.expect_err("invalid char must fail")["public"]
+                    .as_bool()
+                    .unwrap_or(false),
+                "error must be public for '{input}'"
+            );
+        }
+    }
+
+    // --- sanitize_label ---
+
+    #[test]
+    fn sanitize_label_rejects_too_long_string() {
+        // A label longer than LABEL_LEN_MAX (255) bytes must be rejected.
+        let long = "a".repeat(LABEL_LEN_MAX + 1);
+        let result = sanitize_label(&long);
+        assert!(result.is_err(), "label > LABEL_LEN_MAX must be rejected");
+        assert!(
+            result.expect_err("long label must fail")["public"]
+                .as_bool()
+                .unwrap_or(false),
+            "error must be public"
+        );
+    }
+
+    #[test]
+    fn sanitize_label_rejects_null_bytes() {
+        // A label containing a null byte must be rejected.
+        let result = sanitize_label("valid\x00but_null");
+        assert!(result.is_err(), "label with null byte must be rejected");
+        assert!(
+            result.expect_err("null byte must fail")["public"]
+                .as_bool()
+                .unwrap_or(false),
+            "error must be public"
+        );
+    }
+
+    // --- sanitize_content ---
+
+    #[test]
+    fn sanitize_content_rejects_null_bytes() {
+        // Content containing a null byte must be rejected.
+        let result = sanitize_content("valid content\x00with null");
+        assert!(result.is_err(), "content with null byte must be rejected");
+        assert!(
+            result.expect_err("null byte content must fail")["public"]
+                .as_bool()
+                .unwrap_or(false),
+            "error must be public"
+        );
+    }
+
+    #[test]
+    fn sanitize_content_rejects_over_100k_chars() {
+        // Content exceeding 100,000 characters must be rejected.
+        let long = "a".repeat(100_001);
+        let result = sanitize_content(&long);
+        assert!(result.is_err(), "content > 100k chars must be rejected");
+        assert!(
+            result.expect_err("over-100k content must fail")["public"]
+                .as_bool()
+                .unwrap_or(false),
+            "error must be public"
+        );
     }
 }

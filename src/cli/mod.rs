@@ -127,8 +127,8 @@ pub enum Command {
         dry_run: bool,
 
         /// Minimum sessions to trigger split
-        #[arg(long, default_value = "2")]
-        min_sessions: usize,
+        #[arg(long, default_value = "2", alias = "min-sessions")]
+        sessions_min: usize,
 
         /// Disable .gitignore filtering (include all files regardless of gitignore rules)
         #[arg(long)]

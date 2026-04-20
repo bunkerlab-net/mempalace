@@ -61,7 +61,7 @@ async fn app_run_split_with_no_mega_files_returns_ok() {
             directory: temp_directory.path().to_path_buf(),
             output_dir: None,
             dry_run: false,
-            min_sessions: 2,
+            sessions_min: 2,
             no_gitignore: false,
         },
     };

@@ -52,11 +52,11 @@ pub struct TraversalResult {
 #[derive(Debug, Clone, Serialize)]
 pub struct GraphStats {
     /// Total distinct rooms (excluding "general").
-    pub total_rooms: usize,
+    pub rooms_total: usize,
     /// Rooms that span two or more wings.
     pub tunnel_rooms: usize,
     /// Total tunnel edges (wing-pair connections).
-    pub total_edges: usize,
+    pub edges_total: usize,
     /// Room count per wing.
     pub rooms_per_wing: HashMap<String, usize>,
     /// Top rooms by number of wings spanned.
@@ -78,7 +78,7 @@ pub async fn build_graph(
     )
     .await?;
 
-    // Aggregate room data across wings
+    // Aggregate room data across wings.
     let mut room_data: HashMap<String, (HashSet<String>, usize)> = HashMap::new();
     for row in &rows {
         let room: String = row.get(0)?;
@@ -89,7 +89,7 @@ pub async fn build_graph(
         entry.1 += usize::try_from(count).unwrap_or(0);
     }
 
-    // Build nodes
+    // Build nodes.
     let mut nodes = HashMap::new();
     for (room, (wings, count)) in &room_data {
         let mut wing_list: Vec<String> = wings.iter().cloned().collect();
@@ -104,7 +104,7 @@ pub async fn build_graph(
         );
     }
 
-    // Build edges from rooms spanning multiple wings
+    // Build edges from rooms spanning multiple wings.
     let mut edges = Vec::new();
     for (room, (wings, count)) in &room_data {
         let mut wing_list: Vec<&String> = wings.iter().collect();
@@ -137,9 +137,9 @@ const GRAPH_RESULT_CAP: usize = 50;
 pub async fn traverse(
     connection: &Connection,
     start_room: &str,
-    max_hops: usize,
+    hops_max: usize,
 ) -> Result<(Vec<TraversalResult>, bool)> {
-    assert!(max_hops > 0, "max_hops must be positive");
+    assert!(hops_max > 0, "hops_max must be positive");
     assert!(!start_room.is_empty(), "start_room must not be empty");
 
     let (nodes, _) = build_graph(connection).await?;
@@ -165,42 +165,23 @@ pub async fn traverse(
 
     // Upper bound: each room enters `visited` before being pushed to `frontier`,
     // so the frontier empties after at most nodes.len() iterations.
-    while let Some((current_room, depth)) = frontier.pop_front() {
+    while let Some((room_current, depth)) = frontier.pop_front() {
         assert!(
             visited.len() <= nodes.len(),
             "visited set cannot exceed node count — frontier invariant is broken"
         );
-        if depth >= max_hops {
+        if depth >= hops_max {
             continue;
         }
-
-        let current_wings: HashSet<String> = nodes
-            .get(&current_room)
-            .map(|n| n.wings.iter().cloned().collect())
-            .unwrap_or_default();
-
-        for (room, node) in &nodes {
-            if visited.contains(room) {
-                continue;
-            }
-            let node_wings: HashSet<String> = node.wings.iter().cloned().collect();
-            let shared: Vec<String> = current_wings.intersection(&node_wings).cloned().collect();
-            if !shared.is_empty() {
-                visited.insert(room.clone());
-                let mut sorted_shared = shared;
-                sorted_shared.sort();
-                results.push(TraversalResult {
-                    room: room.clone(),
-                    wings: node.wings.clone(),
-                    count: node.count,
-                    hop: depth + 1,
-                    connected_via: Some(sorted_shared),
-                });
-                if depth + 1 < max_hops {
-                    frontier.push_back((room.clone(), depth + 1));
-                }
-            }
-        }
+        traverse_expand_frontier(
+            &room_current,
+            depth,
+            hops_max,
+            &nodes,
+            &mut visited,
+            &mut frontier,
+            &mut results,
+        );
     }
 
     // Sort by hop first so callers see the closest rooms first; break ties by
@@ -213,6 +194,52 @@ pub async fn traverse(
     debug_assert!(results.len() <= GRAPH_RESULT_CAP);
 
     Ok((results, truncated))
+}
+
+/// Called by `traverse` to keep that function within the 70-line limit.
+///
+/// For one BFS frontier node at `room_current`/`depth`, find all unvisited rooms
+/// that share at least one wing with it, record them in `results`, mark them
+/// `visited`, and push them onto `frontier` if they are below `hops_max`.
+fn traverse_expand_frontier(
+    room_current: &str,
+    depth: usize,
+    hops_max: usize,
+    nodes: &HashMap<String, RoomNode>,
+    visited: &mut HashSet<String>,
+    frontier: &mut VecDeque<(String, usize)>,
+    results: &mut Vec<TraversalResult>,
+) {
+    assert!(!room_current.is_empty(), "room_current must not be empty");
+    assert!(depth < hops_max, "depth must be below hops_max on entry");
+
+    let wings_current: HashSet<String> = nodes
+        .get(room_current)
+        .map(|n| n.wings.iter().cloned().collect())
+        .unwrap_or_default();
+
+    for (room, node) in nodes {
+        if visited.contains(room) {
+            continue;
+        }
+        let node_wings: HashSet<String> = node.wings.iter().cloned().collect();
+        let shared: Vec<String> = wings_current.intersection(&node_wings).cloned().collect();
+        if !shared.is_empty() {
+            visited.insert(room.clone());
+            let mut sorted_shared = shared;
+            sorted_shared.sort();
+            results.push(TraversalResult {
+                room: room.clone(),
+                wings: node.wings.clone(),
+                count: node.count,
+                hop: depth + 1,
+                connected_via: Some(sorted_shared),
+            });
+            if depth + 1 < hops_max {
+                frontier.push_back((room.clone(), depth + 1));
+            }
+        }
+    }
 }
 
 /// Find rooms that connect two wings (tunnels).
@@ -279,9 +306,9 @@ pub async fn graph_stats(connection: &Connection) -> Result<GraphStats> {
     top_tunnels.truncate(10);
 
     Ok(GraphStats {
-        total_rooms: nodes.len(),
+        rooms_total: nodes.len(),
         tunnel_rooms,
-        total_edges: edges.len(),
+        edges_total: edges.len(),
         rooms_per_wing: wing_counts,
         top_tunnels,
     })
@@ -362,22 +389,22 @@ fn canonical_tunnel_id(
     assert!(!target_wing.is_empty(), "target_wing must not be empty");
     assert!(!target_room.is_empty(), "target_room must not be empty");
 
-    let src = format!("{source_wing}/{source_room}");
-    let tgt = format!("{target_wing}/{target_room}");
-    let (a, b) = if src <= tgt {
-        (src.as_str(), tgt.as_str())
+    let source_path = format!("{source_wing}/{source_room}");
+    let target_path = format!("{target_wing}/{target_room}");
+    let (first_endpoint, second_endpoint) = if source_path <= target_path {
+        (source_path.as_str(), target_path.as_str())
     } else {
-        (tgt.as_str(), src.as_str())
+        (target_path.as_str(), source_path.as_str())
     };
     // ↔ (U+2194) separates the two endpoints. A bare `/` would be ambiguous
     // because wing and room strings can themselves contain slashes in principle;
     // a non-ASCII multi-byte separator makes accidental collisions impossible.
-    let input = format!("{a}\u{2194}{b}");
+    let input = format!("{first_endpoint}\u{2194}{second_endpoint}");
     let hash = sha2::Sha256::digest(input.as_bytes());
-    let hex: String = hash.iter().fold(String::new(), |mut s, byte| {
+    let hex: String = hash.iter().fold(String::new(), |mut hex_string, byte| {
         use std::fmt::Write as _;
-        let _ = write!(s, "{byte:02x}");
-        s
+        let _ = write!(hex_string, "{byte:02x}");
+        hex_string
     });
     // Postcondition: SHA256 hex is always 64 chars; we take the first 16.
     assert_eq!(hex.len(), 64, "SHA256 hex output must be 64 characters");
@@ -664,7 +691,7 @@ mod tests {
     use super::*;
 
     async fn seed_graph(connection: &Connection) {
-        // Create drawers across wings and rooms to build a graph
+        // Create drawers across wings and rooms to build a graph.
         for (id, wing, room) in [
             ("g1", "proj_a", "backend"),
             ("g2", "proj_a", "frontend"),
@@ -703,12 +730,12 @@ mod tests {
             .await
             .expect("traverse");
         assert!(!truncated);
-        // frontend (hop 0) → backend (hop 1, shared proj_a) → database (hop 2, shared proj_b)
+        // frontend (hop 0) → backend (hop 1, shared proj_a) → database (hop 2, shared proj_b).
         assert!(!results.is_empty());
         assert_eq!(results[0].room, "frontend");
         assert_eq!(results[0].hop, 0);
 
-        // Verify hop 1: backend reached via shared proj_a wing
+        // Verify hop 1: backend reached via shared proj_a wing.
         let hop1 = results
             .iter()
             .find(|r| r.room == "backend" && r.hop == 1)
@@ -717,7 +744,7 @@ mod tests {
         assert!(hop1.wings.contains(&"proj_b".to_string()));
         assert_eq!(hop1.connected_via, Some(vec!["proj_a".to_string()]));
 
-        // Verify hop 2: database reached via shared proj_b wing
+        // Verify hop 2: database reached via shared proj_b wing.
         let hop2 = results
             .iter()
             .find(|r| r.room == "database" && r.hop == 2)

@@ -10,11 +10,11 @@ use crate::error::Result;
 
 // L1 is injected into AI context windows. 15 drawers at ~200 chars each is
 // ~3 000 chars — enough for a meaningful summary without crowding the prompt.
-const MAX_DRAWERS: usize = 15;
+const DRAWERS_MAX: usize = 15;
 // Hard character cap so a wing with many long drawers cannot overflow the
 // context budget. 3 200 chars is roughly 800 tokens at the 4-chars/token
 // rule of thumb, leaving headroom for L0 and the user's own message.
-const MAX_CHARS: usize = 3200;
+const CHARS_MAX: usize = 3200;
 
 /// Layer 0: Identity text from `$XDG_DATA_HOME/mempalace/identity.txt`.
 pub fn layer0() -> String {
@@ -42,10 +42,10 @@ pub fn layer0() -> String {
 
 /// Layer 1: Essential story — top drawers grouped by room.
 pub async fn layer1(connection: &Connection, wing: Option<&str>) -> Result<String> {
-    let sql = if let Some(w) = wing {
+    let sql = if let Some(wing_name) = wing {
         format!(
             "SELECT content, wing, room, source_file FROM drawers WHERE wing = '{}' LIMIT 1000",
-            w.replace('\'', "''")
+            wing_name.replace('\'', "''")
         )
     } else {
         "SELECT content, wing, room, source_file FROM drawers LIMIT 1000".to_string()
@@ -60,8 +60,8 @@ pub async fn layer1(connection: &Connection, wing: Option<&str>) -> Result<Strin
     // Use insertion order as a proxy for recency. A proper recency sort would
     // require a timestamp column; insertion order is good enough until that
     // column exists.
-    let top = &rows[..rows.len().min(MAX_DRAWERS)];
-    let by_room = layer1_build_room_map(top);
+    let top_drawers = &rows[..rows.len().min(DRAWERS_MAX)];
+    let by_room = layer1_build_room_map(top_drawers);
 
     let mut lines = vec!["## L1 — ESSENTIAL STORY".to_string()];
     let mut total_len = 0usize;
@@ -89,7 +89,7 @@ pub async fn layer1(connection: &Connection, wing: Option<&str>) -> Result<Strin
                 let _ = write!(entry, "  ({source})");
             }
 
-            if total_len + entry.len() > MAX_CHARS {
+            if total_len + entry.len() > CHARS_MAX {
                 lines.push("  ... (more in L3 search)".to_string());
                 return Ok(lines.join("\n"));
             }
@@ -109,17 +109,17 @@ fn layer1_build_room_map(rows: &[turso::Row]) -> HashMap<String, Vec<(String, St
         let content = row
             .get_value(0)
             .ok()
-            .and_then(|v| v.as_text().cloned())
+            .and_then(|cell| cell.as_text().cloned())
             .unwrap_or_default();
         let room = row
             .get_value(2)
             .ok()
-            .and_then(|v| v.as_text().cloned())
+            .and_then(|cell| cell.as_text().cloned())
             .unwrap_or_default();
         let source = row
             .get_value(3)
             .ok()
-            .and_then(|v| v.as_text().cloned())
+            .and_then(|cell| cell.as_text().cloned())
             .unwrap_or_default();
         let source_name = Path::new(&source)
             .file_name()
