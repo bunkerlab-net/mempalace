@@ -59,6 +59,8 @@ mod tests {
             confidence: f64::NAN,
             source_closet: None,
             source_file: None,
+            source_drawer_id: None,
+            adapter_name: None,
         };
         let result = add_triple_validate_params(&params);
         assert!(result.is_err(), "NaN confidence must be rejected");
@@ -82,6 +84,8 @@ mod tests {
             confidence: -0.1,
             source_closet: None,
             source_file: None,
+            source_drawer_id: None,
+            adapter_name: None,
         };
         let result = add_triple_validate_params(&params);
         assert!(result.is_err(), "negative confidence must be rejected");
@@ -105,6 +109,8 @@ mod tests {
             confidence: 1.1,
             source_closet: None,
             source_file: None,
+            source_drawer_id: None,
+            adapter_name: None,
         };
         let result = add_triple_validate_params(&params);
         assert!(result.is_err(), "confidence > 1.0 must be rejected");
@@ -128,6 +134,8 @@ mod tests {
             confidence: 0.5,
             source_closet: None,
             source_file: None,
+            source_drawer_id: None,
+            adapter_name: None,
         };
         let result = add_triple_validate_params(&params);
         assert!(result.is_err(), "invalid date format must be rejected");
@@ -151,6 +159,8 @@ mod tests {
             confidence: 0.8,
             source_closet: None,
             source_file: None,
+            source_drawer_id: None,
+            adapter_name: None,
         };
         let result = add_triple_validate_params(&params);
         assert!(
@@ -177,6 +187,8 @@ mod tests {
             confidence: 0.5,
             source_closet: None,
             source_file: None,
+            source_drawer_id: None,
+            adapter_name: None,
         };
         let result = add_triple_validate_params(&params);
         assert!(result.is_err(), "invalid valid_to date must be rejected");
@@ -245,6 +257,8 @@ mod async_tests {
                 confidence: 0.9,
                 source_closet: None,
                 source_file: None,
+                source_drawer_id: None,
+                adapter_name: None,
             },
         )
         .await
@@ -271,6 +285,8 @@ mod async_tests {
             confidence: 1.0,
             source_closet: None,
             source_file: None,
+            source_drawer_id: None,
+            adapter_name: None,
         };
         let id1 = add_triple(&connection, &params)
             .await
@@ -295,6 +311,8 @@ mod async_tests {
                 confidence: 1.0,
                 source_closet: None,
                 source_file: None,
+                source_drawer_id: None,
+                adapter_name: None,
             },
         )
         .await
@@ -376,6 +394,12 @@ pub struct TripleParams<'a> {
     pub source_closet: Option<&'a str>,
     /// Optional file path that sourced this fact.
     pub source_file: Option<&'a str>,
+    /// RFC 002 §5.5: drawer ID of the source record, set by adapters that
+    /// advertise `supports_kg_triples`.  `None` for all non-adapter paths.
+    pub source_drawer_id: Option<&'a str>,
+    /// RFC 002 §5.5: adapter that produced this triple.
+    /// `None` for all non-adapter paths.
+    pub adapter_name: Option<&'a str>,
 }
 
 /// Validate confidence and ISO date fields on a `TripleParams`.
@@ -528,6 +552,32 @@ pub async fn add_triple(connection: &Connection, params: &TripleParams<'_>) -> R
     // Postcondition: triple ID follows naming convention.
     assert!(triple_id.starts_with("t_"), "triple_id must start with t_");
 
+    add_triple_insert_row(
+        connection,
+        &triple_id,
+        &subject_id,
+        &predicate,
+        &object_id,
+        params,
+    )
+    .await?;
+
+    Ok(triple_id)
+}
+
+/// Execute the final `INSERT INTO triples` for `add_triple`.
+/// Extracted to keep `add_triple` within the 70-line limit.
+async fn add_triple_insert_row(
+    connection: &Connection,
+    triple_id: &str,
+    subject_id: &str,
+    predicate: &str,
+    object_id: &str,
+    params: &TripleParams<'_>,
+) -> Result<()> {
+    assert!(!triple_id.is_empty(), "triple_id must not be empty");
+    assert!(!object_id.is_empty(), "object_id must not be empty");
+
     let valid_from_value: turso::Value = params
         .valid_from
         .map_or(turso::Value::Null, turso::Value::from);
@@ -540,14 +590,36 @@ pub async fn add_triple(connection: &Connection, params: &TripleParams<'_>) -> R
     let source_file_value: turso::Value = params
         .source_file
         .map_or(turso::Value::Null, turso::Value::from);
+    let source_drawer_id_value: turso::Value = params
+        .source_drawer_id
+        .map_or(turso::Value::Null, turso::Value::from);
+    let adapter_name_value: turso::Value = params
+        .adapter_name
+        .map_or(turso::Value::Null, turso::Value::from);
 
-    connection.execute(
-        "INSERT INTO triples (id, subject, predicate, object, valid_from, valid_to, confidence, source_closet, source_file) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-        turso::params![triple_id.as_str(), subject_id.as_str(), predicate.as_str(), object_id.as_str(), valid_from_value, valid_to_value, params.confidence, source_closet_value, source_file_value],
-    )
-    .await?;
-
-    Ok(triple_id)
+    connection
+        .execute(
+            "INSERT INTO triples \
+             (id, subject, predicate, object, valid_from, valid_to, \
+              confidence, source_closet, source_file, \
+              source_drawer_id, adapter_name) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            turso::params![
+                triple_id,
+                subject_id,
+                predicate,
+                object_id,
+                valid_from_value,
+                valid_to_value,
+                params.confidence,
+                source_closet_value,
+                source_file_value,
+                source_drawer_id_value,
+                adapter_name_value
+            ],
+        )
+        .await?;
+    Ok(())
 }
 
 /// Mark a relationship as ended (set `valid_to`).

@@ -1162,6 +1162,8 @@ async fn tool_kg_add(connection: &Connection, args: &Value) -> Value {
             confidence: 1.0,
             source_closet: source_closet.as_deref(),
             source_file: None,
+            source_drawer_id: None,
+            adapter_name: None,
         },
     )
     .await

@@ -174,6 +174,34 @@ continuations. Original files are renamed to `.mega_backup`.
 
 ---
 
+### `mempalace sweep <target>`
+
+Sweeps a single `.jsonl` Claude Code transcript file, or every `.jsonl` in a directory tree,
+inserting one drawer per user/assistant message. Idempotent: re-running the same target is a
+safe no-op — already-present messages are detected by UUID and counted but not re-inserted.
+
+```bash
+mempalace sweep ~/.claude/projects/my-project/session.jsonl
+mempalace sweep ~/.claude/projects/my-project/
+mempalace sweep ~/.claude/projects/ --wing conversations
+```
+
+```text
+Options:
+  --wing <name>  Wing to file drawers under (default: conversations)
+```
+
+Each drawer contains one raw user or assistant message. The message UUID from the JSONL record
+is embedded in the drawer ID (`sweep_{session_id}_{uuid}`), so repeated runs never create
+duplicates.
+
+**Difference from `mine --mode convos`:** `mine --mode convos` normalises Claude Code JSONL into
+exchange pairs (user turn + AI response) and chunks them at 800-character boundaries. `sweep`
+inserts raw individual messages with no chunking or pairing — useful when you want message-level
+granularity or when the exchange-pair format loses context you care about.
+
+---
+
 ### `mempalace search "<query>"`
 
 Keyword search using the inverted index.
@@ -370,11 +398,11 @@ Diary entries live in `wing_{agent_name}/diary`. Use AAAK format for compact ent
 
 Single SQLite file at `$XDG_DATA_HOME/mempalace/palace.db` (default: `~/.local/share/mempalace/palace.db`):
 
-| Table              | Purpose                                                                                        |
-| ------------------ | ---------------------------------------------------------------------------------------------- |
-| `drawers`          | Content chunks: wing, room, content, source_file, chunk_index, added_by, ingest_mode, filed_at |
-| `drawer_words`     | Inverted index: word → drawer_id → count                                                       |
-| `entities`         | Knowledge graph nodes: name, type, properties (JSON)                                           |
-| `triples`          | Knowledge graph edges: subject, predicate, object, valid_from, valid_to, confidence            |
-| `compressed`       | AAAK-compressed drawer versions                                                                |
-| `explicit_tunnels` | Agent-created cross-wing links: source/target wing+room, label, canonical SHA256 tunnel_id     |
+| Table              | Purpose                                                                                                             |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------- |
+| `drawers`          | Content chunks: wing, room, content, source_file, chunk_index, added_by, ingest_mode, filed_at                      |
+| `drawer_words`     | Inverted index: word → drawer_id → count                                                                            |
+| `entities`         | Knowledge graph nodes: name, type, properties (JSON)                                                                |
+| `triples`          | Knowledge graph edges: subject, predicate, object, valid_from, valid_to, confidence, source_drawer_id, adapter_name |
+| `compressed`       | AAAK-compressed drawer versions                                                                                     |
+| `explicit_tunnels` | Agent-created cross-wing links: source/target wing+room, label, canonical SHA256 tunnel_id                          |

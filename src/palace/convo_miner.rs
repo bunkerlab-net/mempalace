@@ -22,7 +22,12 @@ const LINES_MAX: usize = 100_000;
 /// multi-byte characters.
 const CHUNK_SIZE: usize = 800;
 /// Files larger than this are skipped — prevents OOM on huge files.
-const FILE_SIZE_MAX: u64 = 10 * 1024 * 1024; // 10 MB
+/// Long Claude Code sessions, multi-year `ChatGPT` exports, and lifetime
+/// Slack dumps routinely exceed 10 MB; the cap guards against
+/// pathological binaries, not legitimate text.  Per-drawer size is
+/// bounded by `CHUNK_SIZE`, but content is loaded fully into memory
+/// before chunking, so memory use scales with source size.
+const FILE_SIZE_MAX: u64 = 500 * 1024 * 1024; // 500 MB
 
 // Compile-time invariant: chunk size must be greater than min chunk size.
 const _: () = assert!(CHUNK_SIZE > CHUNK_SIZE_MIN);

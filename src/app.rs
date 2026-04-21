@@ -132,6 +132,10 @@ pub async fn run(cli: Cli) -> error::Result<()> {
             )?;
         }
 
+        Command::Sweep { target, wing } => {
+            run_sweep(target, wing).await?;
+        }
+
         Command::Repair => {
             run_repair().await?;
         }
@@ -238,6 +242,13 @@ async fn run_compress(
         None => None,
     };
     cli::compress::run(&connection, wing.as_deref(), dry_run, config_str).await
+}
+
+/// Handle the `sweep` sub-command — expands `~` then delegates to the sweeper.
+async fn run_sweep(target: std::path::PathBuf, wing: String) -> error::Result<()> {
+    let target = expand_tilde(&target);
+    let (_db, connection, _path) = open_palace().await?;
+    cli::sweep::run(&connection, &target, &wing).await
 }
 
 /// Handle the `mine` sub-command — delegates to the correct miner by mode.
@@ -399,6 +410,54 @@ mod tests {
                 .is_some_and(|error| error.to_string().contains("invalid_mode")),
             "error message must contain the unknown mode name"
         );
+    }
+
+    // -- run_sweep via Command dispatch ----------------------------------------
+
+    #[tokio::test]
+    async fn run_command_sweep_with_file_target_returns_ok() {
+        // Exercises both the Command::Sweep dispatch arm and run_sweep end-to-end.
+        // A real palace DB is created by open_palace() inside run_sweep, so we
+        // point MEMPALACE_DIR at a temp directory to avoid polluting the real palace.
+        let temp_directory = tempfile::tempdir()
+            .expect("failed to create temporary directory for Command::Sweep test");
+        let temp_directory_path_string = temp_directory
+            .path()
+            .to_str()
+            .expect("temporary directory path must be valid UTF-8")
+            .to_string();
+
+        // Write a minimal valid Claude JSONL record so the sweep has something to process.
+        let jsonl_path = temp_directory.path().join("session.jsonl");
+        let record = r#"{"type":"user","sessionId":"s1","uuid":"u1","message":{"role":"user","content":"hello"}}"#;
+        std::fs::write(&jsonl_path, format!("{record}\n"))
+            .expect("must write test JSONL file for sweep");
+
+        temp_env::async_with_vars(
+            [
+                ("MEMPALACE_DIR", Some(temp_directory_path_string.as_str())),
+                ("MEMPALACE_PALACE_PATH", None),
+            ],
+            async {
+                let cli = Cli {
+                    command: Command::Sweep {
+                        target: jsonl_path,
+                        wing: "conversations".to_string(),
+                    },
+                };
+                let result = run(cli).await;
+                assert!(
+                    result.is_ok(),
+                    "run must return Ok for Command::Sweep with a valid JSONL file"
+                );
+                // Pair assertion: the palace DB must have been created by open_palace.
+                assert!(
+                    temp_directory.path().join("palace.db").exists(),
+                    "palace.db must exist after a successful sweep"
+                );
+            },
+        )
+        .await;
     }
 
     // -- run_status without a palace ------------------------------------------
