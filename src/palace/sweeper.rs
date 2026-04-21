@@ -143,7 +143,11 @@ fn flatten_content(content: &Value) -> String {
 /// `"user"` and `"assistant"`.  Malformed fields produce `None` — transcript
 /// quality is the writer's responsibility.
 fn parse_claude_jsonl_record(record: &Value) -> Option<SweepMessage> {
-    assert!(record.is_object(), "record must be a JSON object");
+    // A JSONL line can parse as any JSON value (array, string, etc.) — return
+    // None for non-objects rather than panicking; transcript quality varies.
+    if !record.is_object() {
+        return None;
+    }
 
     // Only user and assistant type records carry conversation content.
     let rtype = record.get("type")?.as_str()?;
@@ -391,15 +395,13 @@ fn sweep_directory_collect_files(dir_path: &Path) -> Vec<PathBuf> {
             depth <= WALK_DEPTH_LIMIT,
             "depth must not exceed WALK_DEPTH_LIMIT"
         );
-        if depth >= WALK_DEPTH_LIMIT {
-            continue;
-        }
         let Ok(read_dir) = std::fs::read_dir(&current_dir) else {
             continue;
         };
         for entry in read_dir.flatten() {
             let path = entry.path();
-            if path.is_dir() {
+            // Read files at WALK_DEPTH_LIMIT but do not recurse deeper.
+            if path.is_dir() && depth < WALK_DEPTH_LIMIT {
                 stack.push((path, depth + 1));
             } else if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
                 files.push(path);

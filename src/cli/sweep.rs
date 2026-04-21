@@ -58,26 +58,49 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    /// Write a minimal valid Claude JSONL record to `path` for use in sweep tests.
+    /// Write a minimal valid Claude Code JSONL record to `path`.
+    ///
+    /// Uses the Claude Code native format: top-level `type` is `"user"` or
+    /// `"assistant"`, with the message payload in a nested `message` object.
     fn write_valid_jsonl(path: &Path) {
-        let record = r#"{"type":"message","session_id":"sess1","uuid":"u001","message":{"role":"user","content":"hi"}}"#;
+        let record = r#"{"type":"user","sessionId":"sess1","uuid":"u001","message":{"role":"user","content":"hi"}}"#;
         std::fs::write(path, format!("{record}\n")).expect("must write test JSONL file");
+    }
+
+    /// Query the number of drawers in `wing` on `connection`.
+    async fn drawer_count(connection: &turso::Connection, wing: &str) -> i64 {
+        let rows = crate::db::query_all(
+            connection,
+            "SELECT COUNT(*) FROM drawers WHERE wing = ?1",
+            turso::params![wing],
+        )
+        .await
+        .expect("drawer count query must succeed");
+        rows[0].get(0).expect("COUNT(*) must be readable as i64")
     }
 
     #[tokio::test]
     async fn run_file_target_returns_ok() {
-        // Single-file branch: run must accept a regular .jsonl file and return Ok.
+        // Single-file branch: run must accept a regular .jsonl file, return Ok,
+        // and insert the message as a drawer.
         let dir = tempdir().expect("must create temp dir");
         let file = dir.path().join("session.jsonl");
         write_valid_jsonl(&file);
         let (_database, connection) = crate::test_helpers::test_db().await;
         let result = run(&connection, &file, "test_wing").await;
         assert!(result.is_ok(), "run must return Ok for a valid file target");
+        // Pair assertion: the message in the fixture must have been inserted.
+        assert_eq!(
+            drawer_count(&connection, "test_wing").await,
+            1,
+            "run must insert one drawer for the single user message"
+        );
     }
 
     #[tokio::test]
     async fn run_directory_target_returns_ok() {
-        // Directory branch: run must accept a directory and return Ok.
+        // Directory branch: run must accept a directory, return Ok, and insert
+        // the message from the fixture file as a drawer.
         let dir = tempdir().expect("must create temp dir");
         let file = dir.path().join("session.jsonl");
         write_valid_jsonl(&file);
@@ -86,6 +109,12 @@ mod tests {
         assert!(
             result.is_ok(),
             "run must return Ok for a valid directory target"
+        );
+        // Pair assertion: the message from the file must have been inserted.
+        assert_eq!(
+            drawer_count(&connection, "test_wing").await,
+            1,
+            "run must insert one drawer for the single user message"
         );
     }
 

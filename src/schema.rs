@@ -92,6 +92,23 @@ CREATE INDEX IF NOT EXISTS idx_tunnels_source ON explicit_tunnels(source_wing, s
 CREATE INDEX IF NOT EXISTS idx_tunnels_target ON explicit_tunnels(target_wing, target_room);
 ";
 
+/// Suppress the benign `SQLite` error that occurs when an `ALTER TABLE ADD COLUMN`
+/// targets a column that already exists (idempotent migration).
+///
+/// Any other error is propagated unchanged so startup is aborted rather than
+/// silently continuing with an inconsistent schema.
+fn ignore_duplicate_column(result: turso::Result<u64>) -> Result<()> {
+    if let Err(e) = result {
+        let message = e.to_string();
+        // SQLite message for adding an existing column: "duplicate column name: col"
+        // or "table T already has a column named col" (libsql variant).
+        if !message.contains("duplicate column name") && !message.contains("already has a column") {
+            return Err(e.into());
+        }
+    }
+    Ok(())
+}
+
 /// Create all tables and indexes if they don't already exist.
 ///
 /// Also runs lightweight migrations for existing databases (columns that were
@@ -102,20 +119,26 @@ pub async fn ensure_schema(connection: &Connection) -> Result<()> {
     connection.execute_batch(SCHEMA).await?;
 
     // Migration: add source_mtime column (introduced to support re-mining
-    // modified files).  Silently ignored for databases that already have it.
-    let _ = connection
-        .execute("ALTER TABLE drawers ADD COLUMN source_mtime REAL", ())
-        .await;
+    // modified files).  SQLite errors when the column already exists — only
+    // that benign case is suppressed; all other errors abort startup.
+    ignore_duplicate_column(
+        connection
+            .execute("ALTER TABLE drawers ADD COLUMN source_mtime REAL", ())
+            .await,
+    )?;
 
     // Migration: add RFC 002 §5.5 provenance columns to triples.  Fresh
     // databases get them from the DDL above; older databases need ALTER TABLE.
-    // SQLite returns an error when the column already exists — we discard it.
-    let _ = connection
-        .execute("ALTER TABLE triples ADD COLUMN source_drawer_id TEXT", ())
-        .await;
-    let _ = connection
-        .execute("ALTER TABLE triples ADD COLUMN adapter_name TEXT", ())
-        .await;
+    ignore_duplicate_column(
+        connection
+            .execute("ALTER TABLE triples ADD COLUMN source_drawer_id TEXT", ())
+            .await,
+    )?;
+    ignore_duplicate_column(
+        connection
+            .execute("ALTER TABLE triples ADD COLUMN adapter_name TEXT", ())
+            .await,
+    )?;
 
     // Pair assertion: verify all six core tables were created.
     let rows = crate::db::query_all(

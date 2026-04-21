@@ -429,7 +429,7 @@ mod tests {
 
         // Write a minimal valid Claude JSONL record so the sweep has something to process.
         let jsonl_path = temp_directory.path().join("session.jsonl");
-        let record = r#"{"type":"message","session_id":"s1","uuid":"u1","message":{"role":"user","content":"hello"}}"#;
+        let record = r#"{"type":"user","sessionId":"s1","uuid":"u1","message":{"role":"user","content":"hello"}}"#;
         std::fs::write(&jsonl_path, format!("{record}\n"))
             .expect("must write test JSONL file for sweep");
 
