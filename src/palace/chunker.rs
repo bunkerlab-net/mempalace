@@ -3,13 +3,9 @@ const CHUNK_OVERLAP: usize = 100;
 const CHUNK_SIZE_MIN: usize = 50;
 /// UTF-8 code points are at most 4 bytes, so a char-boundary snap never takes more than 3 steps.
 const CHAR_BOUNDARY_SNAP_MAX: usize = 4;
-/// A chunk covers at least `CHUNK_SIZE_MIN` bytes, so max chunks = `text.len()` / `CHUNK_SIZE_MIN`.
-/// `5_000` is a generous upper bound for any realistic input.
-const CHUNKS_MAX: usize = 5_000;
 
-// Compile-time invariant: overlap must be less than chunk size.
+// Compile-time invariants.
 const _: () = assert!(CHUNK_OVERLAP < CHUNK_SIZE);
-// Compile-time invariant: min chunk size must be less than chunk size.
 const _: () = assert!(CHUNK_SIZE_MIN < CHUNK_SIZE);
 
 /// A single text chunk produced by [`chunk_text`].
@@ -67,6 +63,9 @@ pub fn chunk_text(content: &str) -> Vec<Chunk> {
         return vec![];
     }
 
+    // Each chunk covers at least CHUNK_SIZE_MIN bytes, so iterations are bounded by the input.
+    let chunks_max = content.len() / CHUNK_SIZE_MIN + 1;
+
     let mut chunks = Vec::new();
     let mut start = 0;
     let mut chunk_index = 0;
@@ -74,8 +73,8 @@ pub fn chunk_text(content: &str) -> Vec<Chunk> {
 
     while start < content.len() {
         assert!(
-            chunk_count < CHUNKS_MAX,
-            "chunk_text: exceeded CHUNKS_MAX ({CHUNKS_MAX}) iterations"
+            chunk_count < chunks_max,
+            "chunk_text: exceeded chunks_max ({chunks_max}) iterations"
         );
         chunk_count += 1;
         let mut end = snap_backward(content, (start + CHUNK_SIZE).min(content.len()));
@@ -217,5 +216,18 @@ mod tests {
         let text = "\u{1F600}end"; // 4-byte emoji then ASCII
         // Byte offset 3 is mid-emoji, should snap to 0.
         assert_eq!(snap_backward(text, 3), 0);
+    }
+
+    #[test]
+    fn large_file_exceeding_old_fixed_limit_does_not_panic() {
+        // Regression: files that produced > 5_000 chunks panicked under the old fixed CHUNKS_MAX.
+        // 5_001 chunks × CHUNK_SIZE bytes ensures we exceed the former constant.
+        let text = "word ".repeat(5_001 * CHUNK_SIZE / "word ".len());
+        let chunks = chunk_text(&text);
+        assert!(chunks.len() > 5_000);
+        for (i, chunk) in chunks.iter().enumerate() {
+            assert_eq!(chunk.chunk_index, i);
+            assert!(chunk.content.len() >= CHUNK_SIZE_MIN);
+        }
     }
 }
