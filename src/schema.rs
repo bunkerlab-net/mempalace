@@ -23,6 +23,8 @@ CREATE INDEX IF NOT EXISTS idx_drawers_wing ON drawers(wing);
 CREATE INDEX IF NOT EXISTS idx_drawers_room ON drawers(room);
 CREATE INDEX IF NOT EXISTS idx_drawers_wing_room ON drawers(wing, room);
 CREATE INDEX IF NOT EXISTS idx_drawers_source ON drawers(source_file);
+-- Covers the sweeper keyset pagination query: ingest_mode = 'sweep' AND id > ? ORDER BY id
+CREATE INDEX IF NOT EXISTS idx_drawers_ingest_mode_id ON drawers(ingest_mode, id);
 
 -- Inverted index for keyword search (replaces FTS5 which turso doesn't support)
 CREATE TABLE IF NOT EXISTS drawer_words (
