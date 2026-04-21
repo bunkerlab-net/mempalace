@@ -203,10 +203,6 @@ fn parse_claude_jsonl(path: &Path) -> Result<Vec<SweepMessage>> {
     let mut line_count: usize = 0;
 
     for line in file_content.lines() {
-        assert!(
-            line_count < MESSAGES_MAX,
-            "parse_claude_jsonl: MESSAGES_MAX exceeded"
-        );
         line_count += 1;
         if line_count > MESSAGES_MAX {
             break;
