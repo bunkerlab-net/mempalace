@@ -24,14 +24,18 @@ pub struct MineParams {
 }
 
 /// Files larger than this are skipped — prevents OOM on huge files.
-const FILE_SIZE_MAX: u64 = 10 * 1024 * 1024; // 10 MB
+/// Large sessions (Claude Code, `ChatGPT` exports) routinely exceed 10 MB;
+/// the cap guards against pathological binaries, not legitimate text.
+/// Per-drawer size is bounded by `CHUNK_SIZE`, but the whole file is read
+/// into memory before chunking, so memory scales with source size.
+const FILE_SIZE_MAX: u64 = 500 * 1024 * 1024; // 500 MB
 
 use super::WALK_DEPTH_LIMIT;
 
 const READABLE_EXTENSIONS: &[&str] = &[
-    "txt", "md", "py", "js", "ts", "jsx", "tsx", "json", "yaml", "yml", "html", "css", "java",
-    "go", "rs", "rb", "sh", "csv", "sql", "toml", "c", "cpp", "h", "hpp", "swift", "kt", "scala",
-    "lua", "r", "php", "pl", "zig", "nim", "ex", "exs", "erl", "hs", "ml",
+    "txt", "md", "py", "js", "ts", "jsx", "tsx", "json", "jsonl", "yaml", "yml", "html", "css",
+    "java", "go", "rs", "rb", "sh", "csv", "sql", "toml", "c", "cpp", "h", "hpp", "swift", "kt",
+    "scala", "lua", "r", "php", "pl", "zig", "nim", "ex", "exs", "erl", "hs", "ml",
 ];
 
 /// Config filenames recognised by the miner, in load-precedence order.

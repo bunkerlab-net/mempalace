@@ -15,3 +15,4 @@ pub mod miner;
 pub mod query_sanitizer;
 pub mod room_detect;
 pub mod search;
+pub mod sweeper;

@@ -29,6 +29,8 @@ async fn entity_triple_query_lifecycle() {
             confidence: 1.0,
             source_closet: None,
             source_file: None,
+            source_drawer_id: None,
+            adapter_name: None,
         },
     )
     .await
@@ -66,6 +68,8 @@ async fn invalidate_updates_timeline() {
             confidence: 0.9,
             source_closet: None,
             source_file: None,
+            source_drawer_id: None,
+            adapter_name: None,
         },
     )
     .await
@@ -134,6 +138,8 @@ async fn stats_reflect_operations() {
             confidence: 1.0,
             source_closet: None,
             source_file: None,
+            source_drawer_id: None,
+            adapter_name: None,
         },
     )
     .await
@@ -197,6 +203,8 @@ async fn multiple_triples_same_entities() {
                 confidence: 1.0,
                 source_closet: None,
                 source_file: None,
+                source_drawer_id: None,
+                adapter_name: None,
             },
         )
         .await

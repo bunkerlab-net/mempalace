@@ -132,6 +132,10 @@ pub async fn run(cli: Cli) -> error::Result<()> {
             )?;
         }
 
+        Command::Sweep { target, wing } => {
+            run_sweep(target, wing).await?;
+        }
+
         Command::Repair => {
             run_repair().await?;
         }
@@ -238,6 +242,13 @@ async fn run_compress(
         None => None,
     };
     cli::compress::run(&connection, wing.as_deref(), dry_run, config_str).await
+}
+
+/// Handle the `sweep` sub-command — expands `~` then delegates to the sweeper.
+async fn run_sweep(target: std::path::PathBuf, wing: String) -> error::Result<()> {
+    let target = expand_tilde(&target);
+    let (_db, connection, _path) = open_palace().await?;
+    cli::sweep::run(&connection, &target, &wing).await
 }
 
 /// Handle the `mine` sub-command — delegates to the correct miner by mode.

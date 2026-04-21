@@ -6,6 +6,7 @@ pub mod repair;
 pub mod search;
 pub mod split;
 pub mod status;
+pub mod sweep;
 pub mod wakeup;
 
 use std::path::PathBuf;
@@ -133,6 +134,20 @@ pub enum Command {
         /// Disable .gitignore filtering (include all files regardless of gitignore rules)
         #[arg(long)]
         no_gitignore: bool,
+    },
+
+    /// Tandem miner: catch messages the primary miner missed
+    ///
+    /// Sweeps a `.jsonl` transcript file or directory, inserting one drawer
+    /// per user/assistant message not already present.  Idempotent: re-running
+    /// the same target is a safe no-op.
+    Sweep {
+        /// Path to a `.jsonl` transcript file or a directory to scan recursively
+        target: PathBuf,
+
+        /// Wing to file drawers under
+        #[arg(long, default_value = "conversations")]
+        wing: String,
     },
 
     /// Show palace overview and stats

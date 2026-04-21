@@ -323,6 +323,8 @@ mod tests {
                 confidence: 1.0,
                 source_closet: None,
                 source_file: None,
+                source_drawer_id: None,
+                adapter_name: None,
             },
         )
         .await
@@ -394,6 +396,8 @@ mod tests {
                 confidence: 1.0,
                 source_closet: None,
                 source_file: None,
+                source_drawer_id: None,
+                adapter_name: None,
             },
         )
         .await
@@ -422,6 +426,8 @@ mod tests {
                 confidence: 1.0,
                 source_closet: None,
                 source_file: None,
+                source_drawer_id: None,
+                adapter_name: None,
             },
         )
         .await

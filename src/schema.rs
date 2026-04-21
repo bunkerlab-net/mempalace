@@ -53,6 +53,8 @@ CREATE TABLE IF NOT EXISTS triples (
     confidence REAL DEFAULT 1.0,
     source_closet TEXT,
     source_file TEXT,
+    source_drawer_id TEXT,
+    adapter_name TEXT,
     extracted_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -103,6 +105,16 @@ pub async fn ensure_schema(connection: &Connection) -> Result<()> {
     // modified files).  Silently ignored for databases that already have it.
     let _ = connection
         .execute("ALTER TABLE drawers ADD COLUMN source_mtime REAL", ())
+        .await;
+
+    // Migration: add RFC 002 §5.5 provenance columns to triples.  Fresh
+    // databases get them from the DDL above; older databases need ALTER TABLE.
+    // SQLite returns an error when the column already exists — we discard it.
+    let _ = connection
+        .execute("ALTER TABLE triples ADD COLUMN source_drawer_id TEXT", ())
+        .await;
+    let _ = connection
+        .execute("ALTER TABLE triples ADD COLUMN adapter_name TEXT", ())
         .await;
 
     // Pair assertion: verify all six core tables were created.
