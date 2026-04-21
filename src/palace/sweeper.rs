@@ -260,13 +260,14 @@ fn sweep_make_drawer_id(session_id: &str, uuid: &str) -> String {
     drawer_id
 }
 
-/// Query the set of message UUIDs already swept for each session in `session_ids`.
+/// Query the set of drawer IDs already swept for each session in `session_ids`.
 ///
 /// Drawer IDs for swept messages follow the pattern `"sweep_{session_id}_{uuid}"`.
-/// Querying by that prefix and stripping it yields the stored UUIDs, letting the
-/// caller skip re-processing.  Results are fetched in keyset-paginated batches
-/// (100 000 rows each, matching `db::ROWS_MAX`) so sessions with arbitrarily
-/// many prior sweeps are handled without truncation or OOM.
+/// Full drawer IDs (not stripped UUIDs) are stored in the returned sets so that
+/// sessions whose IDs share a prefix cannot cause false already-swept matches.
+/// Results are fetched in keyset-paginated batches (100 000 rows each, matching
+/// `db::ROWS_MAX`) so sessions with arbitrarily many prior sweeps are handled
+/// without truncation or OOM.
 async fn sweep_load_cursors(
     connection: &Connection,
     session_ids: &HashSet<String>,
@@ -276,10 +277,9 @@ async fn sweep_load_cursors(
     for session_id in session_ids {
         assert!(!session_id.is_empty(), "session_id must not be empty");
 
-        let prefix = format!("sweep_{session_id}_");
-        let like_pattern = format!("{prefix}%");
+        let like_pattern = format!("sweep_{session_id}_%");
 
-        let mut uuids: HashSet<String> = HashSet::new();
+        let mut drawer_ids: HashSet<String> = HashSet::new();
         // Empty string sorts before all real IDs, making it a valid initial keyset cursor.
         let mut last_id = String::new();
 
@@ -301,27 +301,27 @@ async fn sweep_load_cursors(
 
             for row in &batch {
                 if let Ok(id) = row.get::<String>(0) {
-                    if let Some(uuid) = id.strip_prefix(&prefix) {
-                        uuids.insert(uuid.to_string());
-                    }
+                    // Store the full drawer id; stripping to UUID allows false
+                    // matches when one session_id is a prefix of another.
+                    drawer_ids.insert(id.clone());
                     // Always advance the cursor; rows are sorted ascending.
                     last_id = id;
                 }
             }
 
             // Stop when the batch was partial (last page) or the cap is reached.
-            if batch_len < 100_000 || uuids.len() >= MESSAGES_MAX {
+            if batch_len < 100_000 || drawer_ids.len() >= MESSAGES_MAX {
                 break;
             }
         }
 
-        // Pair assertion: all extracted UUIDs are non-empty strings.
+        // Pair assertion: all stored drawer ids are non-empty strings.
         debug_assert!(
-            uuids.iter().all(|u| !u.is_empty()),
-            "all extracted UUIDs must be non-empty"
+            drawer_ids.iter().all(|id| !id.is_empty()),
+            "all stored drawer ids must be non-empty"
         );
 
-        cursors.insert(session_id.clone(), uuids);
+        cursors.insert(session_id.clone(), drawer_ids);
     }
 
     // Postcondition: result has one entry per session queried.
@@ -351,21 +351,21 @@ pub async fn sweep(connection: &Connection, jsonl_path: &Path, wing: &str) -> Re
     let session_ids: HashSet<String> = messages.iter().map(|m| m.session_id.clone()).collect();
     let cursors = sweep_load_cursors(connection, &session_ids).await?;
 
-    let source_file = jsonl_path.to_str().unwrap_or("");
+    let source_file = jsonl_path.to_string_lossy().into_owned();
     let mut drawers_added: usize = 0;
     let mut drawers_already_present: usize = 0;
 
     for (file_index, message) in messages.iter().enumerate() {
+        // Compute before the cursor check; reused for the insert if not present.
+        let drawer_id = sweep_make_drawer_id(&message.session_id, &message.uuid);
         let already_swept = cursors
             .get(&message.session_id)
-            .is_some_and(|uuids| uuids.contains(&message.uuid));
+            .is_some_and(|drawer_ids| drawer_ids.contains(&drawer_id));
 
         if already_swept {
             drawers_already_present += 1;
             continue;
         }
-
-        let drawer_id = sweep_make_drawer_id(&message.session_id, &message.uuid);
         let content = format!("{}: {}", message.role.to_uppercase(), message.content);
 
         let inserted = drawer::add_drawer(
@@ -375,7 +375,7 @@ pub async fn sweep(connection: &Connection, jsonl_path: &Path, wing: &str) -> Re
                 wing,
                 room: "conversations",
                 content: &content,
-                source_file,
+                source_file: &source_file,
                 chunk_index: file_index,
                 added_by: "sweep",
                 ingest_mode: "sweep",
@@ -422,6 +422,11 @@ fn sweep_directory_collect_files(dir_path: &Path) -> Vec<PathBuf> {
             depth <= WALK_DEPTH_LIMIT,
             "depth must not exceed WALK_DEPTH_LIMIT"
         );
+        // Curtail traversal as soon as the cap is reached; remaining stack
+        // entries are abandoned rather than walked for nothing.
+        if files.len() >= FILES_MAX {
+            break;
+        }
         let Ok(read_dir) = std::fs::read_dir(&current_dir) else {
             continue;
         };
@@ -432,6 +437,10 @@ fn sweep_directory_collect_files(dir_path: &Path) -> Vec<PathBuf> {
                 stack.push((path, depth + 1));
             } else if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
                 files.push(path);
+                // Stop collecting from this directory once the cap is hit.
+                if files.len() >= FILES_MAX {
+                    break;
+                }
             }
         }
     }
@@ -909,9 +918,10 @@ mod tests {
             .expect("cursor load should succeed");
 
         assert_eq!(cursors.len(), 1);
+        // Cursor now stores full drawer ids, not stripped UUIDs.
         assert!(
-            cursors["sess1"].contains("uuid-abc"),
-            "prior UUID must be found in cursor"
+            cursors["sess1"].contains("sweep_sess1_uuid-abc"),
+            "prior drawer id must be found in cursor"
         );
     }
 
