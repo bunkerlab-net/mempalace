@@ -484,12 +484,21 @@ pub async fn sweep_directory(
     let mut drawers_already_present: usize = 0;
     let mut files_succeeded: usize = 0;
 
-    for file in &files {
+    println!("  Sweeping {} files...", files.len());
+
+    for (index, file) in files.iter().enumerate() {
         match sweep(connection, file, wing).await {
             Ok(result) => {
                 drawers_added += result.drawers_added;
                 drawers_already_present += result.drawers_already_present;
                 files_succeeded += 1;
+                println!(
+                    "  [{:4}/{}] {:50} +{}",
+                    index + 1,
+                    files.len(),
+                    file.file_name().unwrap_or_default().to_string_lossy(),
+                    result.drawers_added,
+                );
             }
             Err(error) => {
                 eprintln!("sweep: skipping {}: {error}", file.display());
