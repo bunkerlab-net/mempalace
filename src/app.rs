@@ -412,6 +412,54 @@ mod tests {
         );
     }
 
+    // -- run_sweep via Command dispatch ----------------------------------------
+
+    #[tokio::test]
+    async fn run_command_sweep_with_file_target_returns_ok() {
+        // Exercises both the Command::Sweep dispatch arm and run_sweep end-to-end.
+        // A real palace DB is created by open_palace() inside run_sweep, so we
+        // point MEMPALACE_DIR at a temp directory to avoid polluting the real palace.
+        let temp_directory = tempfile::tempdir()
+            .expect("failed to create temporary directory for Command::Sweep test");
+        let temp_directory_path_string = temp_directory
+            .path()
+            .to_str()
+            .expect("temporary directory path must be valid UTF-8")
+            .to_string();
+
+        // Write a minimal valid Claude JSONL record so the sweep has something to process.
+        let jsonl_path = temp_directory.path().join("session.jsonl");
+        let record = r#"{"type":"message","session_id":"s1","uuid":"u1","message":{"role":"user","content":"hello"}}"#;
+        std::fs::write(&jsonl_path, format!("{record}\n"))
+            .expect("must write test JSONL file for sweep");
+
+        temp_env::async_with_vars(
+            [
+                ("MEMPALACE_DIR", Some(temp_directory_path_string.as_str())),
+                ("MEMPALACE_PALACE_PATH", None),
+            ],
+            async {
+                let cli = Cli {
+                    command: Command::Sweep {
+                        target: jsonl_path,
+                        wing: "conversations".to_string(),
+                    },
+                };
+                let result = run(cli).await;
+                assert!(
+                    result.is_ok(),
+                    "run must return Ok for Command::Sweep with a valid JSONL file"
+                );
+                // Pair assertion: the palace DB must have been created by open_palace.
+                assert!(
+                    temp_directory.path().join("palace.db").exists(),
+                    "palace.db must exist after a successful sweep"
+                );
+            },
+        )
+        .await;
+    }
+
     // -- run_status without a palace ------------------------------------------
 
     #[tokio::test]
