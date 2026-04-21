@@ -50,3 +50,59 @@ pub async fn run(connection: &Connection, target: &Path, wing: &str) -> Result<(
 
     Ok(())
 }
+
+#[cfg(test)]
+// Test code — .expect() is acceptable with a descriptive message.
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    /// Write a minimal valid Claude JSONL record to `path` for use in sweep tests.
+    fn write_valid_jsonl(path: &Path) {
+        let record = r#"{"type":"message","session_id":"sess1","uuid":"u001","message":{"role":"user","content":"hi"}}"#;
+        std::fs::write(path, format!("{record}\n")).expect("must write test JSONL file");
+    }
+
+    #[tokio::test]
+    async fn run_file_target_returns_ok() {
+        // Single-file branch: run must accept a regular .jsonl file and return Ok.
+        let dir = tempdir().expect("must create temp dir");
+        let file = dir.path().join("session.jsonl");
+        write_valid_jsonl(&file);
+        let (_database, connection) = crate::test_helpers::test_db().await;
+        let result = run(&connection, &file, "test_wing").await;
+        assert!(result.is_ok(), "run must return Ok for a valid file target");
+    }
+
+    #[tokio::test]
+    async fn run_directory_target_returns_ok() {
+        // Directory branch: run must accept a directory and return Ok.
+        let dir = tempdir().expect("must create temp dir");
+        let file = dir.path().join("session.jsonl");
+        write_valid_jsonl(&file);
+        let (_database, connection) = crate::test_helpers::test_db().await;
+        let result = run(&connection, dir.path(), "test_wing").await;
+        assert!(
+            result.is_ok(),
+            "run must return Ok for a valid directory target"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_special_file_returns_error() {
+        // Else branch: /dev/null exists but is neither a regular file nor a directory.
+        // run must return Err rather than silently succeeding or panicking.
+        let target = Path::new("/dev/null");
+        assert!(target.exists(), "/dev/null must exist on Unix");
+        assert!(!target.is_file(), "/dev/null must not be a regular file");
+        assert!(!target.is_dir(), "/dev/null must not be a directory");
+        let (_database, connection) = crate::test_helpers::test_db().await;
+        let result = run(&connection, target, "test_wing").await;
+        assert!(
+            result.is_err(),
+            "run must return Err for a special-file target"
+        );
+    }
+}

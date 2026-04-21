@@ -471,3 +471,557 @@ pub async fn sweep_directory(
         drawers_already_present,
     })
 }
+
+#[cfg(test)]
+// Test code — .expect() is acceptable with a descriptive message.
+#[allow(clippy::expect_used)]
+mod tests {
+    use std::fs;
+
+    use super::*;
+
+    // ── Fixtures ─────────────────────────────────────────────────────────────
+
+    /// Write `lines` to a temp file named `name` in `dir` and return the path.
+    fn write_jsonl(dir: &Path, name: &str, lines: &[&str]) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, lines.join("\n")).expect("write test JSONL");
+        path
+    }
+
+    /// Build a minimal valid Claude Code user record as a JSON string.
+    fn user_record(session_id: &str, uuid: &str, content: &str) -> String {
+        serde_json::json!({
+            "type": "user",
+            "sessionId": session_id,
+            "uuid": uuid,
+            "timestamp": "2024-01-01T00:00:00Z",
+            "message": { "role": "user", "content": content }
+        })
+        .to_string()
+    }
+
+    /// Build a minimal valid Claude Code assistant record with a text block.
+    fn assistant_record(session_id: &str, uuid: &str, text: &str) -> String {
+        serde_json::json!({
+            "type": "assistant",
+            "sessionId": session_id,
+            "uuid": uuid,
+            "timestamp": "2024-01-01T00:00:01Z",
+            "message": {
+                "role": "assistant",
+                "content": [{ "type": "text", "text": text }]
+            }
+        })
+        .to_string()
+    }
+
+    // ── flatten_content_block ────────────────────────────────────────────────
+
+    #[test]
+    fn flatten_content_block_text_returns_text_field() {
+        let block = serde_json::json!({ "type": "text", "text": "hello world" });
+        let block_map = block.as_object().expect("must be object");
+        let result = flatten_content_block("text", block_map, &block);
+        assert_eq!(result, "hello world");
+        assert!(!result.contains('\0'));
+    }
+
+    #[test]
+    fn flatten_content_block_text_missing_field_returns_empty() {
+        let block = serde_json::json!({ "type": "text" });
+        let block_map = block.as_object().expect("must be object");
+        let result = flatten_content_block("text", block_map, &block);
+        assert!(
+            result.is_empty(),
+            "missing text field must yield empty string"
+        );
+    }
+
+    #[test]
+    fn flatten_content_block_tool_use_includes_name_and_input() {
+        let block = serde_json::json!({
+            "type": "tool_use",
+            "name": "Read",
+            "input": { "file": "foo.rs" }
+        });
+        let block_map = block.as_object().expect("must be object");
+        let result = flatten_content_block("tool_use", block_map, &block);
+        assert!(result.starts_with("[tool_use: Read input="));
+        assert!(result.contains("foo.rs"));
+    }
+
+    #[test]
+    fn flatten_content_block_tool_use_missing_name_falls_back_to_question_mark() {
+        let block = serde_json::json!({ "type": "tool_use", "input": {} });
+        let block_map = block.as_object().expect("must be object");
+        let result = flatten_content_block("tool_use", block_map, &block);
+        assert!(result.contains('?'), "missing name must fall back to '?'");
+    }
+
+    #[test]
+    fn flatten_content_block_tool_result_includes_content() {
+        let block = serde_json::json!({ "type": "tool_result", "content": "result text" });
+        let block_map = block.as_object().expect("must be object");
+        let result = flatten_content_block("tool_result", block_map, &block);
+        assert!(result.starts_with("[tool_result:"));
+        assert!(result.contains("result text"));
+    }
+
+    #[test]
+    fn flatten_content_block_tool_result_missing_content_returns_empty_brackets() {
+        let block = serde_json::json!({ "type": "tool_result" });
+        let block_map = block.as_object().expect("must be object");
+        let result = flatten_content_block("tool_result", block_map, &block);
+        assert_eq!(result, "[tool_result: ]");
+    }
+
+    #[test]
+    fn flatten_content_block_unknown_type_formats_generic() {
+        let block = serde_json::json!({ "type": "thinking", "data": "..." });
+        let block_map = block.as_object().expect("must be object");
+        let result = flatten_content_block("thinking", block_map, &block);
+        assert!(
+            result.starts_with("[thinking:"),
+            "unknown type must use generic format"
+        );
+    }
+
+    // ── flatten_content ──────────────────────────────────────────────────────
+
+    #[test]
+    fn flatten_content_string_returns_the_string_unchanged() {
+        let content = Value::String("hello".to_string());
+        assert_eq!(flatten_content(&content), "hello");
+    }
+
+    #[test]
+    fn flatten_content_array_joins_non_empty_block_parts() {
+        let content = serde_json::json!([
+            { "type": "text", "text": "part one" },
+            { "type": "text", "text": "part two" }
+        ]);
+        let result = flatten_content(&content);
+        assert!(result.contains("part one"));
+        assert!(result.contains("part two"));
+        assert!(
+            result.contains('\n'),
+            "multiple parts must be newline-joined"
+        );
+    }
+
+    #[test]
+    fn flatten_content_array_skips_non_object_elements() {
+        let content = serde_json::json!([
+            { "type": "text", "text": "real" },
+            "not an object",
+            42
+        ]);
+        let result = flatten_content(&content);
+        assert_eq!(
+            result, "real",
+            "non-object elements must be silently skipped"
+        );
+    }
+
+    #[test]
+    fn flatten_content_array_empty_returns_empty_string() {
+        let content = serde_json::json!([]);
+        assert!(flatten_content(&content).is_empty());
+    }
+
+    #[test]
+    fn flatten_content_null_returns_string_representation() {
+        let result = flatten_content(&Value::Null);
+        assert_eq!(result, "null");
+        assert!(!result.is_empty());
+    }
+
+    // ── parse_claude_jsonl_record ────────────────────────────────────────────
+
+    #[test]
+    fn parse_record_valid_user_message() {
+        let record: Value =
+            serde_json::from_str(&user_record("s1", "u1", "Hello")).expect("parse fixture");
+        let msg = parse_claude_jsonl_record(&record).expect("must parse");
+        assert_eq!(msg.session_id, "s1");
+        assert_eq!(msg.uuid, "u1");
+        assert_eq!(msg.role, "user");
+        assert!(msg.content.contains("Hello"));
+    }
+
+    #[test]
+    fn parse_record_valid_assistant_array_content() {
+        let record: Value =
+            serde_json::from_str(&assistant_record("s2", "u2", "Hi")).expect("parse fixture");
+        let msg = parse_claude_jsonl_record(&record).expect("must parse");
+        assert_eq!(msg.role, "assistant");
+        assert!(msg.content.contains("Hi"));
+    }
+
+    #[test]
+    fn parse_record_wrong_type_returns_none() {
+        let record = serde_json::json!({
+            "type": "progress",
+            "sessionId": "s1", "uuid": "u1",
+            "message": { "role": "user", "content": "text" }
+        });
+        assert!(parse_claude_jsonl_record(&record).is_none());
+    }
+
+    #[test]
+    fn parse_record_wrong_role_returns_none() {
+        let record = serde_json::json!({
+            "type": "user",
+            "sessionId": "s1", "uuid": "u1",
+            "message": { "role": "system", "content": "text" }
+        });
+        assert!(parse_claude_jsonl_record(&record).is_none());
+    }
+
+    #[test]
+    fn parse_record_missing_message_returns_none() {
+        let record = serde_json::json!({ "type": "user", "sessionId": "s1", "uuid": "u1" });
+        assert!(parse_claude_jsonl_record(&record).is_none());
+    }
+
+    #[test]
+    fn parse_record_missing_uuid_returns_none() {
+        let record = serde_json::json!({
+            "type": "user", "sessionId": "s1",
+            "message": { "role": "user", "content": "text" }
+        });
+        assert!(parse_claude_jsonl_record(&record).is_none());
+    }
+
+    #[test]
+    fn parse_record_missing_session_id_returns_none() {
+        let record = serde_json::json!({
+            "type": "user", "uuid": "u1",
+            "message": { "role": "user", "content": "text" }
+        });
+        assert!(parse_claude_jsonl_record(&record).is_none());
+    }
+
+    #[test]
+    fn parse_record_empty_content_returns_none() {
+        let record = serde_json::json!({
+            "type": "user", "sessionId": "s1", "uuid": "u1",
+            "message": { "role": "user", "content": "   " }
+        });
+        assert!(parse_claude_jsonl_record(&record).is_none());
+    }
+
+    #[test]
+    fn parse_record_uses_snake_case_session_id_fallback() {
+        let record = serde_json::json!({
+            "type": "user", "session_id": "fallback", "uuid": "u1",
+            "message": { "role": "user", "content": "text" }
+        });
+        let msg = parse_claude_jsonl_record(&record)
+            .expect("must parse when session_id snake_case key is used");
+        assert_eq!(msg.session_id, "fallback");
+        assert!(!msg.session_id.is_empty());
+    }
+
+    // ── parse_claude_jsonl ───────────────────────────────────────────────────
+
+    #[test]
+    fn parse_jsonl_valid_file_returns_all_messages() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_jsonl(
+            dir.path(),
+            "session.jsonl",
+            &[
+                &user_record("s1", "u1", "Hello"),
+                &assistant_record("s1", "u2", "Hi"),
+            ],
+        );
+        let messages = parse_claude_jsonl(&path).expect("parse should succeed");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[1].role, "assistant");
+    }
+
+    #[test]
+    fn parse_jsonl_malformed_lines_are_silently_skipped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_jsonl(
+            dir.path(),
+            "session.jsonl",
+            &["not json {{{", &user_record("s1", "u1", "Valid"), ""],
+        );
+        let messages = parse_claude_jsonl(&path).expect("parse should succeed");
+        assert_eq!(messages.len(), 1, "only the valid record must be parsed");
+        assert_eq!(messages[0].uuid, "u1");
+    }
+
+    #[test]
+    fn parse_jsonl_empty_file_returns_empty_vec() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_jsonl(dir.path(), "empty.jsonl", &[]);
+        let messages = parse_claude_jsonl(&path).expect("parse should succeed");
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn parse_jsonl_non_message_records_are_filtered_out() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let progress = serde_json::json!({"type": "progress", "data": "..."}).to_string();
+        let path = write_jsonl(
+            dir.path(),
+            "session.jsonl",
+            &[&progress, &user_record("s1", "u1", "Real message")],
+        );
+        let messages = parse_claude_jsonl(&path).expect("parse should succeed");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].uuid, "u1");
+    }
+
+    // ── sweep_make_drawer_id ─────────────────────────────────────────────────
+
+    #[test]
+    fn make_drawer_id_starts_with_sweep_prefix_and_encodes_both_fields() {
+        let id = sweep_make_drawer_id("sess-abc", "msg-123");
+        assert!(id.starts_with("sweep_"), "must start with sweep_");
+        assert!(id.contains("sess-abc"), "must contain session_id");
+        assert!(id.contains("msg-123"), "must contain uuid");
+    }
+
+    #[test]
+    fn make_drawer_id_is_deterministic_for_same_inputs() {
+        let id_a = sweep_make_drawer_id("sess-abc", "msg-123");
+        let id_b = sweep_make_drawer_id("sess-abc", "msg-123");
+        assert_eq!(id_a, id_b, "same inputs must always produce the same ID");
+        assert!(!id_a.contains('\0'));
+    }
+
+    // ── sweep_load_cursors ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn load_cursors_returns_empty_set_for_fresh_session() {
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let session_ids: HashSet<String> = ["sess1".to_string(), "sess2".to_string()].into();
+        let cursors = sweep_load_cursors(&connection, &session_ids)
+            .await
+            .expect("cursor load should succeed");
+        assert_eq!(cursors.len(), 2, "one entry per session");
+        assert!(
+            cursors["sess1"].is_empty(),
+            "fresh session must have empty cursor"
+        );
+        assert!(cursors["sess2"].is_empty());
+    }
+
+    #[tokio::test]
+    async fn load_cursors_finds_previously_swept_uuids() {
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        // Seed a sweeper drawer directly.
+        connection
+            .execute(
+                "INSERT INTO drawers \
+                 (id, wing, room, content, source_file, chunk_index, added_by, ingest_mode) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                turso::params![
+                    "sweep_sess1_uuid-abc",
+                    "conversations",
+                    "conversations",
+                    "USER: hello",
+                    "test.jsonl",
+                    0_i32,
+                    "sweep",
+                    "sweep"
+                ],
+            )
+            .await
+            .expect("direct insert should succeed");
+
+        let session_ids: HashSet<String> = ["sess1".to_string()].into();
+        let cursors = sweep_load_cursors(&connection, &session_ids)
+            .await
+            .expect("cursor load should succeed");
+
+        assert_eq!(cursors.len(), 1);
+        assert!(
+            cursors["sess1"].contains("uuid-abc"),
+            "prior UUID must be found in cursor"
+        );
+    }
+
+    // ── sweep ────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn sweep_new_file_inserts_all_messages() {
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_jsonl(
+            dir.path(),
+            "session.jsonl",
+            &[
+                &user_record("s1", "u1", "Hello"),
+                &assistant_record("s1", "u2", "Hi"),
+            ],
+        );
+
+        let result = sweep(&connection, &path, "test_wing")
+            .await
+            .expect("sweep should succeed");
+
+        assert_eq!(result.drawers_added, 2, "both messages must be inserted");
+        assert_eq!(result.drawers_already_present, 0);
+    }
+
+    #[tokio::test]
+    async fn sweep_rerun_counts_everything_as_already_present() {
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_jsonl(
+            dir.path(),
+            "session.jsonl",
+            &[&user_record("s1", "u1", "Hello")],
+        );
+
+        // First run.
+        sweep(&connection, &path, "test_wing")
+            .await
+            .expect("first sweep should succeed");
+
+        // Second run — cursor finds the UUID; nothing new.
+        let result = sweep(&connection, &path, "test_wing")
+            .await
+            .expect("second sweep should succeed");
+
+        assert_eq!(result.drawers_added, 0, "nothing new on re-run");
+        assert_eq!(result.drawers_already_present, 1);
+    }
+
+    #[tokio::test]
+    async fn sweep_empty_file_returns_zero_counts() {
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_jsonl(dir.path(), "empty.jsonl", &[]);
+
+        let result = sweep(&connection, &path, "test_wing")
+            .await
+            .expect("sweep empty file should succeed");
+
+        assert_eq!(result.drawers_added, 0);
+        assert_eq!(result.drawers_already_present, 0);
+    }
+
+    #[tokio::test]
+    async fn sweep_filters_non_message_records() {
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let progress = serde_json::json!({"type": "progress", "data": "..."}).to_string();
+        let path = write_jsonl(
+            dir.path(),
+            "session.jsonl",
+            &[&progress, &user_record("s1", "u1", "Only message")],
+        );
+
+        let result = sweep(&connection, &path, "test_wing")
+            .await
+            .expect("sweep should succeed");
+
+        assert_eq!(
+            result.drawers_added, 1,
+            "only the message record must be inserted"
+        );
+        assert_eq!(result.drawers_already_present, 0);
+    }
+
+    // ── sweep_directory_collect_files ────────────────────────────────────────
+
+    #[test]
+    fn collect_files_empty_directory_returns_empty_vec() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let files = sweep_directory_collect_files(dir.path());
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn collect_files_finds_jsonl_files_in_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("a.jsonl"), "").expect("write a.jsonl");
+        fs::write(dir.path().join("b.jsonl"), "").expect("write b.jsonl");
+        let files = sweep_directory_collect_files(dir.path());
+        assert_eq!(files.len(), 2);
+        assert!(
+            files
+                .iter()
+                .all(|f| f.extension().and_then(|e| e.to_str()) == Some("jsonl"))
+        );
+    }
+
+    #[test]
+    fn collect_files_excludes_non_jsonl_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("a.json"), "").expect("write a.json");
+        fs::write(dir.path().join("b.txt"), "").expect("write b.txt");
+        fs::write(dir.path().join("c.jsonl"), "").expect("write c.jsonl");
+        let files = sweep_directory_collect_files(dir.path());
+        assert_eq!(files.len(), 1, "only .jsonl files must be collected");
+    }
+
+    #[test]
+    fn collect_files_recurses_into_subdirectories() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let subdir = dir.path().join("subdir");
+        fs::create_dir(&subdir).expect("mkdir subdir");
+        fs::write(dir.path().join("root.jsonl"), "").expect("write root");
+        fs::write(subdir.join("nested.jsonl"), "").expect("write nested");
+        let files = sweep_directory_collect_files(dir.path());
+        assert_eq!(files.len(), 2, "root and nested .jsonl must both be found");
+    }
+
+    #[test]
+    fn collect_files_returns_sorted_paths() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("z.jsonl"), "").expect("write z");
+        fs::write(dir.path().join("a.jsonl"), "").expect("write a");
+        let files = sweep_directory_collect_files(dir.path());
+        assert_eq!(files.len(), 2);
+        assert!(
+            files[0] < files[1],
+            "files must be returned in sorted order"
+        );
+    }
+
+    // ── sweep_directory ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn sweep_directory_aggregates_results_across_files() {
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_jsonl(dir.path(), "a.jsonl", &[&user_record("s1", "u1", "Hello")]);
+        write_jsonl(dir.path(), "b.jsonl", &[&user_record("s2", "u2", "World")]);
+
+        let result = sweep_directory(&connection, dir.path(), "test_wing")
+            .await
+            .expect("directory sweep should succeed");
+
+        assert_eq!(result.files_attempted, 2);
+        assert_eq!(result.files_succeeded, 2);
+        assert_eq!(
+            result.drawers_added, 2,
+            "one drawer per message across two files"
+        );
+        assert_eq!(result.drawers_already_present, 0);
+    }
+
+    #[tokio::test]
+    async fn sweep_directory_empty_dir_returns_all_zero() {
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let result = sweep_directory(&connection, dir.path(), "test_wing")
+            .await
+            .expect("empty directory sweep should succeed");
+
+        assert_eq!(result.files_attempted, 0);
+        assert_eq!(result.files_succeeded, 0);
+        assert_eq!(result.drawers_added, 0);
+        assert_eq!(result.drawers_already_present, 0);
+    }
+}
