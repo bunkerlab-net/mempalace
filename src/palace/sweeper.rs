@@ -21,6 +21,8 @@
 //!   drawers under different IDs.
 
 use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
@@ -167,17 +169,23 @@ fn parse_claude_jsonl_record(record: &Value) -> Option<SweepMessage> {
         .or_else(|| record.get("session_id"))?
         .as_str()?;
 
-    let content = flatten_content(msg.get("content").unwrap_or(&Value::Null));
+    // Absent or JSON-null content is not usable; skip rather than storing "null".
+    let content_value = msg.get("content")?;
+    if content_value.is_null() {
+        return None;
+    }
+    let content = flatten_content(content_value);
     if content.trim().is_empty() {
         return None;
     }
 
-    // Postcondition: all required fields are non-empty strings.
-    assert!(!uuid.is_empty(), "uuid must not be empty after filtering");
-    assert!(
-        !session_id.is_empty(),
-        "session_id must not be empty after filtering"
-    );
+    // Empty identifiers are input quality problems — return None rather than panic.
+    if uuid.is_empty() {
+        return None;
+    }
+    if session_id.is_empty() {
+        return None;
+    }
 
     Some(SweepMessage {
         session_id: session_id.to_string(),
@@ -198,15 +206,17 @@ fn parse_claude_jsonl(path: &Path) -> Result<Vec<SweepMessage>> {
         path.display()
     );
 
-    let file_content = std::fs::read_to_string(path)?;
+    // Stream line-by-line so MESSAGES_MAX is enforced before large allocations.
+    let reader = BufReader::new(File::open(path)?);
     let mut messages: Vec<SweepMessage> = Vec::new();
     let mut line_count: usize = 0;
 
-    for line in file_content.lines() {
+    for line_result in reader.lines() {
         line_count += 1;
         if line_count > MESSAGES_MAX {
             break;
         }
+        let line = line_result?;
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -254,8 +264,9 @@ fn sweep_make_drawer_id(session_id: &str, uuid: &str) -> String {
 ///
 /// Drawer IDs for swept messages follow the pattern `"sweep_{session_id}_{uuid}"`.
 /// Querying by that prefix and stripping it yields the stored UUIDs, letting the
-/// caller skip re-processing.  A `LIMIT` is applied to avoid hitting
-/// `query_all`'s `ROWS_MAX` guard on sessions with many prior sweeps.
+/// caller skip re-processing.  Results are fetched in keyset-paginated batches
+/// (100 000 rows each, matching `db::ROWS_MAX`) so sessions with arbitrarily
+/// many prior sweeps are handled without truncation or OOM.
 async fn sweep_load_cursors(
     connection: &Connection,
     session_ids: &HashSet<String>,
@@ -268,19 +279,39 @@ async fn sweep_load_cursors(
         let prefix = format!("sweep_{session_id}_");
         let like_pattern = format!("{prefix}%");
 
-        let rows = crate::db::query_all(
-            connection,
-            "SELECT id FROM drawers WHERE id LIKE ?1 AND ingest_mode = 'sweep' LIMIT 100000",
-            turso::params![like_pattern.as_str()],
-        )
-        .await?;
+        let mut uuids: HashSet<String> = HashSet::new();
+        // Empty string sorts before all real IDs, making it a valid initial keyset cursor.
+        let mut last_id = String::new();
 
-        let mut uuids: HashSet<String> = HashSet::with_capacity(rows.len());
-        for row in &rows {
-            if let Ok(id) = row.get::<String>(0)
-                && let Some(uuid) = id.strip_prefix(&prefix)
-            {
-                uuids.insert(uuid.to_string());
+        loop {
+            // Batch size matches db::ROWS_MAX; ORDER BY id enables keyset pagination.
+            let batch = crate::db::query_all(
+                connection,
+                "SELECT id FROM drawers WHERE id LIKE ?1 AND ingest_mode = 'sweep' \
+                 AND id > ?2 ORDER BY id LIMIT 100000",
+                turso::params![like_pattern.as_str(), last_id.as_str()],
+            )
+            .await?;
+
+            if batch.is_empty() {
+                break;
+            }
+
+            let batch_len = batch.len();
+
+            for row in &batch {
+                if let Ok(id) = row.get::<String>(0) {
+                    if let Some(uuid) = id.strip_prefix(&prefix) {
+                        uuids.insert(uuid.to_string());
+                    }
+                    // Always advance the cursor; rows are sorted ascending.
+                    last_id = id;
+                }
+            }
+
+            // Stop when the batch was partial (last page) or the cap is reached.
+            if batch_len < 100_000 || uuids.len() >= MESSAGES_MAX {
+                break;
             }
         }
 
@@ -706,6 +737,44 @@ mod tests {
         let record = serde_json::json!({
             "type": "user", "sessionId": "s1", "uuid": "u1",
             "message": { "role": "user", "content": "   " }
+        });
+        assert!(parse_claude_jsonl_record(&record).is_none());
+    }
+
+    #[test]
+    fn parse_record_null_content_returns_none() {
+        // JSON null content must yield None, not the string literal "null".
+        let record = serde_json::json!({
+            "type": "user", "sessionId": "s1", "uuid": "u1",
+            "message": { "role": "user", "content": null }
+        });
+        assert!(parse_claude_jsonl_record(&record).is_none());
+    }
+
+    #[test]
+    fn parse_record_missing_content_returns_none() {
+        // Absent content field must yield None, not the string literal "null".
+        let record = serde_json::json!({
+            "type": "user", "sessionId": "s1", "uuid": "u1",
+            "message": { "role": "user" }
+        });
+        assert!(parse_claude_jsonl_record(&record).is_none());
+    }
+
+    #[test]
+    fn parse_record_empty_uuid_returns_none() {
+        let record = serde_json::json!({
+            "type": "user", "sessionId": "s1", "uuid": "",
+            "message": { "role": "user", "content": "text" }
+        });
+        assert!(parse_claude_jsonl_record(&record).is_none());
+    }
+
+    #[test]
+    fn parse_record_empty_session_id_returns_none() {
+        let record = serde_json::json!({
+            "type": "user", "sessionId": "", "uuid": "u1",
+            "message": { "role": "user", "content": "text" }
         });
         assert!(parse_claude_jsonl_record(&record).is_none());
     }
