@@ -42,6 +42,30 @@ Optionally copy to a location on your PATH:
 cp target/release/mempalace ~/.local/bin/mempalace
 ```
 
+### Precompiled binaries (GitHub Actions Artifacts)
+
+Each artifact on the GitHub Actions page lists a `sha256` digest. Verify the
+downloaded zip against that digest before extracting:
+
+```bash
+# macOS
+shasum -a 256 mempalace-macos-<git-short-sha>.zip
+
+# Linux
+sha256sum mempalace-linux-<git-short-sha>.zip
+```
+
+The output should match the digest shown on the Artifacts page (strip the
+leading `sha256:` prefix before comparing).
+
+On macOS, the extracted binary will also be quarantined because it was not
+distributed through the App Store or a notarised installer. After extracting,
+remove the quarantine attribute before running:
+
+```bash
+xattr -d com.apple.quarantine ./mempalace
+```
+
 ---
 
 ## MCP Setup (Claude Code)
