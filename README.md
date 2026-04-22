@@ -42,6 +42,17 @@ Optionally copy to a location on your PATH:
 cp target/release/mempalace ~/.local/bin/mempalace
 ```
 
+### Precompiled binaries (GitHub Actions Artifacts)
+
+If you download a precompiled binary from the GitHub Actions Artifacts for this
+repository, macOS will quarantine the file because it was not distributed through
+the App Store or a notarised installer. Before running the binary, remove the
+quarantine attribute:
+
+```bash
+xattr -d com.apple.quarantine ./mempalace
+```
+
 ---
 
 ## MCP Setup (Claude Code)
