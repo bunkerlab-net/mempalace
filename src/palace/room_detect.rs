@@ -84,13 +84,18 @@ const SKIP_DIRS: &[&str] = &[
     "__pycache__",
     ".venv",
     "venv",
+    // `vendor` contains copied third-party code (Go, Ruby, PHP) — not user content.
+    "vendor",
     "env",
     "dist",
     "build",
     ".next",
     "coverage",
     ".mempalace",
+    // `target` is Rust's build output directory.
     "target",
+    // `.terraform` holds Terraform provider cache and state — not user content.
+    ".terraform",
     ".ruff_cache",
     ".mypy_cache",
     ".pytest_cache",
@@ -287,6 +292,9 @@ mod tests {
         assert!(is_skip_dir(".ruff_cache"));
         assert!(is_skip_dir(".idea"));
         assert!(is_skip_dir("htmlcov"));
+        // Added in v3.3.3 resync: Terraform provider cache and Go/Ruby/PHP vendoring.
+        assert!(is_skip_dir(".terraform"));
+        assert!(is_skip_dir("vendor"));
     }
 
     #[test]

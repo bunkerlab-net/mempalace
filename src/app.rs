@@ -1,43 +1,6 @@
 use crate::cli::{self, Cli, Command};
-use crate::config::MempalaceConfig;
+use crate::config::{MempalaceConfig, expand_tilde};
 use crate::{db, error, mcp, palace, schema};
-
-/// Expand a leading `~` to the user's home directory.
-///
-/// Resolves the home directory by trying `HOME`, then `USERPROFILE`, then
-/// `HOMEDRIVE` + `HOMEPATH` (Windows fallback). Uses `OsStr`-based path
-/// component inspection to avoid lossy UTF-8 conversion.
-fn expand_tilde(path: &std::path::Path) -> std::path::PathBuf {
-    use std::ffi::OsStr;
-    use std::path::Component;
-
-    let mut components = path.components();
-    let first = components.next();
-
-    if first != Some(Component::Normal(OsStr::new("~"))) {
-        return path.to_path_buf();
-    }
-
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .or_else(|| {
-            let drive = std::env::var_os("HOMEDRIVE")?;
-            let home_path = std::env::var_os("HOMEPATH")?;
-            Some(
-                std::path::PathBuf::from(drive)
-                    .join(home_path)
-                    .into_os_string(),
-            )
-        });
-
-    match home {
-        Some(h) => {
-            let rest: std::path::PathBuf = components.collect();
-            std::path::PathBuf::from(h).join(rest)
-        }
-        None => path.to_path_buf(),
-    }
-}
 
 /// Open the palace DB, ensuring schema exists. Returns `(db, connection, path)`.
 async fn open_palace() -> error::Result<(turso::Database, turso::Connection, std::path::PathBuf)> {
@@ -68,8 +31,20 @@ pub async fn run(cli: Cli) -> error::Result<()> {
             directory,
             yes,
             no_gitignore,
+            llm,
+            llm_provider,
+            llm_model,
+            llm_endpoint,
+            llm_api_key,
         } => {
-            cli::init::run(&directory, yes, no_gitignore)?;
+            let llm_opts = cli::init::LlmOpts {
+                enabled: llm,
+                provider: llm_provider,
+                model: llm_model,
+                endpoint: llm_endpoint,
+                api_key: llm_api_key,
+            };
+            cli::init::run(&directory, yes, no_gitignore, &llm_opts)?;
         }
 
         Command::Mine {
@@ -294,95 +269,6 @@ async fn run_mine(
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
-
-    // -- expand_tilde ---------------------------------------------------------
-
-    #[test]
-    fn expand_tilde_no_leading_tilde_returns_path_unchanged() {
-        // A path with no leading ~ must be returned as-is.
-        let path = std::path::Path::new("/absolute/path/to/file");
-        let result = expand_tilde(path);
-        assert_eq!(result, path, "absolute path must be returned unchanged");
-        assert!(
-            !result.to_string_lossy().starts_with("~/"),
-            "result must not start with ~/"
-        );
-    }
-
-    #[test]
-    fn expand_tilde_relative_path_returned_unchanged() {
-        // A relative path that does not start with ~ must be returned as-is.
-        let path = std::path::Path::new("relative/path");
-        let result = expand_tilde(path);
-        assert_eq!(
-            result, path,
-            "relative path without ~ must be returned unchanged"
-        );
-        assert_eq!(result.to_string_lossy(), "relative/path");
-    }
-
-    #[test]
-    fn expand_tilde_tilde_only_expands_to_home() {
-        // A path of just "~" must expand to the HOME directory.
-        temp_env::with_var("HOME", Some("/test/home"), || {
-            let path = std::path::Path::new("~");
-            let result = expand_tilde(path);
-            assert_eq!(
-                result,
-                std::path::Path::new("/test/home"),
-                "bare ~ must expand to HOME"
-            );
-            assert!(
-                !result.to_string_lossy().contains('~'),
-                "result must not contain ~"
-            );
-        });
-    }
-
-    #[test]
-    fn expand_tilde_tilde_slash_path_appends_suffix() {
-        // "~/foo/bar" must expand to "<HOME>/foo/bar".
-        temp_env::with_var("HOME", Some("/test/home"), || {
-            let path = std::path::Path::new("~/foo/bar");
-            let result = expand_tilde(path);
-            assert_eq!(
-                result,
-                std::path::Path::new("/test/home/foo/bar"),
-                "~/foo/bar must expand to HOME/foo/bar"
-            );
-            assert!(
-                result.starts_with("/test/home"),
-                "result must start with HOME"
-            );
-        });
-    }
-
-    #[test]
-    fn expand_tilde_no_home_set_returns_path_unchanged() {
-        // When HOME is unset expand_tilde must return the path unchanged rather than panicking.
-        // This covers the None branch of the home directory resolution chain.
-        temp_env::with_vars(
-            [
-                ("HOME", None::<&str>),
-                ("USERPROFILE", None::<&str>),
-                ("HOMEDRIVE", None::<&str>),
-                ("HOMEPATH", None::<&str>),
-            ],
-            || {
-                let path = std::path::Path::new("~/no/home");
-                let result = expand_tilde(path);
-                // With no home env vars the expansion falls back to returning path as-is.
-                assert_eq!(
-                    result, path,
-                    "expand_tilde must return the original path unchanged when HOME is unresolvable"
-                );
-                assert!(
-                    !result.is_absolute(),
-                    "result must remain a relative path when home is unresolvable"
-                );
-            },
-        );
-    }
 
     // -- run_mine error path --------------------------------------------------
 

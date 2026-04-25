@@ -5,6 +5,8 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
+use crate::palace::entities::DetectedEntity;
+
 // Regex statics are compile-time literals; .expect() cannot fail at runtime.
 #[allow(clippy::expect_used)]
 // Compiled once at first use rather than on every call to extract_candidates.
@@ -34,14 +36,6 @@ static PRONOUN_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(she|her|hers|he|him|his|they|them|their)\b")
         .expect("pronoun regex is a compile-time literal and cannot fail to compile")
 });
-
-/// A detected entity with classification.
-pub struct DetectedEntity {
-    pub name: String,
-    pub entity_type: String, // "person", "project", or "uncertain"
-    pub confidence: f64,
-    pub frequency: usize,
-}
 
 /// Detection results grouped by type.
 pub struct DetectionResult {
@@ -418,6 +412,7 @@ fn classify_entity(name: &str, frequency: usize, scores: &EntityScores) -> Detec
             entity_type: "uncertain".to_string(),
             confidence,
             frequency,
+            signals: vec![],
         };
     }
 
@@ -446,6 +441,7 @@ fn classify_entity_build(
             entity_type: "person".to_string(),
             confidence: (0.5 + person_ratio * 0.5).min(0.99),
             frequency,
+            signals: vec![],
         }
     } else if person_ratio >= 0.7 && (!has_two || person_score < 5) {
         DetectedEntity {
@@ -453,6 +449,7 @@ fn classify_entity_build(
             entity_type: "uncertain".to_string(),
             confidence: 0.4,
             frequency,
+            signals: vec![],
         }
     } else if person_ratio <= 0.3 {
         DetectedEntity {
@@ -460,6 +457,7 @@ fn classify_entity_build(
             entity_type: "project".to_string(),
             confidence: (0.5 + (1.0 - person_ratio) * 0.5).min(0.99),
             frequency,
+            signals: vec![],
         }
     } else {
         DetectedEntity {
@@ -467,8 +465,81 @@ fn classify_entity_build(
             entity_type: "uncertain".to_string(),
             confidence: 0.5,
             frequency,
+            signals: vec![],
         }
     }
+}
+
+/// Walk `project_dir` and return up to `max_files` file paths suitable for entity detection.
+///
+/// Prose files (`.md`, `.txt`, `.rst`) are preferred; when fewer than
+/// `PROSE_THRESHOLD` are found the result is padded with common code files
+/// (`.rs`, `.py`, `.ts`, `.js`, `.go`). Uses an iterative depth-limited walk
+/// to respect `crate::palace::WALK_DEPTH_LIMIT` and skip known build directories.
+/// Minimum number of prose files required before falling back to code files.
+const SCAN_PROSE_THRESHOLD: usize = 5;
+/// File extensions treated as prose during `scan_for_detection`.
+const SCAN_PROSE_EXTS: &[&str] = &["md", "txt", "rst"];
+/// Code file extensions used as a fallback when prose files are scarce.
+const SCAN_CODE_EXTS: &[&str] = &["rs", "py", "ts", "js", "go"];
+
+pub fn scan_for_detection(project_dir: &Path, max_files: usize) -> Vec<std::path::PathBuf> {
+    use crate::palace::room_detect::is_skip_dir;
+
+    assert!(
+        project_dir.is_dir(),
+        "scan_for_detection: project_dir must be a directory"
+    );
+    assert!(
+        max_files > 0,
+        "scan_for_detection: max_files must be positive"
+    );
+
+    let mut prose_files: Vec<std::path::PathBuf> = Vec::new();
+    let mut code_files: Vec<std::path::PathBuf> = Vec::new();
+    let mut stack: Vec<(std::path::PathBuf, usize)> = vec![(project_dir.to_path_buf(), 0)];
+
+    while let Some((directory, depth)) = stack.pop() {
+        assert!(depth <= crate::palace::WALK_DEPTH_LIMIT);
+        if depth >= crate::palace::WALK_DEPTH_LIMIT {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let entry_name = entry.file_name();
+                if !is_skip_dir(&entry_name.to_string_lossy()) {
+                    stack.push((path, depth + 1));
+                }
+            } else if path.is_file() {
+                let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                if SCAN_PROSE_EXTS.contains(&extension) {
+                    prose_files.push(path);
+                } else if SCAN_CODE_EXTS.contains(&extension) {
+                    code_files.push(path);
+                }
+            }
+        }
+        if prose_files.len() >= max_files {
+            break;
+        }
+    }
+
+    let result: Vec<std::path::PathBuf> = if prose_files.len() >= SCAN_PROSE_THRESHOLD {
+        prose_files.into_iter().take(max_files).collect()
+    } else {
+        let remaining = max_files.saturating_sub(prose_files.len());
+        let mut combined = prose_files;
+        combined.extend(code_files.into_iter().take(remaining));
+        combined
+    };
+
+    // Postcondition: result does not exceed max_files.
+    debug_assert!(result.len() <= max_files);
+    result
 }
 
 #[cfg(test)]
@@ -592,6 +663,11 @@ mod tests {
             entity.confidence > 0.5,
             "Person confidence should be above 0.5"
         );
+        // Prose-detected entities carry no signals — signals are populated by project_scanner.
+        assert!(
+            entity.signals.is_empty(),
+            "prose-detected entity must have empty signals"
+        );
     }
 
     #[test]
@@ -610,6 +686,11 @@ mod tests {
         assert!(
             entity.confidence > 0.5,
             "Project confidence should be above 0.5"
+        );
+        // Prose-detected entities carry no signals — signals are populated by project_scanner.
+        assert!(
+            entity.signals.is_empty(),
+            "prose-detected entity must have empty signals"
         );
     }
 
@@ -761,5 +842,62 @@ Clara said the migration is complete. He agreed.\n";
 
         assert!(result.people.is_empty(), "No people from empty file");
         assert!(result.projects.is_empty(), "No projects from empty file");
+    }
+
+    // -- scan_for_detection ---------------------------------------------------
+
+    #[test]
+    fn scan_for_detection_returns_prose_files() {
+        // When prose files are present they must be returned preferentially.
+        let temp_directory =
+            tempfile::tempdir().expect("failed to create temporary directory for scan test");
+        std::fs::write(temp_directory.path().join("notes.md"), "# notes")
+            .expect("failed to write notes.md");
+        std::fs::write(temp_directory.path().join("readme.txt"), "readme content")
+            .expect("failed to write readme.txt");
+        std::fs::write(temp_directory.path().join("main.rs"), "fn main() {}")
+            .expect("failed to write main.rs");
+
+        let result = scan_for_detection(temp_directory.path(), 10);
+
+        // Prose files must be present in the result.
+        assert!(!result.is_empty(), "must find at least one file");
+        assert!(result.len() <= 10, "result must not exceed max_files");
+        let extensions: Vec<&str> = result
+            .iter()
+            .filter_map(|p| p.extension().and_then(|e| e.to_str()))
+            .collect();
+        assert!(
+            extensions.contains(&"md") || extensions.contains(&"txt"),
+            "prose files must appear in result; found extensions: {extensions:?}"
+        );
+    }
+
+    #[test]
+    fn scan_for_detection_falls_back_to_code_files_when_prose_is_absent() {
+        // When fewer than PROSE_THRESHOLD prose files exist, code files must pad the result.
+        let temp_directory = tempfile::tempdir()
+            .expect("failed to create temporary directory for fallback scan test");
+        // Only one prose file (below threshold of 5) and two code files.
+        std::fs::write(temp_directory.path().join("readme.md"), "# readme")
+            .expect("failed to write readme.md");
+        std::fs::write(temp_directory.path().join("main.rs"), "fn main() {}")
+            .expect("failed to write main.rs");
+        std::fs::write(temp_directory.path().join("lib.rs"), "pub mod lib;")
+            .expect("failed to write lib.rs");
+
+        let result = scan_for_detection(temp_directory.path(), 10);
+
+        // Code files must be included because prose count is below threshold.
+        assert!(!result.is_empty(), "must find at least one file");
+        assert!(result.len() <= 10, "result must not exceed max_files");
+        let extensions: Vec<&str> = result
+            .iter()
+            .filter_map(|p| p.extension().and_then(|e| e.to_str()))
+            .collect();
+        assert!(
+            extensions.contains(&"rs"),
+            "code files must be included when prose count is below threshold; found: {extensions:?}"
+        );
     }
 }

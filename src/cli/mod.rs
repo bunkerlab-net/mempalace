@@ -38,6 +38,26 @@ pub enum Command {
         /// Disable .gitignore filtering (include all files regardless of gitignore rules)
         #[arg(long)]
         no_gitignore: bool,
+
+        /// Enable LLM-assisted entity refinement
+        #[arg(long)]
+        llm: bool,
+
+        /// LLM provider: ollama, openai-compat, or anthropic
+        #[arg(long, default_value = "ollama")]
+        llm_provider: String,
+
+        /// LLM model name (e.g. gemma3:4b for Ollama, claude-haiku-4-5-20251001 for Anthropic)
+        #[arg(long, default_value = "gemma3:4b")]
+        llm_model: String,
+
+        /// LLM API endpoint URL (required for openai-compat, optional for others)
+        #[arg(long)]
+        llm_endpoint: Option<String>,
+
+        /// LLM API key (for anthropic or authenticated openai-compat endpoints)
+        #[arg(long)]
+        llm_api_key: Option<String>,
     },
 
     /// Mine files into the palace

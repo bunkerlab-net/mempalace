@@ -48,7 +48,15 @@ pub const PROJECT_CONFIG_FILES: &[&str] = &[
 ];
 
 /// Non-config files that are always excluded from mining.
-const SKIP_FILES_EXTRA: &[&str] = &[".gitignore", "package-lock.json", "Cargo.lock"];
+///
+/// `entities.json` is a per-project audit artifact written by `mempalace init`.
+/// Mining it would store entity metadata as palace content rather than real text.
+const SKIP_FILES_EXTRA: &[&str] = &[
+    ".gitignore",
+    "entities.json",
+    "package-lock.json",
+    "Cargo.lock",
+];
 
 /// Return `true` if a filename should be excluded from mining.
 fn is_skip_file(name: &str) -> bool {
@@ -909,6 +917,25 @@ mod tests {
         assert_eq!(
             stored_wing, "config-wing",
             "empty wing must fall back to config"
+        );
+    }
+
+    #[test]
+    fn is_skip_file_excludes_entities_json() {
+        // `entities.json` is written by `mempalace init` — mining it would store
+        // entity metadata as palace content rather than real user text.
+        assert!(
+            is_skip_file("entities.json"),
+            "entities.json must be skipped by the miner"
+        );
+        // Pair assertion: confirm surrounding files are not accidentally skipped.
+        assert!(
+            !is_skip_file("entities_backup.json"),
+            "entities_backup.json should not be skipped"
+        );
+        assert!(
+            !is_skip_file("my_entities.json"),
+            "my_entities.json should not be skipped"
         );
     }
 }

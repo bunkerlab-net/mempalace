@@ -79,8 +79,7 @@ pub fn legacy_dir() -> PathBuf {
 /// Returns the user's home directory.
 ///
 /// Checks `HOME` (POSIX), then `USERPROFILE` (Windows), then
-/// `HOMEDRIVE`+`HOMEPATH` (legacy Windows), mirroring the fallback order
-/// used by `expand_tilde()` in `main.rs`. Panics if none are set — a missing
+/// `HOMEDRIVE`+`HOMEPATH` (legacy Windows). Panics if none are set — a missing
 /// home directory is a fatal misconfiguration that yields unusable XDG paths.
 fn home_dir() -> PathBuf {
     let os_home = std::env::var_os("HOME")
@@ -101,6 +100,54 @@ fn home_dir() -> PathBuf {
     let home = PathBuf::from(os_home.unwrap_or_default());
     assert!(!home.as_os_str().is_empty());
     home
+}
+
+/// Expand a leading `~` to the user's home directory.
+///
+/// Resolves the home directory by trying `HOME`, then `USERPROFILE`, then
+/// `HOMEDRIVE` + `HOMEPATH` (Windows fallback). Uses `OsStr`-based path
+/// component inspection to avoid lossy UTF-8 conversion. Returns the path
+/// unchanged when no leading `~` is present or when the home directory cannot
+/// be resolved.
+pub(crate) fn expand_tilde(path: &Path) -> PathBuf {
+    use std::ffi::OsStr;
+    use std::path::Component;
+
+    // Precondition: a caller should never pass an empty path.
+    assert!(
+        !path.as_os_str().is_empty(),
+        "expand_tilde: path must not be empty"
+    );
+
+    let mut components = path.components();
+    let first = components.next();
+
+    let result = if first == Some(Component::Normal(OsStr::new("~"))) {
+        let home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .or_else(|| {
+                let drive = std::env::var_os("HOMEDRIVE")?;
+                let home_path = std::env::var_os("HOMEPATH")?;
+                Some(PathBuf::from(drive).join(home_path).into_os_string())
+            });
+
+        match home {
+            Some(h) => {
+                let rest: PathBuf = components.collect();
+                PathBuf::from(h).join(rest)
+            }
+            None => path.to_path_buf(),
+        }
+    } else {
+        path.to_path_buf()
+    };
+
+    // Postcondition: expansion never produces an empty path.
+    debug_assert!(
+        !result.as_os_str().is_empty(),
+        "expand_tilde: result must not be empty"
+    );
+    result
 }
 
 /// Path to the global config file.
@@ -142,10 +189,25 @@ impl MempalaceConfig {
     }
 
     /// Resolve the palace database path, respecting `MEMPALACE_PALACE_PATH` env var.
+    ///
+    /// When `MEMPALACE_PALACE_PATH` is set to a non-empty value, it is
+    /// tilde-expanded and resolved to an absolute path so that relative or
+    /// home-relative paths (e.g. `~/palace.db`) work correctly regardless of
+    /// the working directory. An empty or whitespace-only value is treated as
+    /// unset (falls through to the configured `palace_path`) rather than
+    /// panicking, because shells often export empty vars when clearing them.
     pub fn palace_db_path(&self) -> PathBuf {
         // Check env override first — it can recover from an empty config value.
-        if let Ok(env_path) = std::env::var("MEMPALACE_PALACE_PATH") {
-            return PathBuf::from(env_path);
+        // An empty or whitespace-only env var is treated as unset (fall through).
+        if let Ok(env_path) = std::env::var("MEMPALACE_PALACE_PATH")
+            && !env_path.trim().is_empty()
+        {
+            let expanded = expand_tilde(Path::new(&env_path));
+            // std::path::absolute is available since Rust 1.79 (MSRV is 1.88).
+            // unwrap_or(expanded.clone()) falls back to the expanded path if
+            // the OS call fails (e.g. path refers to a not-yet-created dir).
+            let resolved = std::path::absolute(&expanded).unwrap_or(expanded);
+            return resolved;
         }
         assert!(
             !self.palace_path.as_os_str().is_empty(),
@@ -1017,5 +1079,190 @@ rooms:
             assert_eq!(orig.description, rt.description);
             assert_eq!(orig.keywords, rt.keywords);
         }
+    }
+
+    // -- expand_tilde ---------------------------------------------------------
+
+    #[test]
+    fn expand_tilde_no_leading_tilde_returns_path_unchanged() {
+        // A path with no leading ~ must be returned as-is.
+        let path = std::path::Path::new("/absolute/path/to/file");
+        let result = expand_tilde(path);
+        assert_eq!(result, path, "absolute path must be returned unchanged");
+        assert!(
+            !result.to_string_lossy().starts_with("~/"),
+            "result must not start with ~/"
+        );
+    }
+
+    #[test]
+    fn expand_tilde_relative_path_returned_unchanged() {
+        // A relative path that does not start with ~ must be returned as-is.
+        let path = std::path::Path::new("relative/path");
+        let result = expand_tilde(path);
+        assert_eq!(
+            result, path,
+            "relative path without ~ must be returned unchanged"
+        );
+        assert_eq!(result.to_string_lossy(), "relative/path");
+    }
+
+    #[test]
+    fn expand_tilde_tilde_only_expands_to_home() {
+        // A path of just "~" must expand to the HOME directory.
+        temp_env::with_var("HOME", Some("/test/home"), || {
+            let path = std::path::Path::new("~");
+            let result = expand_tilde(path);
+            assert_eq!(
+                result,
+                std::path::Path::new("/test/home"),
+                "bare ~ must expand to HOME"
+            );
+            assert!(
+                !result.to_string_lossy().contains('~'),
+                "result must not contain ~"
+            );
+        });
+    }
+
+    #[test]
+    fn expand_tilde_tilde_slash_path_appends_suffix() {
+        // "~/foo/bar" must expand to "<HOME>/foo/bar".
+        temp_env::with_var("HOME", Some("/test/home"), || {
+            let path = std::path::Path::new("~/foo/bar");
+            let result = expand_tilde(path);
+            assert_eq!(
+                result,
+                std::path::Path::new("/test/home/foo/bar"),
+                "~/foo/bar must expand to HOME/foo/bar"
+            );
+            assert!(
+                result.starts_with("/test/home"),
+                "result must start with HOME"
+            );
+        });
+    }
+
+    #[test]
+    fn expand_tilde_no_home_set_returns_path_unchanged() {
+        // When HOME is unset expand_tilde must return the path unchanged rather than panicking.
+        // This covers the None branch of the home directory resolution chain.
+        temp_env::with_vars(
+            [
+                ("HOME", None::<&str>),
+                ("USERPROFILE", None::<&str>),
+                ("HOMEDRIVE", None::<&str>),
+                ("HOMEPATH", None::<&str>),
+            ],
+            || {
+                let path = std::path::Path::new("~/no/home");
+                let result = expand_tilde(path);
+                // With no home env vars the expansion falls back to returning path as-is.
+                assert_eq!(
+                    result, path,
+                    "expand_tilde must return the original path unchanged when HOME is unresolvable"
+                );
+                assert!(
+                    !result.is_absolute(),
+                    "result must remain a relative path when home is unresolvable"
+                );
+            },
+        );
+    }
+
+    // -- palace_db_path normalization -----------------------------------------
+
+    #[test]
+    fn palace_db_path_env_var_expands_tilde() {
+        // MEMPALACE_PALACE_PATH starting with ~ must be expanded to the home directory.
+        let config = MempalaceConfig {
+            palace_path: PathBuf::from("/config/palace.db"),
+            collection_name: "mempalace_drawers".to_string(),
+            people_map: std::collections::HashMap::new(),
+        };
+        temp_env::with_vars(
+            [
+                ("MEMPALACE_PALACE_PATH", Some("~/palace.db")),
+                ("HOME", Some("/myhome")),
+            ],
+            || {
+                let path = config.palace_db_path();
+                assert!(
+                    path.starts_with("/myhome"),
+                    "tilde must be expanded to HOME in MEMPALACE_PALACE_PATH"
+                );
+                assert!(
+                    !path.to_string_lossy().contains('~'),
+                    "result must not contain a literal tilde"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn palace_db_path_env_var_absolute_path_is_returned_as_is() {
+        // An absolute MEMPALACE_PALACE_PATH must be returned unchanged (no ~ to expand).
+        let config = MempalaceConfig {
+            palace_path: PathBuf::from("/config/palace.db"),
+            collection_name: "mempalace_drawers".to_string(),
+            people_map: std::collections::HashMap::new(),
+        };
+        temp_env::with_var(
+            "MEMPALACE_PALACE_PATH",
+            Some("/absolute/path/palace.db"),
+            || {
+                let path = config.palace_db_path();
+                assert!(path.is_absolute(), "absolute env path must remain absolute");
+                assert!(path.ends_with("palace.db"), "filename must be preserved");
+            },
+        );
+    }
+
+    #[test]
+    fn palace_db_path_env_var_not_set_uses_config_value() {
+        // When MEMPALACE_PALACE_PATH is absent the config field must be returned.
+        let config = MempalaceConfig {
+            palace_path: PathBuf::from("/config/palace.db"),
+            collection_name: "mempalace_drawers".to_string(),
+            people_map: std::collections::HashMap::new(),
+        };
+        temp_env::with_var("MEMPALACE_PALACE_PATH", None::<&str>, || {
+            let path = config.palace_db_path();
+            assert_eq!(
+                path,
+                PathBuf::from("/config/palace.db"),
+                "config palace_path must be returned when env var is absent"
+            );
+            assert!(path.is_absolute(), "config path must be absolute");
+        });
+    }
+
+    #[test]
+    fn palace_db_path_env_var_empty_falls_back_to_config() {
+        // An empty MEMPALACE_PALACE_PATH must not panic — it must fall through to
+        // the configured palace_path. Shells commonly export empty vars when users
+        // clear them (e.g. `export MEMPALACE_PALACE_PATH=`).
+        let config = MempalaceConfig {
+            palace_path: PathBuf::from("/config/palace.db"),
+            collection_name: "mempalace_drawers".to_string(),
+            people_map: std::collections::HashMap::new(),
+        };
+        temp_env::with_var("MEMPALACE_PALACE_PATH", Some(""), || {
+            let path = config.palace_db_path();
+            assert_eq!(
+                path,
+                PathBuf::from("/config/palace.db"),
+                "empty env var must fall back to config palace_path"
+            );
+        });
+        // Pair assertion: whitespace-only also falls back.
+        temp_env::with_var("MEMPALACE_PALACE_PATH", Some("   "), || {
+            let path = config.palace_db_path();
+            assert_eq!(
+                path,
+                PathBuf::from("/config/palace.db"),
+                "whitespace-only env var must fall back to config palace_path"
+            );
+        });
     }
 }
