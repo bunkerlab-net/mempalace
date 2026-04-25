@@ -95,8 +95,10 @@ pub fn run(directory: &Path, yes: bool, no_gitignore: bool, llm_opts: &LlmOpts) 
         return Ok(());
     }
 
-    run_confirm_and_save(&detected, yes, &directory)?;
-    run_write_config(&wing_name, rooms, &directory)
+    // Write mempalace.yaml before entities.json so a failure in run_write_config
+    // does not leave an orphaned entities.json on disk without a valid config.
+    run_write_config(&wing_name, rooms, &directory)?;
+    run_confirm_and_save(&detected, yes, &directory)
 }
 
 // ===================== PRIVATE HELPERS =====================

@@ -78,14 +78,23 @@ fn confirm_entities_auto(detected: &DetectedDict, confirmed: &mut ConfirmedEntit
 
 /// Prompt the user interactively for each detected entity above threshold.
 ///
-/// Called by [`confirm_entities`] when `yes=false`. Entities below
-/// `CONFIDENCE_THRESHOLD` are skipped without prompting.
+/// Called by [`confirm_entities`] when `yes=false`. Returns early without
+/// printing if no entity passes `CONFIDENCE_THRESHOLD` and has a non-empty
+/// name. Entities below the threshold are skipped without prompting.
 fn confirm_entities_interactive(detected: &DetectedDict, confirmed: &mut ConfirmedEntities) {
     // Preconditions: confirmed lists must start empty (fresh ConfirmedEntities).
     debug_assert!(confirmed.people.is_empty());
     debug_assert!(confirmed.projects.is_empty());
 
-    if detected.people.is_empty() && detected.projects.is_empty() {
+    // Only print the header when at least one entity passes the threshold and
+    // has a non-empty name. An all-below-threshold list would otherwise print
+    // the header with no prompts following it.
+    let has_eligible = detected
+        .people
+        .iter()
+        .chain(detected.projects.iter())
+        .any(|entity| entity.confidence >= CONFIDENCE_THRESHOLD && !entity.name.is_empty());
+    if !has_eligible {
         return;
     }
 
@@ -250,6 +259,25 @@ mod tests {
         assert!(
             confirmed.projects.is_empty(),
             "empty detected must yield empty projects"
+        );
+    }
+
+    #[test]
+    fn interactive_mode_all_below_threshold_returns_empty_without_prompting() {
+        // All entities are below CONFIDENCE_THRESHOLD — has_eligible is false, so
+        // the early-return path fires without reading stdin or printing the header.
+        let detected = make_dict(
+            vec![make_entity("LowPerson", "person", 0.1)],
+            vec![make_entity("low-proj", "project", 0.3)],
+        );
+        let confirmed = confirm_entities(&detected, false);
+        assert!(
+            confirmed.people.is_empty(),
+            "all-below-threshold people must yield empty confirmed"
+        );
+        assert!(
+            confirmed.projects.is_empty(),
+            "all-below-threshold projects must yield empty confirmed"
         );
     }
 
