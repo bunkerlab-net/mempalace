@@ -23,6 +23,11 @@ async fn app_run_init_creates_config_with_yes_flag() {
             directory: temp_directory.path().to_path_buf(),
             yes: true,
             no_gitignore: false,
+            llm: false,
+            llm_provider: "ollama".to_string(),
+            llm_model: "gemma3:4b".to_string(),
+            llm_endpoint: None,
+            llm_api_key: None,
         },
     };
 

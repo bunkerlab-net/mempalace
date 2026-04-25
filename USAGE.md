@@ -99,12 +99,29 @@ the memory protocol from the response.
 ### `mempalace init <dir>`
 
 Scans a project directory, detects rooms from the folder structure, and writes `mempalace.yaml`.
+Also discovers named entities (people, projects) from manifest files and git history, then
+saves them to `entities.json` and the global registry (`~/.local/share/mempalace/known_entities.json`).
 
 ```bash
 mempalace init ~/my-project
-mempalace init ~/my-project --yes        # non-interactive / CI mode
+mempalace init ~/my-project --yes           # non-interactive / CI mode
 mempalace init ~/my-project --no-gitignore  # include gitignored files
+
+# LLM-assisted entity refinement (requires Ollama running locally by default)
+mempalace init ~/my-project --llm
+mempalace init ~/my-project --llm --llm-provider anthropic --llm-api-key $ANTHROPIC_API_KEY
+mempalace init ~/my-project --llm --llm-provider openai-compat --llm-endpoint http://localhost:8080
 ```
+
+LLM flags:
+
+| Flag             | Default    | Description                                              |
+| ---------------- | ---------- | -------------------------------------------------------- |
+| `--llm`          | off        | Enable LLM-assisted entity refinement                    |
+| `--llm-provider` | `ollama`   | Provider: `ollama`, `openai-compat`, or `anthropic`      |
+| `--llm-model`    | `gemma3:4b`| Model identifier                                         |
+| `--llm-endpoint` | —          | Custom API endpoint (required for `openai-compat`)       |
+| `--llm-api-key`  | —          | API key (required for `anthropic`, optional for others)  |
 
 `mempalace.yaml` controls the wing name and room taxonomy used during mining.
 Edit it before running `mine` if the auto-detected rooms need adjustment.
@@ -385,12 +402,14 @@ A→B and B→A share the same ID.
 
 ### Agent Diary
 
-Diary entries live in `wing_{agent_name}/diary`. Use AAAK format for compact entries.
+Diary entries live in `wing_{agent_name}/diary` by default. Supply `wing` explicitly to
+write to or read from a specific wing. Omitting `wing` on `diary_read` returns entries
+across all wings for the agent. Use AAAK format for compact entries.
 
-| Tool                    | Parameters                      | What it does                       |
-| ----------------------- | ------------------------------- | ---------------------------------- |
-| `mempalace_diary_write` | `agent_name`, `entry`, `topic?` | Write a diary entry for an agent   |
-| `mempalace_diary_read`  | `agent_name`, `last_n?`         | Read the most recent diary entries |
+| Tool                    | Parameters                               | What it does                                               |
+| ----------------------- | ---------------------------------------- | ---------------------------------------------------------- |
+| `mempalace_diary_write` | `agent_name`, `entry`, `topic?`, `wing?` | Write a diary entry; `wing` derived from agent if omitted  |
+| `mempalace_diary_read`  | `agent_name`, `last_n?`, `wing?`         | Read diary entries; cross-wing when `wing` is omitted      |
 
 ---
 

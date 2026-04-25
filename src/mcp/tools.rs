@@ -1418,6 +1418,9 @@ async fn tool_follow_tunnels(connection: &Connection, args: &Value) -> Value {
 }
 
 /// Append a diary entry for an agent in its personal wing.
+///
+/// When `wing` is supplied it is used directly (after sanitization); otherwise
+/// the wing is derived from `agent_name` as `wing_<agent_name_lower>`.
 async fn tool_diary_write(connection: &Connection, args: &Value) -> Value {
     let agent_name = str_arg(args, "agent_name");
     let entry = str_arg(args, "entry");
@@ -1442,7 +1445,16 @@ async fn tool_diary_write(connection: &Connection, args: &Value) -> Value {
         Err(error) => return error,
     };
 
-    let wing = format!("wing_{}", agent_name.to_lowercase().replace(' ', "_"));
+    // Use the caller-supplied wing when provided; fall back to derived wing.
+    let wing_raw = str_arg(args, "wing");
+    let wing = if wing_raw.is_empty() {
+        format!("wing_{}", agent_name.to_lowercase().replace(' ', "_"))
+    } else {
+        match sanitize_name(wing_raw, "wing") {
+            Ok(value) => value,
+            Err(error) => return error,
+        }
+    };
     let now = Utc::now();
     let id = Uuid::new_v4().to_string();
 
@@ -1480,6 +1492,10 @@ async fn tool_diary_write(connection: &Connection, args: &Value) -> Value {
 }
 
 /// Read the most recent diary entries for an agent, newest first.
+///
+/// When `wing` is supplied the query is scoped to that wing; when absent it
+/// reads ALL diary entries written by the agent across all wings (identified
+/// by `added_by`), enabling cross-wing diary reads.
 async fn tool_diary_read(connection: &Connection, args: &Value) -> Value {
     let agent_name = str_arg(args, "agent_name");
     let last_n = int_arg(args, "last_n", 10).clamp(1, 100);
@@ -1489,14 +1505,34 @@ async fn tool_diary_read(connection: &Connection, args: &Value) -> Value {
         Err(error) => return error,
     };
 
-    let wing = format!("wing_{}", agent_name.to_lowercase().replace(' ', "_"));
+    // Resolve wing: explicit > derived > cross-wing (None means all wings).
+    let wing_raw = str_arg(args, "wing");
+    let wing_filter: Option<String> = if wing_raw.is_empty() {
+        None
+    } else {
+        match sanitize_name(wing_raw, "wing") {
+            Ok(value) => Some(value),
+            Err(error) => return error,
+        }
+    };
 
-    let rows = query_all(
-        connection,
-        "SELECT id, content, extract_mode, filed_at FROM drawers WHERE wing = ? AND room = 'diary' ORDER BY filed_at DESC LIMIT ?",
-        (wing.clone(), last_n),
-    )
-    .await;
+    let rows = if let Some(ref wing) = wing_filter {
+        // Wing-scoped query: standard diary read for a specific wing.
+        query_all(
+            connection,
+            "SELECT id, content, extract_mode, filed_at FROM drawers WHERE wing = ? AND room = 'diary' ORDER BY filed_at DESC LIMIT ?",
+            (wing.as_str(), last_n),
+        )
+        .await
+    } else {
+        // Cross-wing query: all diary entries by this agent regardless of wing.
+        query_all(
+            connection,
+            "SELECT id, content, extract_mode, filed_at FROM drawers WHERE added_by = ? AND room = 'diary' ORDER BY filed_at DESC LIMIT ?",
+            (agent_name.as_str(), last_n),
+        )
+        .await
+    };
 
     match rows {
         Ok(rows) => {
@@ -2767,6 +2803,106 @@ mod tests {
             assert_eq!(result["total"], 1);
             let entries = result["entries"].as_array().expect("entries must be array");
             assert_eq!(entries[0]["topic"], "testing");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn diary_write_with_explicit_wing() {
+        // When `wing` is supplied it must be used instead of the derived wing.
+        with_isolated_env(|connection| async move {
+            let result = tool_diary_write(
+                &connection,
+                &json!({
+                    "agent_name": "TestAgent",
+                    "entry": "Entry written to an explicit shared wing",
+                    "wing": "shared_wing",
+                }),
+            )
+            .await;
+            assert_eq!(result["success"], true, "write must succeed");
+            assert!(result["entry_id"].is_string(), "must return entry_id");
+            // Postcondition: the entry must exist in the explicit wing, not the derived one.
+            let read_result = tool_diary_read(
+                &connection,
+                &json!({"agent_name": "TestAgent", "wing": "shared_wing"}),
+            )
+            .await;
+            assert_eq!(
+                read_result["total"], 1,
+                "entry must be in the explicit wing"
+            );
+            let entries = read_result["entries"]
+                .as_array()
+                .expect("entries must be array");
+            assert!(
+                entries[0]["content"]
+                    .as_str()
+                    .is_some_and(|c| c.contains("explicit shared wing")),
+                "entry content must match"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn diary_read_filtered_by_wing_excludes_other_wings() {
+        // When `wing` is supplied only entries from that wing must be returned.
+        with_isolated_env(|connection| async move {
+            // Write one entry to the derived wing and one to an explicit wing.
+            tool_diary_write(
+                &connection,
+                &json!({"agent_name": "TestAgent", "entry": "derived wing entry"}),
+            )
+            .await;
+            tool_diary_write(
+                &connection,
+                &json!({"agent_name": "TestAgent", "entry": "other wing entry", "wing": "other_wing"}),
+            )
+            .await;
+
+            // Read from the explicit wing — must only return its entry.
+            let result = tool_diary_read(
+                &connection,
+                &json!({"agent_name": "TestAgent", "wing": "other_wing"}),
+            )
+            .await;
+            assert!(result.get("error").is_none(), "must not error");
+            assert_eq!(result["total"], 1, "only entries from other_wing must appear");
+            let entries = result["entries"].as_array().expect("entries must be array");
+            assert!(
+                entries[0]["content"]
+                    .as_str()
+                    .is_some_and(|c| c.contains("other wing entry")),
+                "only the other_wing entry must be returned"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn diary_read_cross_wing_returns_all_agent_entries() {
+        // When `wing` is absent, all diary entries by the agent across all wings
+        // must be returned (cross-wing read via added_by).
+        with_isolated_env(|connection| async move {
+            tool_diary_write(
+                &connection,
+                &json!({"agent_name": "TestAgent", "entry": "first wing entry"}),
+            )
+            .await;
+            tool_diary_write(
+                &connection,
+                &json!({"agent_name": "TestAgent", "entry": "second wing entry", "wing": "wing_b"}),
+            )
+            .await;
+
+            // No wing param: cross-wing read — both entries must appear.
+            let result = tool_diary_read(&connection, &json!({"agent_name": "TestAgent"})).await;
+            assert!(result.get("error").is_none(), "must not error");
+            assert_eq!(
+                result["total"], 2,
+                "cross-wing read must return entries from all wings"
+            );
         })
         .await;
     }

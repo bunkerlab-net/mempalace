@@ -5,6 +5,7 @@ mod db;
 mod dialect;
 mod error;
 mod kg;
+mod llm;
 mod mcp;
 mod normalize;
 mod palace;

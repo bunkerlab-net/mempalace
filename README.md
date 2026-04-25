@@ -116,13 +116,17 @@ src/
   error.rs             thiserror Error enum
 
   cli/                 One file per subcommand
-    init.rs            Room detection → write mempalace.yaml (--yes skips prompt)
+    init.rs            Entity discovery + optional LLM refinement + room detection → write mempalace.yaml
     search.rs          CLI search output
     wakeup.rs          L0 + L1 assembly and print
     compress.rs        AAAK batch compression
     split.rs           Mega-file session splitter
     status.rs          Palace stats display
     repair.rs          Backup + rebuild inverted index
+
+  llm/                 LLM provider abstraction (optional, used by init --llm)
+    client.rs          LlmProvider trait + Ollama / OpenAI-compat / Anthropic impls
+    refine.rs          Batched entity refinement: classify, drop, reclassify via LLM
 
   palace/
     miner.rs           Project file scanner + chunker + drawer writer; MineParams struct
@@ -132,7 +136,12 @@ src/
     search.rs          search_memories(): inverted index query with relevance scoring
     room_detect.rs     70+ folder-to-room mappings, detect_room(), detect_rooms_from_folders()
     query_sanitizer.rs 4-step sanitizer: strip system-prompt contamination from search queries
-    entity_detect.rs   Person vs project heuristic classifier
+    entities.rs        Shared DetectedEntity type used by entity_detect and project_scanner
+    entity_detect.rs   Person vs project heuristic classifier for prose files
+    entity_confirm.rs  Interactive / --yes entity confirmation UX
+    known_entities.rs  Global entity registry (~/.local/share/mempalace/known_entities.json)
+    project_scanner.rs Manifest parsing + git author scanning → DetectedDict
+    session_scanner.rs Claude Code project dir scanning for entity discovery
     layers.rs          L0 identity + L1 essential story assembly
     graph.rs           BFS traversal, auto-tunnel detection, explicit tunnel CRUD
 
@@ -158,7 +167,7 @@ src/
 
   mcp/
     mod.rs             Async stdio JSON-RPC 2.0 event loop
-    protocol.rs        PALACE_PROTOCOL, AAAK_SPEC, 26 tool schemas
+    protocol.rs        PALACE_PROTOCOL, AAAK_SPEC, 26 tool schemas (diary tools include optional wing)
     tools.rs           Tool dispatch + all 26 handler implementations
 ```
 

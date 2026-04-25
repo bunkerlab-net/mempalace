@@ -47,7 +47,15 @@ tokio = { version = "1", default-features = false, features = [
   "io-std",
   "io-util",
 ] }
+toml = { version = "1.1", default-features = false, features = [
+  "parse",
+  "serde",
+] }
 turso = { version = "0.5.3", default-features = false }
+ureq = { version = "3", default-features = false, features = [
+  "rustls",
+  "json",
+] }
 uuid = { version = "1", default-features = false, features = ["v4"] }
 
 [dev-dependencies]

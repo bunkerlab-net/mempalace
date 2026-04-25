@@ -262,7 +262,8 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
                 "properties": {
                     "agent_name": {"type": "string", "description": "Your name — each agent gets their own diary wing"},
                     "entry": {"type": "string", "description": "Your diary entry"},
-                    "topic": {"type": "string", "description": "Topic tag (optional, default: general)"}
+                    "topic": {"type": "string", "description": "Topic tag (optional, default: general)"},
+                    "wing": {"type": "string", "description": "Wing to write into (optional — defaults to wing_<agent_name>)"}
                 },
                 "required": ["agent_name", "entry"]
             }
@@ -274,7 +275,8 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
                 "type": "object",
                 "properties": {
                     "agent_name": {"type": "string", "description": "Your name"},
-                    "last_n": {"type": "integer", "description": "Number of recent entries to read (default: 10)"}
+                    "last_n": {"type": "integer", "description": "Number of recent entries to read (default: 10)"},
+                    "wing": {"type": "string", "description": "Wing to read from (optional — omit to read all diary entries across all wings)"}
                 },
                 "required": ["agent_name"]
             }

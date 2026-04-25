@@ -21,6 +21,7 @@ pub mod dialect;
 pub mod error;
 pub mod extract;
 pub mod kg;
+pub mod llm;
 pub mod mcp;
 pub mod normalize;
 pub mod palace;
