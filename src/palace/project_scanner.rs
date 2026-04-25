@@ -1390,4 +1390,239 @@ mod tests {
             "signal must be populated from to_signal()"
         );
     }
+
+    // -- Manifest parser: empty-name branches --
+
+    #[test]
+    fn parse_package_json_returns_none_for_empty_name() {
+        // A name field present but set to "" must not be returned.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("package.json");
+        std::fs::write(&path, r#"{"name": "", "version": "1.0.0"}"#).expect("write package.json");
+        assert!(
+            parse_package_json(&path).is_none(),
+            "empty name field must return None"
+        );
+    }
+
+    #[test]
+    fn parse_cargo_toml_returns_none_for_empty_name() {
+        // [package].name = "" must return None rather than the empty string.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("Cargo.toml");
+        std::fs::write(&path, "[package]\nname = \"\"\nversion = \"0.1.0\"\n")
+            .expect("write Cargo.toml");
+        assert!(
+            parse_cargo_toml(&path).is_none(),
+            "empty [package].name must return None"
+        );
+    }
+
+    #[test]
+    fn parse_go_mod_returns_none_for_empty_module_path() {
+        // A `module ` line with no path after the prefix must return None.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("go.mod");
+        std::fs::write(&path, "module \n").expect("write go.mod");
+        assert!(
+            parse_go_mod(&path).is_none(),
+            "empty module path must return None"
+        );
+    }
+
+    #[test]
+    fn parse_pyproject_toml_returns_none_for_empty_project_name() {
+        // [project].name = "" must fall through; no poetry fallback → None.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("pyproject.toml");
+        std::fs::write(&path, "[project]\nname = \"\"\n").expect("write pyproject");
+        assert!(
+            parse_pyproject_toml(&path).is_none(),
+            "empty [project].name must return None"
+        );
+    }
+
+    #[test]
+    fn parse_pyproject_toml_returns_none_for_empty_poetry_name() {
+        // [tool.poetry].name = "" must return None rather than the empty string.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("pyproject.toml");
+        std::fs::write(&path, "[tool.poetry]\nname = \"\"\n").expect("write pyproject");
+        assert!(
+            parse_pyproject_toml(&path).is_none(),
+            "empty [tool.poetry].name must return None"
+        );
+    }
+
+    // -- scan_is_mine branches --
+
+    #[test]
+    fn scan_is_mine_returns_false_when_user_has_no_commits() {
+        // user_commits = 0 must immediately return false without inspecting author_counts.
+        let author_counts = HashMap::from([("Alice".to_string(), 100usize)]);
+        assert!(
+            !scan_is_mine("Alice", 0, 100, &author_counts),
+            "zero user commits must not be mine"
+        );
+    }
+
+    #[test]
+    fn scan_is_mine_returns_true_when_user_is_top_five_contributor() {
+        // A user in the top-5 contributors list is considered mine regardless of percentage.
+        let author_counts =
+            HashMap::from([("Alice".to_string(), 50usize), ("Bob".to_string(), 40)]);
+        assert!(
+            scan_is_mine("Alice", 50, 90, &author_counts),
+            "top-5 contributor must be mine"
+        );
+    }
+
+    #[test]
+    fn scan_is_mine_returns_true_at_ten_percent_threshold() {
+        // user_commits * 10 >= total_commits triggers mine even without top-5 status.
+        // Alice has 6/60 commits (10%) but 6 other larger contributors fill the top-5.
+        let author_counts = HashMap::from([
+            ("A".to_string(), 15usize),
+            ("B".to_string(), 14),
+            ("C".to_string(), 13),
+            ("D".to_string(), 12),
+            ("E".to_string(), 0),
+            ("Alice".to_string(), 6),
+        ]);
+        assert!(
+            scan_is_mine("Alice", 6, 60, &author_counts),
+            "10% threshold must make this mine"
+        );
+    }
+
+    #[test]
+    fn scan_is_mine_returns_true_when_user_has_twenty_or_more_commits() {
+        // 20+ commits is the absolute fallback — mine even when less than 10% of total.
+        // Alice has 20/310 ≈ 6.5%, not in top-5 (6 larger contributors).
+        let author_counts = HashMap::from([
+            ("A".to_string(), 60usize),
+            ("B".to_string(), 59),
+            ("C".to_string(), 58),
+            ("D".to_string(), 57),
+            ("E".to_string(), 56),
+            ("Alice".to_string(), 20),
+        ]);
+        assert!(
+            scan_is_mine("Alice", 20, 310, &author_counts),
+            "20+ commits must make this mine regardless of percentage"
+        );
+    }
+
+    // -- is_bot email-only trigger --
+
+    #[test]
+    fn is_bot_returns_true_for_bot_email_with_human_looking_name() {
+        // A human-sounding name paired with a `-bot@` email must still be filtered.
+        assert!(
+            is_bot("Alice Smith", "alice-bot@example.com"),
+            "email matching -bot@ must be detected even with a human name"
+        );
+    }
+
+    // -- looks_like_real_name additional branches --
+
+    #[test]
+    fn looks_like_real_name_rejects_when_last_part_is_lowercase() {
+        // First part is uppercase but last part is lowercase — must return false.
+        // This exercises the `last_char.is_uppercase()` false branch of the final &&.
+        assert!(
+            !looks_like_real_name("Alice smith"),
+            "last part lowercase must fail the title-case check"
+        );
+    }
+
+    #[test]
+    fn looks_like_real_name_rejects_single_word_with_leading_space() {
+        // A space is present but whitespace-trimmed split yields only one token → parts.len() < 2.
+        assert!(
+            !looks_like_real_name(" alice"),
+            "single token after whitespace trimming must be rejected"
+        );
+    }
+
+    // -- scan_no_git_fallback: already-seen project skip --
+
+    #[test]
+    fn scan_no_git_fallback_skips_already_seen_project() {
+        // A project name already in the map must not be overwritten by the fallback.
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            temp.path().join("Cargo.toml"),
+            "[package]\nname = \"existing-proj\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("write Cargo.toml");
+
+        let mut projects: HashMap<String, ProjectInfo> = HashMap::new();
+        projects.insert(
+            "existing-proj".to_string(),
+            ProjectInfo {
+                name: "existing-proj".to_string(),
+                repo_root: PathBuf::from("/original"),
+                manifest: None,
+                has_git: true,
+                total_commits: 99,
+                user_commits: 99,
+                is_mine: true,
+            },
+        );
+
+        scan_no_git_fallback(temp.path(), &mut projects);
+
+        // The original entry must be preserved — no overwrite from the fallback.
+        assert_eq!(projects.len(), 1, "duplicate project must not be added");
+        assert!(
+            projects["existing-proj"].is_mine,
+            "original is_mine must be preserved"
+        );
+        assert_eq!(
+            projects["existing-proj"].repo_root,
+            PathBuf::from("/original"),
+            "original repo_root must be preserved"
+        );
+    }
+
+    // -- find_git_repos: nested git repo discovery --
+
+    #[test]
+    fn find_git_repos_discovers_nested_git_repo_without_descending() {
+        // A nested git repo must be recorded but not descended into.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path();
+        let nested = root.join("sub");
+        std::fs::create_dir(&nested).expect("create sub dir");
+
+        // Initialise the outer repo.
+        let outer = std::process::Command::new("git")
+            .arg("init")
+            .current_dir(root)
+            .output();
+        if outer.is_err() || !outer.expect("git").status.success() {
+            return; // git unavailable — skip gracefully
+        }
+        // Initialise the nested repo.
+        let inner = std::process::Command::new("git")
+            .arg("init")
+            .current_dir(&nested)
+            .output();
+        if inner.is_err() || !inner.expect("git").status.success() {
+            return;
+        }
+
+        let repos = find_git_repos(root);
+
+        assert!(repos.len() >= 2, "must discover both root and nested repo");
+        assert!(
+            repos.iter().any(|r| r == root),
+            "root repo must be in the result"
+        );
+        assert!(
+            repos.iter().any(|r| r == &nested),
+            "nested repo must be discovered"
+        );
+    }
 }

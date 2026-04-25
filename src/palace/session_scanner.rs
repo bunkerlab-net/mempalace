@@ -399,4 +399,95 @@ mod tests {
             "duplicate project names must be deduped; found: {names:?}"
         );
     }
+
+    #[test]
+    fn scan_claude_projects_higher_session_count_replaces_lower() {
+        // When two slugs resolve to the same project, the one with more sessions wins.
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        // First slug: 1 session.
+        let slug_a = temp.path().join("-Users-robbie-proj");
+        std::fs::create_dir(&slug_a).expect("create slug_a");
+        std::fs::write(
+            slug_a.join("s1.jsonl"),
+            "{\"cwd\":\"/Users/robbie/proj\",\"type\":\"human\"}\n",
+        )
+        .expect("write session");
+
+        // Second slug: 2 sessions — should replace the first in the dedup map.
+        let slug_b = temp.path().join("-home-robbie-proj");
+        std::fs::create_dir(&slug_b).expect("create slug_b");
+        std::fs::write(
+            slug_b.join("s1.jsonl"),
+            "{\"cwd\":\"/Users/robbie/proj\",\"type\":\"human\"}\n",
+        )
+        .expect("write session 1");
+        std::fs::write(
+            slug_b.join("s2.jsonl"),
+            "{\"cwd\":\"/Users/robbie/proj\",\"type\":\"human\"}\n",
+        )
+        .expect("write session 2");
+
+        let projects = scan_claude_projects(temp.path());
+        let proj: Vec<&crate::palace::project_scanner::ProjectInfo> =
+            projects.iter().filter(|p| p.name == "proj").collect();
+        assert_eq!(proj.len(), 1, "must have exactly one proj entry");
+        // The winner must be the slug with 2 sessions.
+        assert_eq!(
+            proj[0].user_commits, 2,
+            "higher session count must win dedup"
+        );
+    }
+
+    #[test]
+    fn is_claude_projects_root_returns_false_for_dash_dir_without_jsonl() {
+        // A `-`-prefixed directory containing no .jsonl files must return false.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dash_dir = temp.path().join("-Users-robbie-proj");
+        std::fs::create_dir(&dash_dir).expect("create dash dir");
+        // Write a non-JSONL file — the heuristic requires .jsonl.
+        std::fs::write(dash_dir.join("notes.txt"), "not a session").expect("write txt");
+        assert!(
+            !is_claude_projects_root(temp.path()),
+            "dash dir without .jsonl must not be recognised as projects root"
+        );
+    }
+
+    #[test]
+    fn extract_cwd_from_session_returns_none_for_nonexistent_file() {
+        // A path that does not exist must return None gracefully.
+        let result = extract_cwd_from_session(std::path::Path::new("/no/such/file.jsonl"));
+        assert!(result.is_none(), "nonexistent file must return None");
+    }
+
+    #[test]
+    fn extract_cwd_from_session_skips_records_without_cwd() {
+        // Records that lack a `cwd` field must be skipped; None returned if none have it.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let session = temp.path().join("session.jsonl");
+        std::fs::write(&session, "{\"type\":\"human\",\"text\":\"hello\"}\n").expect("write");
+        let result = extract_cwd_from_session(&session);
+        assert!(result.is_none(), "record without cwd must return None");
+    }
+
+    #[test]
+    fn resolve_project_name_falls_back_to_slug_when_no_cwd() {
+        // When no session has a cwd, the project name must come from slug decoding.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let slug_dir = temp.path().join("-Users-robbie-my-project");
+        std::fs::create_dir(&slug_dir).expect("create slug dir");
+        // Write a session with no cwd field.
+        let session = slug_dir.join("session.jsonl");
+        std::fs::write(&session, "{\"type\":\"human\",\"text\":\"no cwd here\"}\n")
+            .expect("write session");
+
+        let sessions = vec![session];
+        let name = resolve_project_name(&slug_dir, &sessions);
+        // Slug decode of "-Users-robbie-my-project" → last segment → "project".
+        assert!(!name.is_empty(), "fallback name must not be empty");
+        assert_eq!(
+            name, "project",
+            "last slug segment must be used as fallback"
+        );
+    }
 }

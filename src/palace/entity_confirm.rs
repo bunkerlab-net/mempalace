@@ -233,4 +233,70 @@ mod tests {
             "only Alice and Carol above threshold"
         );
     }
+
+    // -- confirm_entities (yes=false, interactive) --
+
+    #[test]
+    fn interactive_mode_empty_detected_returns_empty_without_prompting() {
+        // Empty people and projects must trigger the early-return path — no stdin read.
+        let detected = make_dict(vec![], vec![]);
+        let confirmed = confirm_entities(&detected, false);
+        assert!(
+            confirmed.people.is_empty(),
+            "empty detected must yield empty people"
+        );
+        assert!(
+            confirmed.projects.is_empty(),
+            "empty detected must yield empty projects"
+        );
+    }
+
+    #[test]
+    fn interactive_mode_accepts_entities_when_stdin_at_eof() {
+        // In non-TTY environments (CI), stdin is at EOF: read_line returns Ok(0), response
+        // is an empty string, and the prompt function treats empty input as acceptance.
+        // In interactive terminals this test returns early to avoid blocking.
+        use std::io::IsTerminal as _;
+        if std::io::stdin().is_terminal() {
+            // Cannot run non-interactively in a live terminal — skip to avoid hanging.
+            return;
+        }
+        let detected = make_dict(
+            vec![
+                make_entity("Alice", "person", 0.9),
+                // Below threshold — must be skipped without prompting.
+                make_entity("LowConf", "person", 0.1),
+            ],
+            vec![make_entity("mylib", "project", 0.85)],
+        );
+        let confirmed = confirm_entities(&detected, false);
+        // EOF stdin → empty response → all above-threshold entities accepted.
+        assert!(
+            confirmed.people.contains(&"Alice".to_string()),
+            "above-threshold person must be accepted on EOF stdin"
+        );
+        assert!(
+            !confirmed.people.contains(&"LowConf".to_string()),
+            "below-threshold person must be skipped"
+        );
+        assert!(
+            confirmed.projects.contains(&"mylib".to_string()),
+            "above-threshold project must be accepted on EOF stdin"
+        );
+    }
+
+    #[test]
+    fn confirm_entities_prompt_name_accepts_on_eof_stdin() {
+        // Direct test of the prompt helper: EOF stdin → empty response → true (accept).
+        use std::io::IsTerminal as _;
+        if std::io::stdin().is_terminal() {
+            return;
+        }
+        // EOF stdin (non-TTY): read_line returns Ok(0), line stays empty, response = "".
+        let accepted = confirm_entities_prompt_name("Alice", "person");
+        assert!(
+            accepted,
+            "empty response from EOF stdin must mean acceptance"
+        );
+    }
 }

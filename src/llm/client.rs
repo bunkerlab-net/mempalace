@@ -752,4 +752,369 @@ mod tests {
         assert!(ok, "must be available with API key");
         assert_eq!(message, "ok");
     }
+
+    // -- Mock HTTP server helpers --
+
+    /// Bind a random port, accept exactly one connection, and respond with `body` as JSON.
+    ///
+    /// Returns the port so callers can build an endpoint URL. The spawned thread exits
+    /// after serving one request. Used to test provider code without a real LLM server.
+    fn serve_once(body: &str) -> u16 {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("must bind to random port");
+        let port = listener.local_addr().expect("must get local addr").port();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body,
+        );
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                // Drain the request so ureq does not get a broken pipe on write.
+                // Vec allocation avoids the large_stack_arrays lint from a fixed array.
+                let mut buf = vec![0u8; 65536];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        port
+    }
+
+    /// Bind a random port then immediately drop it, leaving the port unreachable.
+    ///
+    /// Used to produce a predictable "connection refused" in network error path tests.
+    fn unreachable_port() -> u16 {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").expect("must bind to random port");
+        let port = listener.local_addr().expect("must get local addr").port();
+        drop(listener);
+        port
+    }
+
+    // -- anthropic_extract_text (private, tested here) --
+
+    #[test]
+    fn anthropic_extract_text_single_block() {
+        // A single text block must return its content unchanged.
+        let data = serde_json::json!({"content": [{"type": "text", "text": "Hello world"}]});
+        let result = anthropic_extract_text(&data);
+        assert_eq!(result, "Hello world");
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn anthropic_extract_text_multiple_blocks_joined() {
+        // Multiple text blocks must be joined in order with no separator.
+        let data = serde_json::json!({
+            "content": [
+                {"type": "text", "text": "Hello "},
+                {"type": "text", "text": "world"},
+            ]
+        });
+        let result = anthropic_extract_text(&data);
+        assert_eq!(result, "Hello world");
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn anthropic_extract_text_non_text_blocks_ignored() {
+        // Non-text blocks (e.g. tool_use) must not appear in the output.
+        let data = serde_json::json!({
+            "content": [
+                {"type": "tool_use", "id": "tu_1", "name": "search", "input": {}},
+                {"type": "text", "text": "Only this"},
+            ]
+        });
+        let result = anthropic_extract_text(&data);
+        assert_eq!(result, "Only this");
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn anthropic_extract_text_empty_content_array() {
+        // An empty content array must produce an empty string.
+        let data = serde_json::json!({"content": []});
+        let result = anthropic_extract_text(&data);
+        assert!(result.is_empty(), "empty content must produce empty string");
+    }
+
+    #[test]
+    fn anthropic_extract_text_missing_content_key() {
+        // A response without a "content" key must return an empty string.
+        let data = serde_json::json!({"type": "message", "role": "assistant"});
+        let result = anthropic_extract_text(&data);
+        assert!(
+            result.is_empty(),
+            "missing content key must produce empty string"
+        );
+    }
+
+    // -- OllamaProvider::check_available --
+
+    #[test]
+    fn ollama_check_available_when_unreachable() {
+        // OllamaProvider must report unavailable when the endpoint refuses connections.
+        let port = unreachable_port();
+        let provider = OllamaProvider::new(
+            "gemma3:4b".to_string(),
+            Some(format!("http://127.0.0.1:{port}")),
+            5,
+        );
+        let (ok, message) = provider.check_available();
+        assert!(!ok, "unreachable endpoint must report unavailable");
+        assert!(!message.is_empty(), "must provide a reason");
+    }
+
+    #[test]
+    fn ollama_check_available_model_not_in_list() {
+        // OllamaProvider must report unavailable when the model is absent from the list.
+        let port = serve_once(r#"{"models":[]}"#);
+        let provider = OllamaProvider::new(
+            "gemma3:4b".to_string(),
+            Some(format!("http://127.0.0.1:{port}")),
+            5,
+        );
+        let (ok, message) = provider.check_available();
+        assert!(!ok, "absent model must report unavailable");
+        assert!(
+            message.contains("gemma3:4b"),
+            "message must name the missing model"
+        );
+    }
+
+    #[test]
+    fn ollama_check_available_model_in_list() {
+        // OllamaProvider must report available when the model is present in the list.
+        let port = serve_once(r#"{"models":[{"name":"gemma3:4b"}]}"#);
+        let provider = OllamaProvider::new(
+            "gemma3:4b".to_string(),
+            Some(format!("http://127.0.0.1:{port}")),
+            5,
+        );
+        let (ok, message) = provider.check_available();
+        assert!(ok, "present model must report available");
+        assert_eq!(message, "ok");
+    }
+
+    #[test]
+    fn ollama_check_available_model_matched_with_latest_tag() {
+        // A model without a tag (e.g. "gemma3") must match "gemma3:latest" in the list.
+        let port = serve_once(r#"{"models":[{"name":"gemma3:latest"}]}"#);
+        let provider = OllamaProvider::new(
+            "gemma3".to_string(),
+            Some(format!("http://127.0.0.1:{port}")),
+            5,
+        );
+        let (ok, _message) = provider.check_available();
+        assert!(
+            ok,
+            "bare model name must match the :latest variant in the server list"
+        );
+    }
+
+    // -- OllamaProvider::classify --
+
+    #[test]
+    fn ollama_classify_when_unreachable_returns_error() {
+        // classify must return Err when the endpoint refuses connections.
+        let port = unreachable_port();
+        let provider = OllamaProvider::new(
+            "gemma3:4b".to_string(),
+            Some(format!("http://127.0.0.1:{port}")),
+            5,
+        );
+        let result = provider.classify("system prompt", "user prompt", false);
+        assert!(result.is_err(), "unreachable endpoint must return Err");
+    }
+
+    #[test]
+    fn ollama_classify_extracts_message_content() {
+        // classify must return the message.content field from a valid Ollama response.
+        let port = serve_once(r#"{"message":{"content":"classified!"}}"#);
+        let provider = OllamaProvider::new(
+            "gemma3:4b".to_string(),
+            Some(format!("http://127.0.0.1:{port}")),
+            5,
+        );
+        let result = provider
+            .classify("system prompt", "user prompt", false)
+            .expect("must succeed with mock server");
+        assert_eq!(result.text, "classified!");
+        assert_eq!(result.model, "gemma3:4b");
+    }
+
+    #[test]
+    fn ollama_classify_with_json_mode_sets_format_field() {
+        // json_mode=true must be accepted and the response must still be extracted.
+        let port = serve_once(r#"{"message":{"content":"{\"decisions\":{}}"}}"#);
+        let provider = OllamaProvider::new(
+            "gemma3:4b".to_string(),
+            Some(format!("http://127.0.0.1:{port}")),
+            5,
+        );
+        let result = provider
+            .classify("system prompt", "user prompt", true)
+            .expect("json_mode must succeed with mock server");
+        assert!(!result.text.is_empty());
+    }
+
+    // -- OpenAICompatProvider::check_available --
+
+    #[test]
+    fn openai_check_available_empty_endpoint_reports_unavailable() {
+        // An empty endpoint must report unavailable without making any HTTP call.
+        let provider = OpenAICompatProvider::new("gpt-4o".to_string(), None, None, 5);
+        let (ok, message) = provider.check_available();
+        assert!(!ok, "empty endpoint must report unavailable");
+        assert!(
+            message.contains("--llm-endpoint"),
+            "message must mention the required flag"
+        );
+    }
+
+    #[test]
+    fn openai_check_available_when_unreachable() {
+        // OpenAICompatProvider must report unavailable when the endpoint refuses connections.
+        let port = unreachable_port();
+        let provider = OpenAICompatProvider::new(
+            "gpt-4o".to_string(),
+            Some(format!("http://127.0.0.1:{port}")),
+            None,
+            5,
+        );
+        let (ok, message) = provider.check_available();
+        assert!(!ok, "unreachable endpoint must report unavailable");
+        assert!(!message.is_empty(), "must provide a reason");
+    }
+
+    #[test]
+    fn openai_check_available_when_reachable() {
+        // OpenAICompatProvider must report available when the models endpoint responds.
+        let port = serve_once(r#"{"data":[]}"#);
+        let provider = OpenAICompatProvider::new(
+            "gpt-4o".to_string(),
+            Some(format!("http://127.0.0.1:{port}")),
+            None,
+            5,
+        );
+        let (ok, message) = provider.check_available();
+        assert!(ok, "reachable endpoint must report available");
+        assert_eq!(message, "ok");
+    }
+
+    // -- OpenAICompatProvider::classify --
+
+    #[test]
+    fn openai_classify_when_unreachable_returns_error() {
+        // classify must return Err when the endpoint refuses connections.
+        let port = unreachable_port();
+        let provider = OpenAICompatProvider::new(
+            "gpt-4o".to_string(),
+            Some(format!("http://127.0.0.1:{port}")),
+            None,
+            5,
+        );
+        let result = provider.classify("system prompt", "user prompt", false);
+        assert!(result.is_err(), "unreachable endpoint must return Err");
+    }
+
+    #[test]
+    fn openai_classify_extracts_choices_content() {
+        // classify must extract choices[0].message.content from a valid response.
+        let port = serve_once(r#"{"choices":[{"message":{"content":"classified!"}}]}"#);
+        let provider = OpenAICompatProvider::new(
+            "gpt-4o".to_string(),
+            Some(format!("http://127.0.0.1:{port}")),
+            None,
+            5,
+        );
+        let result = provider
+            .classify("system prompt", "user prompt", false)
+            .expect("must succeed with mock server");
+        assert_eq!(result.text, "classified!");
+        assert_eq!(result.model, "gpt-4o");
+    }
+
+    #[test]
+    fn openai_classify_with_json_mode_sends_response_format() {
+        // json_mode=true must be accepted and the response must still be extracted.
+        let port = serve_once(r#"{"choices":[{"message":{"content":"{\"decisions\":{}}"}}]}"#);
+        let provider = OpenAICompatProvider::new(
+            "gpt-4o".to_string(),
+            Some(format!("http://127.0.0.1:{port}")),
+            None,
+            5,
+        );
+        let result = provider
+            .classify("system prompt", "user prompt", true)
+            .expect("json_mode must succeed with mock server");
+        assert!(!result.text.is_empty());
+    }
+
+    // -- AnthropicProvider::classify --
+
+    #[test]
+    fn anthropic_classify_without_api_key_returns_error() {
+        // classify must return Err(Llm) immediately when no API key is configured.
+        temp_env::with_var("ANTHROPIC_API_KEY", None::<&str>, || {
+            let provider =
+                AnthropicProvider::new("claude-haiku-4-5-20251001".to_string(), None, None, 5);
+            let result = provider.classify("system prompt", "user prompt", false);
+            assert!(result.is_err(), "missing API key must return Err");
+            let message = result.err().map(|e| e.to_string()).unwrap_or_default();
+            assert!(
+                message.contains("ANTHROPIC_API_KEY"),
+                "error must mention the env var"
+            );
+        });
+    }
+
+    #[test]
+    fn anthropic_classify_with_key_when_unreachable_returns_error() {
+        // classify must return Err(Http) when the endpoint refuses connections.
+        let port = unreachable_port();
+        let provider = AnthropicProvider::new(
+            "claude-haiku-4-5-20251001".to_string(),
+            Some(format!("http://127.0.0.1:{port}")),
+            Some("sk-ant-test".to_string()),
+            5,
+        );
+        let result = provider.classify("system prompt", "user prompt", false);
+        assert!(result.is_err(), "unreachable endpoint must return Err");
+    }
+
+    #[test]
+    fn anthropic_classify_extracts_content_blocks() {
+        // classify must extract text from the Anthropic Messages API response format.
+        let port = serve_once(r#"{"content":[{"type":"text","text":"classified!"}]}"#);
+        let provider = AnthropicProvider::new(
+            "claude-haiku-4-5-20251001".to_string(),
+            Some(format!("http://127.0.0.1:{port}")),
+            Some("sk-ant-test".to_string()),
+            5,
+        );
+        let result = provider
+            .classify("system prompt", "user prompt", false)
+            .expect("must succeed with mock server");
+        assert_eq!(result.text, "classified!");
+        assert_eq!(result.model, "claude-haiku-4-5-20251001");
+    }
+
+    #[test]
+    fn anthropic_classify_with_json_mode_appends_instruction() {
+        // json_mode=true must add a JSON instruction to the system prompt; response still extracts.
+        let port = serve_once(r#"{"content":[{"type":"text","text":"{\"decisions\":{}}"}]}"#);
+        let provider = AnthropicProvider::new(
+            "claude-haiku-4-5-20251001".to_string(),
+            Some(format!("http://127.0.0.1:{port}")),
+            Some("sk-ant-test".to_string()),
+            5,
+        );
+        let result = provider
+            .classify("system prompt", "user prompt", true)
+            .expect("json_mode must succeed with mock server");
+        assert!(!result.text.is_empty());
+    }
 }

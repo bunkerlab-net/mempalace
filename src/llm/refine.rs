@@ -706,4 +706,236 @@ mod tests {
         assert_eq!(contexts.len(), MAX_CONTEXT_SNIPPETS, "must cap at limit");
         assert!(contexts.len() <= MAX_CONTEXT_SNIPPETS);
     }
+
+    // -- extract_json_block_by_braces --
+
+    #[test]
+    fn extract_json_block_by_braces_handles_nested_objects() {
+        // Nested braces must not confuse the depth counter — the outermost block is returned.
+        let text = r#"prefix {"outer": {"inner": "value"}} suffix"#;
+        let block = extract_json_block_by_braces(text).expect("must find outermost block");
+        assert!(block.starts_with('{'));
+        assert!(block.ends_with('}'));
+        assert!(block.contains("outer") && block.contains("inner"));
+    }
+
+    #[test]
+    fn extract_json_block_by_braces_returns_none_without_brace() {
+        // Text with no opening brace must return None.
+        let text = "No braces here at all.";
+        let result = extract_json_block_by_braces(text);
+        assert!(
+            result.is_none(),
+            "must return None when no opening brace found"
+        );
+    }
+
+    // -- refine_entities_collect_candidates --
+
+    #[test]
+    fn collect_candidates_includes_all_categories() {
+        // Candidates must include all three input categories.
+        let detected = make_dict(vec!["Alice"], vec!["MyLib"], vec!["Unknown"]);
+        let candidates = refine_entities_collect_candidates(&detected);
+        assert_eq!(candidates.len(), 3, "must collect all three categories");
+        assert!(candidates.iter().any(|(name, _)| *name == "Alice"));
+        assert!(candidates.iter().any(|(name, _)| *name == "MyLib"));
+        assert!(candidates.iter().any(|(name, _)| *name == "Unknown"));
+    }
+
+    #[test]
+    fn collect_candidates_empty_dict_returns_empty() {
+        // An empty DetectedDict must produce no candidates.
+        let detected = make_dict(vec![], vec![], vec![]);
+        let candidates = refine_entities_collect_candidates(&detected);
+        assert!(
+            candidates.is_empty(),
+            "empty dict must produce no candidates"
+        );
+    }
+
+    // -- build_user_prompt --
+
+    #[test]
+    fn build_user_prompt_contains_entity_names_and_types() {
+        // The prompt must reference every entity name and type in the batch.
+        let batch: Vec<(&str, &str)> = vec![("Alice", "person"), ("MyLib", "project")];
+        let corpus_lines: Vec<&str> = vec!["Alice wrote MyLib"];
+        let prompt = build_user_prompt(&batch, &corpus_lines);
+        assert!(prompt.contains("Alice"), "prompt must include entity name");
+        assert!(
+            prompt.contains("MyLib"),
+            "prompt must include second entity"
+        );
+        assert!(prompt.contains("person"), "prompt must include entity type");
+        assert!(
+            prompt.contains("decisions"),
+            "prompt must reference the required JSON key"
+        );
+        assert!(!prompt.is_empty());
+    }
+
+    // -- Mock providers for refine_entities tests --
+
+    struct MockProvider {
+        response: String,
+    }
+
+    impl LlmProvider for MockProvider {
+        fn classify(
+            &self,
+            _system: &str,
+            _user: &str,
+            _json_mode: bool,
+        ) -> crate::error::Result<crate::llm::client::LlmResponse> {
+            Ok(crate::llm::client::LlmResponse {
+                text: self.response.clone(),
+                model: "mock".to_string(),
+                provider: "mock".to_string(),
+            })
+        }
+        fn check_available(&self) -> (bool, String) {
+            (true, "mock ok".to_string())
+        }
+        fn name(&self) -> &'static str {
+            "mock"
+        }
+    }
+
+    struct FailProvider;
+
+    impl LlmProvider for FailProvider {
+        fn classify(
+            &self,
+            _system: &str,
+            _user: &str,
+            _json_mode: bool,
+        ) -> crate::error::Result<crate::llm::client::LlmResponse> {
+            Err(crate::error::Error::Llm(
+                "intentional test failure".to_string(),
+            ))
+        }
+        fn check_available(&self) -> (bool, String) {
+            (false, "intentionally failing".to_string())
+        }
+        fn name(&self) -> &'static str {
+            "fail"
+        }
+    }
+
+    // -- refine_entities --
+
+    #[test]
+    fn refine_entities_empty_detected_produces_zero_batches() {
+        // An empty DetectedDict must produce a RefineResult with no batches.
+        let provider = MockProvider {
+            response: "{}".to_string(),
+        };
+        let detected = make_dict(vec![], vec![], vec![]);
+        let result = refine_entities(detected, "", &provider);
+        assert_eq!(result.batches_total, 0);
+        assert_eq!(result.batches_completed, 0);
+        assert_eq!(result.errors, 0);
+        assert!(!result.cancelled);
+    }
+
+    #[test]
+    fn refine_entities_with_mock_provider_classifies_entities() {
+        // A valid LLM response must be applied to the detected dict.
+        let response = r#"{"decisions":{"Alice":{"label":"person","reason":"dev"},"MyLib":{"label":"project","reason":"cargo"}}}"#;
+        let provider = MockProvider {
+            response: response.to_string(),
+        };
+        let detected = make_dict(vec!["Alice"], vec!["MyLib"], vec![]);
+        let result = refine_entities(detected, "Alice wrote MyLib", &provider);
+        assert_eq!(result.batches_completed, 1);
+        assert_eq!(result.errors, 0);
+        assert_eq!(result.batches_total, 1);
+        // No reclassifications because Alice was already "person" and MyLib was "project".
+        assert_eq!(result.reclassified, 0);
+    }
+
+    #[test]
+    fn refine_entities_with_failing_provider_counts_errors() {
+        // A provider that always fails must produce an error for each batch.
+        let detected = make_dict(vec!["Alice"], vec![], vec![]);
+        let result = refine_entities(detected, "", &FailProvider);
+        assert_eq!(result.errors, 1);
+        assert_eq!(result.batches_completed, 0);
+        assert_eq!(result.batches_total, 1);
+    }
+
+    #[test]
+    fn refine_entities_drop_decision_removes_entity() {
+        // A "drop" decision must remove the entity from the output dict.
+        let response = r#"{"decisions":{"Bot42":{"label":"drop","reason":"automation bot"}}}"#;
+        let provider = MockProvider {
+            response: response.to_string(),
+        };
+        let detected = make_dict(vec!["Bot42"], vec![], vec![]);
+        let result = refine_entities(detected, "", &provider);
+        assert_eq!(result.dropped, 1);
+        assert!(result.merged.people.is_empty());
+        assert!(result.merged.projects.is_empty());
+    }
+
+    // -- collect_corpus_text --
+
+    #[test]
+    fn collect_corpus_text_reads_prose_files() {
+        // .md files in the directory must be included in the corpus.
+        let temp = tempfile::tempdir().expect("must create temp dir");
+        std::fs::write(temp.path().join("README.md"), "Alice wrote this project.")
+            .expect("must write prose file");
+        let corpus = collect_corpus_text(temp.path());
+        assert!(
+            corpus.contains("Alice wrote this project."),
+            "must include prose file content"
+        );
+        assert!(!corpus.is_empty());
+    }
+
+    #[test]
+    fn collect_corpus_text_skips_non_prose_files() {
+        // .rs source files must not be included — only .md, .txt, .rst are prose.
+        let temp = tempfile::tempdir().expect("must create temp dir");
+        std::fs::write(temp.path().join("main.rs"), "fn main() {}")
+            .expect("must write source file");
+        let corpus = collect_corpus_text(temp.path());
+        assert!(corpus.is_empty(), "non-prose files must not be included");
+    }
+
+    #[test]
+    fn collect_corpus_text_empty_dir_returns_empty_string() {
+        // An empty directory must produce an empty corpus.
+        let temp = tempfile::tempdir().expect("must create temp dir");
+        let corpus = collect_corpus_text(temp.path());
+        assert!(corpus.is_empty(), "empty dir must produce empty corpus");
+    }
+
+    #[test]
+    fn collect_corpus_text_includes_nested_prose() {
+        // Prose files in subdirectories must be included via the directory walk.
+        let temp = tempfile::tempdir().expect("must create temp dir");
+        let subdirectory = temp.path().join("docs");
+        std::fs::create_dir(&subdirectory).expect("must create subdirectory");
+        std::fs::write(subdirectory.join("guide.txt"), "User guide content")
+            .expect("must write nested prose file");
+        let corpus = collect_corpus_text(temp.path());
+        assert!(
+            corpus.contains("User guide content"),
+            "must include nested prose file content"
+        );
+    }
+
+    #[test]
+    fn collect_corpus_text_includes_txt_and_rst_files() {
+        // .txt and .rst extensions must both be recognized as prose.
+        let temp = tempfile::tempdir().expect("must create temp dir");
+        std::fs::write(temp.path().join("notes.txt"), "txt content").expect("must write txt file");
+        std::fs::write(temp.path().join("docs.rst"), "rst content").expect("must write rst file");
+        let corpus = collect_corpus_text(temp.path());
+        assert!(corpus.contains("txt content"), "must include .txt files");
+        assert!(corpus.contains("rst content"), "must include .rst files");
+    }
 }

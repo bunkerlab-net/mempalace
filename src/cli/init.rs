@@ -458,4 +458,309 @@ mod tests {
             .expect("mempalace.yaml must be readable after init with no_gitignore");
         assert!(contents.contains("wing:"), "config must contain wing field");
     }
+
+    // -- run_setup_llm --
+
+    #[test]
+    fn run_setup_llm_disabled_returns_none() {
+        // When LLM is disabled, run_setup_llm must return Ok(None) without any I/O.
+        let opts = LlmOpts::default(); // enabled = false
+        let result = run_setup_llm(&opts).expect("disabled LLM must not fail");
+        assert!(result.is_none(), "disabled LLM must return None");
+    }
+
+    #[test]
+    fn run_setup_llm_invalid_provider_returns_error() {
+        // An unknown provider name must propagate as Err from get_provider.
+        let opts = LlmOpts {
+            enabled: true,
+            provider: "unknown-provider".to_string(),
+            model: "some-model".to_string(),
+            endpoint: None,
+            api_key: None,
+        };
+        let result = run_setup_llm(&opts);
+        assert!(result.is_err(), "unknown provider must return Err");
+    }
+
+    #[test]
+    fn run_setup_llm_anthropic_no_key_returns_none() {
+        // Anthropic without a key reports unavailable; run_setup_llm must return Ok(None).
+        temp_env::with_var("ANTHROPIC_API_KEY", None::<&str>, || {
+            let opts = LlmOpts {
+                enabled: true,
+                provider: "anthropic".to_string(),
+                model: "claude-haiku-4-5-20251001".to_string(),
+                endpoint: None,
+                api_key: None,
+            };
+            let result = run_setup_llm(&opts).expect("unavailable provider must not return Err");
+            assert!(
+                result.is_none(),
+                "missing API key must cause unavailable → None"
+            );
+        });
+    }
+
+    // -- run_derive_wing_name --
+
+    #[test]
+    fn run_derive_wing_name_prefers_mine_project() {
+        // A project with is_mine=true must be used as the wing name base.
+        use crate::palace::project_scanner::ProjectInfo;
+        let temp_dir =
+            tempfile::tempdir().expect("must create temp dir for wing name derivation test");
+        let projects = vec![ProjectInfo {
+            name: "my-awesome-project".to_string(),
+            repo_root: temp_dir.path().to_path_buf(),
+            manifest: None,
+            has_git: false,
+            total_commits: 0,
+            user_commits: 5,
+            is_mine: true,
+        }];
+        let result = run_derive_wing_name(&projects, temp_dir.path());
+        assert_eq!(
+            result, "my_awesome_project",
+            "hyphens must be converted to underscores"
+        );
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn run_derive_wing_name_falls_back_to_dir_name() {
+        // With no projects, the wing name must come from the directory basename.
+        let temp_dir =
+            tempfile::tempdir().expect("must create temp dir for wing name fallback test");
+        let result = run_derive_wing_name(&[], temp_dir.path());
+        assert!(
+            !result.is_empty(),
+            "wing name must not be empty even without projects"
+        );
+    }
+
+    #[test]
+    fn run_derive_wing_name_sanitizes_spaces_to_underscores() {
+        // Spaces in the project name must be replaced with underscores.
+        use crate::palace::project_scanner::ProjectInfo;
+        let temp_dir = tempfile::tempdir().expect("must create temp dir for sanitize test");
+        let projects = vec![ProjectInfo {
+            name: "my project name".to_string(),
+            repo_root: temp_dir.path().to_path_buf(),
+            manifest: None,
+            has_git: false,
+            total_commits: 0,
+            user_commits: 1,
+            is_mine: true,
+        }];
+        let result = run_derive_wing_name(&projects, temp_dir.path());
+        assert!(!result.contains(' '), "wing name must not contain spaces");
+        assert_eq!(result, "my_project_name");
+    }
+
+    // -- run_prompt_proceed --
+
+    #[test]
+    fn run_prompt_proceed_with_yes_returns_true_without_stdin() {
+        // yes=true must return Ok(true) immediately without reading stdin.
+        let result = run_prompt_proceed(true).expect("yes=true must not fail");
+        assert!(result, "yes=true must always proceed");
+    }
+
+    // -- run_refine_entities --
+
+    #[test]
+    fn run_refine_entities_when_disabled_returns_detected_unchanged() {
+        // Disabled LLM must return the input DetectedDict without modification.
+        use crate::palace::project_scanner::DetectedDict;
+        let temp_dir = tempfile::tempdir().expect("must create temp dir for refine entities test");
+        let detected = DetectedDict {
+            people: vec![],
+            projects: vec![],
+            uncertain: vec![],
+        };
+        let opts = LlmOpts::default(); // enabled = false
+        let result = run_refine_entities(detected, temp_dir.path(), &opts)
+            .expect("disabled LLM refine must not fail");
+        assert!(result.people.is_empty());
+        assert!(result.projects.is_empty());
+    }
+
+    // -- run_print_summary and run_print_entities --
+
+    #[test]
+    fn run_print_summary_with_detected_entities_does_not_panic() {
+        // run_print_summary must handle a non-empty DetectedDict without panicking.
+        use crate::palace::entities::DetectedEntity;
+        use crate::palace::project_scanner::DetectedDict;
+        let detected = DetectedDict {
+            people: vec![DetectedEntity {
+                name: "Alice".to_string(),
+                entity_type: "person".to_string(),
+                confidence: 0.9,
+                frequency: 5,
+                signals: vec!["git: 5 of your commits".to_string()],
+            }],
+            projects: vec![DetectedEntity {
+                name: "mylib".to_string(),
+                entity_type: "project".to_string(),
+                confidence: 0.8,
+                frequency: 3,
+                signals: vec![],
+            }],
+            uncertain: vec![DetectedEntity {
+                name: "unknown".to_string(),
+                entity_type: "uncertain".to_string(),
+                confidence: 0.6,
+                frequency: 1,
+                signals: vec![],
+            }],
+        };
+        // Rooms list — empty is fine for the print test.
+        let rooms: Vec<crate::config::RoomConfig> = vec![];
+        // Must not panic with any non-empty DetectedDict.
+        run_print_summary("my_project", 42, &rooms, &detected);
+    }
+
+    #[test]
+    fn run_print_entities_with_non_empty_list_does_not_panic() {
+        // run_print_entities must iterate entities without panicking.
+        use crate::palace::entities::DetectedEntity;
+        let entities = vec![
+            DetectedEntity {
+                name: "Alice".to_string(),
+                entity_type: "person".to_string(),
+                confidence: 0.9,
+                frequency: 2,
+                signals: vec!["Cargo.toml".to_string()],
+            },
+            DetectedEntity {
+                name: "Bob".to_string(),
+                entity_type: "person".to_string(),
+                confidence: 0.7,
+                // frequency=0 exercises the empty freq_str branch.
+                frequency: 0,
+                signals: vec![],
+            },
+        ];
+        // Must not panic regardless of signal/frequency content.
+        run_print_entities("People", &entities);
+    }
+
+    // -- run_confirm_and_save --
+
+    #[test]
+    fn run_confirm_and_save_writes_entities_json_when_entities_confirmed() {
+        // With yes=true and high-confidence people, entities.json must be written.
+        use crate::palace::entities::DetectedEntity;
+        use crate::palace::project_scanner::DetectedDict;
+        let temp_dir =
+            tempfile::tempdir().expect("must create temp dir for run_confirm_and_save test");
+        let detected = DetectedDict {
+            people: vec![DetectedEntity {
+                name: "Alice".to_string(),
+                entity_type: "person".to_string(),
+                confidence: 0.9,
+                frequency: 1,
+                signals: vec![],
+            }],
+            projects: vec![],
+            uncertain: vec![],
+        };
+        run_confirm_and_save(&detected, true, temp_dir.path())
+            .expect("run_confirm_and_save must succeed");
+        let entities_path = temp_dir.path().join("entities.json");
+        assert!(entities_path.exists(), "entities.json must be written");
+        let content =
+            std::fs::read_to_string(&entities_path).expect("entities.json must be readable");
+        assert!(
+            content.contains("Alice"),
+            "entities.json must name the confirmed person"
+        );
+        assert!(!content.is_empty());
+    }
+
+    #[test]
+    fn run_confirm_and_save_skips_write_when_nothing_confirmed() {
+        // With no entities above the confidence threshold, entities.json must not be written.
+        use crate::palace::entities::DetectedEntity;
+        use crate::palace::project_scanner::DetectedDict;
+        let temp_dir = tempfile::tempdir().expect("must create temp dir for skip-write test");
+        let detected = DetectedDict {
+            // Below threshold — will not be auto-accepted.
+            people: vec![DetectedEntity {
+                name: "LowConf".to_string(),
+                entity_type: "person".to_string(),
+                confidence: 0.1,
+                frequency: 0,
+                signals: vec![],
+            }],
+            projects: vec![],
+            uncertain: vec![],
+        };
+        run_confirm_and_save(&detected, true, temp_dir.path())
+            .expect("run_confirm_and_save must succeed even with no confirmations");
+        let entities_path = temp_dir.path().join("entities.json");
+        assert!(
+            !entities_path.exists(),
+            "entities.json must NOT be written when nothing is confirmed"
+        );
+    }
+
+    #[test]
+    fn run_confirm_and_save_writes_both_people_and_projects() {
+        // When both people and projects are confirmed, both categories appear in entities.json.
+        use crate::palace::entities::DetectedEntity;
+        use crate::palace::project_scanner::DetectedDict;
+        let temp_dir = tempfile::tempdir().expect("must create temp dir for both-categories test");
+        let detected = DetectedDict {
+            people: vec![DetectedEntity {
+                name: "Alice".to_string(),
+                entity_type: "person".to_string(),
+                confidence: 0.9,
+                frequency: 3,
+                signals: vec![],
+            }],
+            projects: vec![DetectedEntity {
+                name: "mylib".to_string(),
+                entity_type: "project".to_string(),
+                confidence: 0.85,
+                frequency: 2,
+                signals: vec![],
+            }],
+            uncertain: vec![],
+        };
+        run_confirm_and_save(&detected, true, temp_dir.path())
+            .expect("run_confirm_and_save must succeed");
+        let entities_path = temp_dir.path().join("entities.json");
+        assert!(entities_path.exists(), "entities.json must be written");
+        let content =
+            std::fs::read_to_string(&entities_path).expect("entities.json must be readable");
+        assert!(content.contains("Alice"), "must include confirmed person");
+        assert!(content.contains("mylib"), "must include confirmed project");
+    }
+
+    #[test]
+    fn run_discover_entities_with_claude_projects_root() {
+        // A directory that looks like a .claude/projects/ root must trigger session scanning.
+        let temp_dir =
+            tempfile::tempdir().expect("must create temp dir for claude projects discovery test");
+        // Create the expected layout: a -slug dir with a .jsonl session file.
+        let slug_dir = temp_dir.path().join("-Users-robbie-test-proj");
+        std::fs::create_dir(&slug_dir).expect("must create slug dir");
+        std::fs::write(
+            slug_dir.join("session.jsonl"),
+            "{\"cwd\":\"/Users/robbie/test-proj\",\"type\":\"human\"}\n",
+        )
+        .expect("must write session file");
+
+        // run_discover_entities should take the is_claude_projects_root=true branch.
+        let (projects, _detected) = run_discover_entities(temp_dir.path());
+        // No git repos or manifests in the temp dir, so projects from project_scanner is empty.
+        // session_scanner will find "test-proj" but the merge deduplicates.
+        assert!(
+            projects.is_empty(),
+            "no git repos in temp dir so project_scanner projects empty"
+        );
+    }
 }
