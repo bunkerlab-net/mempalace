@@ -5,19 +5,31 @@
 /// `git` process. Handles plain repos, submodules, and worktrees by resolving
 /// the real git dir from the `.git` pointer file when necessary.
 fn main() {
-    let git_dir = resolve_git_dir().unwrap_or_else(|| std::path::PathBuf::from(".git"));
+    let git_dir = resolve_git_dir();
     println!(
         "cargo:rustc-env=GIT_SHORT_SHA={}",
-        read_short_sha(&git_dir).unwrap_or_else(|| "unknown".to_owned())
+        // Only call read_short_sha when resolve_git_dir succeeded; an absent or
+        // invalid git dir yields "unknown" rather than a panic from the assert inside
+        // read_short_sha.
+        git_dir
+            .as_deref()
+            .and_then(read_short_sha)
+            .unwrap_or_else(|| "unknown".to_owned())
     );
-    println!("cargo:rerun-if-changed={}", git_dir.join("HEAD").display());
+    // Watch the resolved git dir when found; fall back to the canonical .git/ paths
+    // so Cargo still invalidates the build script when git state changes later.
+    let watch_dir = git_dir.unwrap_or_else(|| std::path::PathBuf::from(".git"));
     println!(
         "cargo:rerun-if-changed={}",
-        git_dir.join("refs/heads").display()
+        watch_dir.join("HEAD").display()
     );
     println!(
         "cargo:rerun-if-changed={}",
-        git_dir.join("packed-refs").display()
+        watch_dir.join("refs/heads").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        watch_dir.join("packed-refs").display()
     );
 }
 
@@ -89,10 +101,12 @@ fn read_short_sha(git_dir: &std::path::Path) -> Option<String> {
 /// to scanning `git_dir/packed-refs`. Validates the resolved value is hex before
 /// returning it. Returns `None` if neither source resolves the ref.
 fn resolve_ref(git_dir: &std::path::Path, ref_name: &str) -> Option<String> {
-    assert!(
-        !ref_name.is_empty(),
-        "resolve_ref: ref_name must not be empty"
-    );
+    // Guard rather than assert: an empty ref_name (e.g. from a malformed "ref: \n"
+    // in HEAD) cannot resolve to anything. Return None so the build falls back to
+    // "unknown" instead of aborting with a panic.
+    if ref_name.is_empty() {
+        return None;
+    }
 
     // Loose ref: git_dir/<ref_name> contains the full SHA on a single line.
     if let Ok(content) = std::fs::read_to_string(git_dir.join(ref_name)) {
