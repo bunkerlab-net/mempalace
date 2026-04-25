@@ -354,8 +354,6 @@ fn run_derive_wing_name(projects: &[ProjectInfo], directory: &Path) -> String {
 /// Print the init summary including detected entities and rooms.
 ///
 /// Called by [`run`] to keep that function within the 70-line limit.
-// TigerStyle exemption: declarative display logic — entity lists are data, not logic.
-#[allow(clippy::too_many_lines)]
 fn run_print_summary(
     wing_name: &str,
     file_count: usize,
@@ -780,12 +778,12 @@ mod tests {
         .expect("must write session file");
 
         // run_discover_entities should take the is_claude_projects_root=true branch.
-        let (projects, _detected) = run_discover_entities(temp_dir.path());
-        // No git repos or manifests in the temp dir, so projects from project_scanner is empty.
-        // session_scanner will find "test-proj" but the merge deduplicates.
+        let (_projects, detected) = run_discover_entities(temp_dir.path());
+        // The session JSONL carries cwd="/Users/robbie/test-proj", so the session
+        // scanner must surface "test-proj" in detected.projects.
         assert!(
-            projects.is_empty(),
-            "no git repos in temp dir so project_scanner projects empty"
+            detected.projects.iter().any(|e| e.name == "test-proj"),
+            "session scanner must detect project name from cwd in session JSONL"
         );
     }
 }
