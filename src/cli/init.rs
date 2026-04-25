@@ -87,13 +87,15 @@ pub fn run(directory: &Path, yes: bool, no_gitignore: bool, llm_opts: &LlmOpts) 
     let wing_name = run_derive_wing_name(&projects, &directory);
     let file_count = crate::palace::miner::scan_project_with_opts(&directory, !no_gitignore).len();
 
+    // Present summary and ask whether to proceed before any writes so a "no"
+    // answer leaves no side effects (entity files, config) on disk.
     run_print_summary(&wing_name, file_count, &rooms, &detected);
-    run_confirm_and_save(&detected, yes, &directory)?;
 
     if !run_prompt_proceed(yes)? {
         return Ok(());
     }
 
+    run_confirm_and_save(&detected, yes, &directory)?;
     run_write_config(&wing_name, rooms, &directory)
 }
 
@@ -321,8 +323,25 @@ fn run_derive_wing_name(projects: &[ProjectInfo], directory: &Path) -> String {
             .unwrap_or("project")
     });
 
-    let sanitized = base.to_lowercase().replace([' ', '-'], "_");
+    // Normalize to snake_case, then strip leading non-alphanumeric characters so
+    // the result satisfies MCP's sanitize_name rule (must begin with alphanumeric).
+    // e.g. "-my-lib" → "_my_lib" → "my_lib".
+    let candidate: String = base
+        .to_lowercase()
+        .replace([' ', '-'], "_")
+        .trim_start_matches(|c: char| !c.is_ascii_alphanumeric())
+        .to_string();
+    let sanitized = if candidate.is_empty() {
+        "project".to_string()
+    } else {
+        candidate
+    };
     assert!(!sanitized.is_empty(), "wing name must not be empty");
+    // Postcondition: result must start with an alphanumeric character.
+    debug_assert!(
+        sanitized.starts_with(|c: char| c.is_ascii_alphanumeric()),
+        "wing name must start with alphanumeric"
+    );
     sanitized
 }
 

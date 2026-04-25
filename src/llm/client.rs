@@ -249,11 +249,11 @@ impl LlmProvider for OpenAICompatProvider {
             return (false, "no --llm-endpoint configured".to_string());
         }
         let base = self.endpoint.trim_end_matches('/');
-        let stripped = base
-            .strip_suffix("/chat/completions")
-            .unwrap_or(base)
-            .strip_suffix("/v1")
-            .unwrap_or(base);
+        // Strip suffixes progressively: each unwrap_or falls back to the result
+        // of the prior strip, not back to `base`, so "…/v1/chat/completions"
+        // reduces to "…" in two steps rather than bouncing back to the original.
+        let stripped = base.strip_suffix("/chat/completions").unwrap_or(base);
+        let stripped = stripped.strip_suffix("/v1").unwrap_or(stripped);
         let url = format!("{stripped}/v1/models");
         let mut headers: Vec<(&str, String)> = Vec::new();
         if let Some(key) = &self.api_key {

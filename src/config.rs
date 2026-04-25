@@ -190,20 +190,22 @@ impl MempalaceConfig {
 
     /// Resolve the palace database path, respecting `MEMPALACE_PALACE_PATH` env var.
     ///
-    /// When `MEMPALACE_PALACE_PATH` is set, the value is tilde-expanded and
-    /// resolved to an absolute path so that relative or home-relative paths
-    /// (e.g. `~/palace.db`) work correctly regardless of the working directory.
+    /// When `MEMPALACE_PALACE_PATH` is set to a non-empty value, it is
+    /// tilde-expanded and resolved to an absolute path so that relative or
+    /// home-relative paths (e.g. `~/palace.db`) work correctly regardless of
+    /// the working directory. An empty or whitespace-only value is treated as
+    /// unset (falls through to the configured `palace_path`) rather than
+    /// panicking, because shells often export empty vars when clearing them.
     pub fn palace_db_path(&self) -> PathBuf {
         // Check env override first — it can recover from an empty config value.
-        if let Ok(env_path) = std::env::var("MEMPALACE_PALACE_PATH") {
-            assert!(
-                !env_path.is_empty(),
-                "MEMPALACE_PALACE_PATH must not be empty"
-            );
+        // An empty or whitespace-only env var is treated as unset (fall through).
+        if let Ok(env_path) = std::env::var("MEMPALACE_PALACE_PATH")
+            && !env_path.trim().is_empty()
+        {
             let expanded = expand_tilde(Path::new(&env_path));
             // std::path::absolute is available since Rust 1.79 (MSRV is 1.88).
-            // unwrap_or(expanded.clone()) falls back to the expanded path if the
-            // OS call fails (e.g. the path refers to a not-yet-created directory).
+            // unwrap_or(expanded.clone()) falls back to the expanded path if
+            // the OS call fails (e.g. path refers to a not-yet-created dir).
             let resolved = std::path::absolute(&expanded).unwrap_or(expanded);
             return resolved;
         }
@@ -1232,6 +1234,35 @@ rooms:
                 "config palace_path must be returned when env var is absent"
             );
             assert!(path.is_absolute(), "config path must be absolute");
+        });
+    }
+
+    #[test]
+    fn palace_db_path_env_var_empty_falls_back_to_config() {
+        // An empty MEMPALACE_PALACE_PATH must not panic — it must fall through to
+        // the configured palace_path. Shells commonly export empty vars when users
+        // clear them (e.g. `export MEMPALACE_PALACE_PATH=`).
+        let config = MempalaceConfig {
+            palace_path: PathBuf::from("/config/palace.db"),
+            collection_name: "mempalace_drawers".to_string(),
+            people_map: std::collections::HashMap::new(),
+        };
+        temp_env::with_var("MEMPALACE_PALACE_PATH", Some(""), || {
+            let path = config.palace_db_path();
+            assert_eq!(
+                path,
+                PathBuf::from("/config/palace.db"),
+                "empty env var must fall back to config palace_path"
+            );
+        });
+        // Pair assertion: whitespace-only also falls back.
+        temp_env::with_var("MEMPALACE_PALACE_PATH", Some("   "), || {
+            let path = config.palace_db_path();
+            assert_eq!(
+                path,
+                PathBuf::from("/config/palace.db"),
+                "whitespace-only env var must fall back to config palace_path"
+            );
         });
     }
 }

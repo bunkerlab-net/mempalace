@@ -68,6 +68,8 @@ static BOT_NAME_RES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
 
 // Bot detection patterns for email addresses.
 // `@users.noreply.github.com` is GitHub's privacy alias for real humans — not filtered.
+// expect_used is safe here: patterns are compile-time string literals passed to
+// Regex::new; they are validated at the call site and cannot fail at runtime.
 #[allow(clippy::expect_used)]
 static BOT_EMAIL_RES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     [r"bot@", r"-bot@", r"\[bot\]@"]
