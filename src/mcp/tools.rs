@@ -1493,9 +1493,10 @@ async fn tool_diary_write(connection: &Connection, args: &Value) -> Value {
 
 /// Read the most recent diary entries for an agent, newest first.
 ///
-/// When `wing` is supplied the query is scoped to that wing; when absent it
-/// reads ALL diary entries written by the agent across all wings (identified
-/// by `added_by`), enabling cross-wing diary reads.
+/// When `wing` is supplied the query is scoped to that wing AND to the
+/// requesting agent (`added_by`), so agents cannot read each other's entries
+/// even when they share a wing name. When `wing` is absent the query returns
+/// all diary entries written by the agent across all wings.
 async fn tool_diary_read(connection: &Connection, args: &Value) -> Value {
     let agent_name = str_arg(args, "agent_name");
     let last_n = int_arg(args, "last_n", 10).clamp(1, 100);
@@ -1517,11 +1518,13 @@ async fn tool_diary_read(connection: &Connection, args: &Value) -> Value {
     };
 
     let rows = if let Some(ref wing) = wing_filter {
-        // Wing-scoped query: standard diary read for a specific wing.
+        // Wing-scoped query: entries by this agent in the specific wing only.
+        // added_by is required so one agent cannot read another agent's diary
+        // entries even when they share a wing name.
         query_all(
             connection,
-            "SELECT id, content, extract_mode, filed_at FROM drawers WHERE wing = ? AND room = 'diary' ORDER BY filed_at DESC LIMIT ?",
-            (wing.as_str(), last_n),
+            "SELECT id, content, extract_mode, filed_at FROM drawers WHERE wing = ? AND room = 'diary' AND added_by = ? ORDER BY filed_at DESC LIMIT ?",
+            (wing.as_str(), agent_name.as_str(), last_n),
         )
         .await
     } else {
@@ -2902,6 +2905,68 @@ mod tests {
             assert_eq!(
                 result["total"], 2,
                 "cross-wing read must return entries from all wings"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn diary_read_with_wing_does_not_leak_other_agents_entries() {
+        // Two agents writing to the same explicit wing must not see each other's
+        // entries when they read with a wing filter.
+        with_isolated_env(|connection| async move {
+            // AgentA and AgentB both write to the same wing.
+            tool_diary_write(
+                &connection,
+                &json!({"agent_name": "AgentA", "entry": "AgentA secret", "wing": "shared_wing"}),
+            )
+            .await;
+            tool_diary_write(
+                &connection,
+                &json!({"agent_name": "AgentB", "entry": "AgentB secret", "wing": "shared_wing"}),
+            )
+            .await;
+
+            // AgentA must only see its own entry.
+            let result_a = tool_diary_read(
+                &connection,
+                &json!({"agent_name": "AgentA", "wing": "shared_wing"}),
+            )
+            .await;
+            assert!(
+                result_a.get("error").is_none(),
+                "AgentA read must not error"
+            );
+            assert_eq!(result_a["total"], 1, "AgentA must only see its own entry");
+            let entries_a = result_a["entries"]
+                .as_array()
+                .expect("entries must be array");
+            assert!(
+                entries_a[0]["content"]
+                    .as_str()
+                    .is_some_and(|c| c.contains("AgentA secret")),
+                "AgentA must see its own content, not AgentB's"
+            );
+
+            // AgentB must only see its own entry.
+            let result_b = tool_diary_read(
+                &connection,
+                &json!({"agent_name": "AgentB", "wing": "shared_wing"}),
+            )
+            .await;
+            assert!(
+                result_b.get("error").is_none(),
+                "AgentB read must not error"
+            );
+            assert_eq!(result_b["total"], 1, "AgentB must only see its own entry");
+            let entries_b = result_b["entries"]
+                .as_array()
+                .expect("entries must be array");
+            assert!(
+                entries_b[0]["content"]
+                    .as_str()
+                    .is_some_and(|c| c.contains("AgentB secret")),
+                "AgentB must see its own content, not AgentA's"
             );
         })
         .await;
