@@ -323,14 +323,18 @@ fn run_derive_wing_name(projects: &[ProjectInfo], directory: &Path) -> String {
             .unwrap_or("project")
     });
 
-    // Normalize to snake_case, then strip leading non-alphanumeric characters so
-    // the result satisfies MCP's sanitize_name rule (must begin with alphanumeric).
-    // e.g. "-my-lib" → "_my_lib" → "my_lib".
+    // Normalize to [a-z0-9_] only: split on any non-alphanumeric character (treating
+    // each run as a word separator), filter empty segments, then rejoin with '_'.
+    // This handles any separator character — spaces, hyphens, slashes, colons, etc. —
+    // and naturally avoids leading/trailing underscores and consecutive separators.
+    // e.g. "my-lib/v2" → ["my", "lib", "v2"] → "my_lib_v2"
+    // e.g. "-myproject" → ["myproject"] → "myproject"
     let candidate: String = base
         .to_lowercase()
-        .replace([' ', '-'], "_")
-        .trim_start_matches(|c: char| !c.is_ascii_alphanumeric())
-        .to_string();
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join("_");
     let sanitized = if candidate.is_empty() {
         "project".to_string()
     } else {

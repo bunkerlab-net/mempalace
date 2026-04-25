@@ -93,8 +93,11 @@ pub struct ProjectInfo {
 }
 
 impl ProjectInfo {
-    /// Confidence that this is a real project: 0.99 for repos with user commits,
-    /// 0.7 for repos with any git history, 0.85 for manifest-only repos.
+    /// Confidence that this is a real project.
+    ///
+    /// - `0.99` — user has commits (`is_mine`)
+    /// - `0.7`  — git repo with at least one commit by anyone (`has_git && total_commits > 0`)
+    /// - `0.85` — manifest-only or empty git repo (git marker present but no commits yet)
     pub fn confidence(&self) -> f64 {
         if self.is_mine {
             return 0.99;
@@ -102,7 +105,7 @@ impl ProjectInfo {
         if self.has_git && self.total_commits > 0 {
             return 0.7;
         }
-        // Manifest-only, no git history — still a real name but no commit evidence.
+        // Manifest-only or empty git repo: real project name but no commit evidence.
         0.85
     }
 
@@ -406,7 +409,8 @@ fn git_global_identity() -> (String, String) {
 
 /// Return up to `MAX_COMMITS_PER_REPO` `(name, email)` pairs from `git log`.
 ///
-/// Uses `--format=%aN|%aE` (author name respecting mailmap, author email respecting mailmap).
+/// Uses `%x00` (NUL) as the field separator between `%aN` and `%aE` so that
+/// author names containing `|` or other punctuation are parsed correctly.
 fn git_authors(repo: &Path) -> Vec<(String, String)> {
     assert!(repo.is_dir(), "git_authors: repo must be a directory");
 
@@ -415,13 +419,15 @@ fn git_authors(repo: &Path) -> Vec<(String, String)> {
         &[
             "log",
             &format!("--max-count={MAX_COMMITS_PER_REPO}"),
-            "--format=%aN|%aE",
+            "--format=%aN%x00%aE",
         ],
     );
 
     let mut result: Vec<(String, String)> = Vec::new();
     for line in out.lines() {
-        if let Some((name, email)) = line.split_once('|') {
+        // NUL is the field separator; split_once is safe because author names
+        // cannot contain newlines (git log emits one record per line).
+        if let Some((name, email)) = line.split_once('\0') {
             let name = name.trim().to_string();
             let email = email.trim().to_string();
             if !name.is_empty() {

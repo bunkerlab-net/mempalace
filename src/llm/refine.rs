@@ -472,12 +472,18 @@ fn collect_corpus_text_process_entries(
         if text.len() >= MAX_CORPUS_BYTES {
             break;
         }
+        // Use DirEntry::file_type() which does NOT follow symlinks, preventing
+        // corpus collection from escaping the project tree via symlinked paths.
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
         let path = entry.path();
-        if path.is_dir() {
+        if file_type.is_dir() {
             stack.push((path, depth + 1));
-        } else if path.is_file() {
+        } else if file_type.is_file() {
             collect_corpus_text_read_file(&path, prose_extensions, text);
         }
+        // Symlinks are silently skipped.
     }
 }
 

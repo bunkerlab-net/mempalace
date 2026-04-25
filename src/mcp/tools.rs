@@ -1446,14 +1446,12 @@ async fn tool_diary_write(connection: &Connection, args: &Value) -> Value {
     };
 
     // Use the caller-supplied wing when provided; fall back to derived wing.
-    let wing_raw = str_arg(args, "wing");
-    let wing = if wing_raw.is_empty() {
-        format!("wing_{}", agent_name.to_lowercase().replace(' ', "_"))
-    } else {
-        match sanitize_name(wing_raw, "wing") {
-            Ok(value) => value,
-            Err(error) => return error,
-        }
+    // sanitize_opt_name treats empty/whitespace-only values as None so they
+    // fall through to the derived wing rather than returning an error.
+    let wing = match sanitize_opt_name(str_arg(args, "wing"), "wing") {
+        Ok(Some(w)) => w,
+        Ok(None) => format!("wing_{}", agent_name.to_lowercase().replace(' ', "_")),
+        Err(error) => return error,
     };
     let now = Utc::now();
     let id = Uuid::new_v4().to_string();
@@ -1506,15 +1504,12 @@ async fn tool_diary_read(connection: &Connection, args: &Value) -> Value {
         Err(error) => return error,
     };
 
-    // Resolve wing: explicit > derived > cross-wing (None means all wings).
-    let wing_raw = str_arg(args, "wing");
-    let wing_filter: Option<String> = if wing_raw.is_empty() {
-        None
-    } else {
-        match sanitize_name(wing_raw, "wing") {
-            Ok(value) => Some(value),
-            Err(error) => return error,
-        }
+    // Resolve wing: explicit value → wing-scoped query; absent/whitespace → cross-wing.
+    // sanitize_opt_name treats empty/whitespace-only as None so callers don't need
+    // to distinguish between an absent field and a blank one.
+    let wing_filter: Option<String> = match sanitize_opt_name(str_arg(args, "wing"), "wing") {
+        Ok(value) => value,
+        Err(error) => return error,
     };
 
     let rows = if let Some(ref wing) = wing_filter {

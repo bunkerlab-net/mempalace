@@ -92,7 +92,9 @@ fn confirm_entities_interactive(detected: &DetectedDict, confirmed: &mut Confirm
     println!("\n  Confirm detected entities (enter/y = accept, n = skip):\n");
 
     for entity in &detected.people {
-        if entity.confidence < CONFIDENCE_THRESHOLD {
+        // Mirror the guard in confirm_entities_auto: skip low-confidence and
+        // empty names. Empty names would panic the assert in prompt_name.
+        if entity.confidence < CONFIDENCE_THRESHOLD || entity.name.is_empty() {
             continue;
         }
         if confirm_entities_prompt_name(&entity.name, "person") {
@@ -101,7 +103,7 @@ fn confirm_entities_interactive(detected: &DetectedDict, confirmed: &mut Confirm
     }
 
     for entity in &detected.projects {
-        if entity.confidence < CONFIDENCE_THRESHOLD {
+        if entity.confidence < CONFIDENCE_THRESHOLD || entity.name.is_empty() {
             continue;
         }
         if confirm_entities_prompt_name(&entity.name, "project") {
