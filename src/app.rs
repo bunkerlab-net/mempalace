@@ -116,6 +116,15 @@ pub async fn run(cli: Cli) -> error::Result<()> {
             run_sweep(target, wing).await?;
         }
 
+        Command::Dedup {
+            wing,
+            threshold,
+            dry_run,
+            stats,
+        } => {
+            run_dedup(wing, threshold, dry_run, stats).await?;
+        }
+
         Command::Repair => {
             run_repair().await?;
         }
@@ -232,6 +241,17 @@ fn run_split(
         sessions_min,
         !no_gitignore,
     )
+}
+
+/// Handle the `dedup` sub-command — finds and removes near-duplicate drawers.
+async fn run_dedup(
+    wing: Option<String>,
+    threshold: f64,
+    dry_run: bool,
+    stats: bool,
+) -> error::Result<()> {
+    let (_db, connection, _path) = open_palace().await?;
+    cli::dedup::run(&connection, wing.as_deref(), threshold, dry_run, stats).await
 }
 
 /// Handle the `repair` sub-command — opens the palace and runs repair.

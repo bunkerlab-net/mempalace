@@ -1,0 +1,66 @@
+//! `mempalace dedup` — detect and remove near-duplicate drawers.
+//!
+//! Uses Jaccard similarity on word bags from the inverted index. Groups
+//! drawers by `source_file` and removes the shorter member of any pair
+//! whose similarity exceeds the threshold.
+
+use turso::Connection;
+
+use crate::error::Result;
+use crate::palace::dedup;
+
+/// Run the `dedup` command.
+///
+/// Reports stats whether or not `dry_run` is set. In dry-run mode no
+/// drawers are deleted.
+pub async fn run(
+    connection: &Connection,
+    wing: Option<&str>,
+    threshold: f64,
+    dry_run: bool,
+    stats_only: bool,
+) -> Result<()> {
+    assert!(threshold > 0.0, "run: threshold must be positive");
+    assert!(threshold <= 1.0, "run: threshold must be at most 1.0");
+
+    if dry_run {
+        eprintln!("Dry run — scanning for near-duplicates (threshold = {threshold:.2})…");
+    } else if stats_only {
+        eprintln!("Scanning for near-duplicates (stats only)…");
+    } else {
+        eprintln!("Deduplicating drawers (threshold = {threshold:.2})…");
+    }
+
+    let effective_dry = dry_run || stats_only;
+    let stats = dedup::dedup_drawers(connection, wing, threshold, effective_dry).await?;
+
+    eprintln!("  Groups scanned:    {}", stats.groups_scanned);
+    eprintln!("  Duplicates found:  {}", stats.duplicates_found);
+    if !effective_dry {
+        eprintln!("  Drawers deleted:   {}", stats.deleted);
+    }
+
+    assert!(stats.deleted <= stats.duplicates_found);
+    Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+    use crate::palace::dedup::DEFAULT_THRESHOLD;
+
+    #[tokio::test]
+    async fn run_on_empty_palace_returns_ok() {
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let result = run(&connection, None, DEFAULT_THRESHOLD, true, false).await;
+        assert!(result.is_ok(), "empty palace must not error");
+    }
+
+    #[tokio::test]
+    async fn run_stats_only_returns_ok() {
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let result = run(&connection, None, DEFAULT_THRESHOLD, false, true).await;
+        assert!(result.is_ok(), "stats_only mode must not error");
+    }
+}

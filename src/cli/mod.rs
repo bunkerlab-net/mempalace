@@ -2,6 +2,7 @@
 
 pub mod closet_llm;
 pub mod compress;
+pub mod dedup;
 pub mod diary_ingest;
 pub mod export;
 pub mod hook;
@@ -190,6 +191,25 @@ pub enum Command {
 
     /// Show palace overview and stats
     Status,
+
+    /// Detect and remove near-duplicate drawers using Jaccard similarity
+    Dedup {
+        /// Only deduplicate drawers in this wing
+        #[arg(long)]
+        wing: Option<String>,
+
+        /// Jaccard similarity threshold; pairs above this are considered duplicates
+        #[arg(long, default_value = "0.85")]
+        threshold: f64,
+
+        /// Show what would be deleted without actually deleting
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Print stats only without deleting
+        #[arg(long)]
+        stats: bool,
+    },
 
     /// Rebuild the inverted index (repair corrupted palace)
     Repair,
