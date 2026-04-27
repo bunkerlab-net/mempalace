@@ -1178,6 +1178,7 @@ mod tests {
             limit: 0,
             dry_run: false,
             respect_gitignore: true,
+            include_ignored_paths: vec![],
         };
 
         mine_convos_write_chunks(
@@ -1229,6 +1230,7 @@ mod tests {
             limit: 0,
             dry_run: false,
             respect_gitignore: true,
+            include_ignored_paths: vec![],
         };
 
         mine_convos(&connection, temp_directory.path(), "full", &opts)
@@ -1272,6 +1274,7 @@ mod tests {
             limit: 0,
             dry_run: true,
             respect_gitignore: true,
+            include_ignored_paths: vec![],
         };
 
         mine_convos(&connection, temp_directory.path(), "full", &opts)
@@ -1311,6 +1314,7 @@ mod tests {
             limit: 0,
             dry_run: false,
             respect_gitignore: true,
+            include_ignored_paths: vec![],
         };
 
         // First run: file gets mined.
@@ -1362,6 +1366,7 @@ mod tests {
             limit: 0,
             dry_run: false,
             respect_gitignore: true,
+            include_ignored_paths: vec![],
         };
 
         mine_convos(&connection, temp_directory.path(), "full", &opts)
@@ -1400,6 +1405,7 @@ mod tests {
             limit: 0,
             dry_run: false,
             respect_gitignore: true,
+            include_ignored_paths: vec![],
         };
 
         mine_convos(&connection, temp_directory.path(), "full", &opts)
@@ -1451,6 +1457,7 @@ mod tests {
             limit: 1,
             dry_run: false,
             respect_gitignore: true,
+            include_ignored_paths: vec![],
         };
 
         mine_convos(&connection, temp_directory.path(), "full", &opts)
@@ -1475,6 +1482,7 @@ mod tests {
             limit: 0,
             dry_run: false,
             respect_gitignore: true,
+            include_ignored_paths: vec![],
         };
         mine_convos(&connection2, temp_directory.path(), "full", &opts_unlimited)
             .await
@@ -1513,6 +1521,7 @@ mod tests {
             limit: 0,
             dry_run: false,
             respect_gitignore: true,
+            include_ignored_paths: vec![],
         };
 
         let result = mine_convos(&connection, &file_path, "full", &opts).await;

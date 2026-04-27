@@ -21,6 +21,13 @@ pub struct MineParams {
     pub dry_run: bool,
     /// If `true`, respect `.gitignore` rules when scanning (default: true).
     pub respect_gitignore: bool,
+    /// Paths to include even when `respect_gitignore` is `true`.
+    ///
+    /// After the gitignore-aware scan, any path listed here (or any path
+    /// under a directory listed here) that is not already in the scan
+    /// results is appended verbatim. Ignored when `respect_gitignore` is
+    /// `false` since all paths are already included.
+    pub include_ignored_paths: Vec<std::path::PathBuf>,
 }
 
 /// Files larger than this are skipped — prevents OOM on huge files.
@@ -450,6 +457,41 @@ fn mine_load_config(project_dir: &Path, override_wing: Option<&str>) -> Result<P
     })
 }
 
+/// Append any `include_ignored_paths` entries not already in `scanned`.
+///
+/// Called by [`mine`] after the gitignore-aware scan to honour the
+/// `--include-ignored` CLI flag. Each entry in `include_paths` is
+/// canonicalised; entries that cannot be canonicalised or that are not
+/// regular files are skipped silently. If `include_paths` is empty the
+/// function is a no-op and returns `scanned` unchanged.
+fn mine_apply_include_ignored(
+    mut scanned: Vec<PathBuf>,
+    include_paths: &[PathBuf],
+) -> Vec<PathBuf> {
+    if include_paths.is_empty() {
+        return scanned;
+    }
+    let original_len = scanned.len();
+    for candidate in include_paths {
+        let Ok(canonical) = candidate.canonicalize() else {
+            continue;
+        };
+        assert!(
+            canonical.is_absolute(),
+            "canonicalize must produce an absolute path"
+        );
+        if canonical.is_file() && !scanned.contains(&canonical) {
+            scanned.push(canonical);
+        }
+    }
+    // Pair assertion: we only added entries, never removed any.
+    assert!(
+        scanned.len() >= original_len,
+        "mine_apply_include_ignored: result must be at least as large as input"
+    );
+    scanned
+}
+
 /// Mine a project directory into the palace.
 pub async fn mine(connection: &Connection, project_dir: &Path, opts: &MineParams) -> Result<()> {
     if !project_dir.is_dir() {
@@ -488,7 +530,8 @@ pub async fn mine(connection: &Connection, project_dir: &Path, opts: &MineParams
             keywords: vec![],
         });
     }
-    let all_files = scan_project_with_opts(&project_dir, opts.respect_gitignore);
+    let scanned = scan_project_with_opts(&project_dir, opts.respect_gitignore);
+    let all_files = mine_apply_include_ignored(scanned, &opts.include_ignored_paths);
     let files: Vec<_> = if opts.limit == 0 {
         all_files
     } else {
@@ -833,6 +876,7 @@ mod tests {
             limit: 0,
             dry_run: false,
             respect_gitignore: false,
+            include_ignored_paths: vec![],
         }
     }
 
@@ -918,6 +962,67 @@ mod tests {
             stored_wing, "config-wing",
             "empty wing must fall back to config"
         );
+    }
+
+    #[test]
+    fn apply_include_ignored_empty_list_is_noop() {
+        // An empty `include_paths` must return the original list unchanged.
+        let dir = tempfile::tempdir().expect("tempdir must succeed");
+        let file = dir.path().join("a.txt");
+        std::fs::write(&file, "content").expect("write must succeed");
+        let canonical = file.canonicalize().expect("canonicalize must succeed");
+        let input = vec![canonical.clone()];
+        let result = mine_apply_include_ignored(input.clone(), &[]);
+        assert_eq!(
+            result.len(),
+            input.len(),
+            "no-op when include_paths is empty"
+        );
+        assert_eq!(result[0], canonical, "result must preserve original entry");
+    }
+
+    #[test]
+    fn apply_include_ignored_adds_new_file() {
+        // A path not already in `scanned` must be appended after the scan list.
+        let dir = tempfile::tempdir().expect("tempdir must succeed");
+        let existing_file = dir.path().join("existing.txt");
+        let extra_file = dir.path().join("extra.txt");
+        std::fs::write(&existing_file, "existing").expect("write must succeed");
+        std::fs::write(&extra_file, "extra").expect("write must succeed");
+        let existing_canonical = existing_file
+            .canonicalize()
+            .expect("canonicalize must succeed");
+        let extra_canonical = extra_file
+            .canonicalize()
+            .expect("canonicalize must succeed");
+        let scanned = vec![existing_canonical.clone()];
+        let include_paths = vec![extra_file];
+        let result = mine_apply_include_ignored(scanned, &include_paths);
+        assert_eq!(result.len(), 2, "extra file must be appended");
+        // Pair assertion: the extra file's canonical path must be in the result.
+        assert!(
+            result.contains(&extra_canonical),
+            "result must contain the extra file"
+        );
+    }
+
+    #[test]
+    fn apply_include_ignored_does_not_duplicate() {
+        // A path already in `scanned` must not be added a second time.
+        let dir = tempfile::tempdir().expect("tempdir must succeed");
+        let file = dir.path().join("file.txt");
+        std::fs::write(&file, "content").expect("write must succeed");
+        let canonical = file.canonicalize().expect("canonicalize must succeed");
+        let scanned = vec![canonical.clone()];
+        let include_paths = vec![file];
+        let result = mine_apply_include_ignored(scanned, &include_paths);
+        assert_eq!(
+            result.len(),
+            1,
+            "already-present file must not be duplicated"
+        );
+        // Pair assertion: the path in the result must be the original canonical.
+        assert_eq!(result[0], canonical);
     }
 
     #[test]

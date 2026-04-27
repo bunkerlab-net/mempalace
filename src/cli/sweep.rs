@@ -29,7 +29,7 @@ pub async fn run(connection: &Connection, target: &Path, wing: &str) -> Result<(
         let file_content = std::fs::read_to_string(target).unwrap_or_default();
         let result = sweeper::sweep(connection, target, wing).await?;
         println!(
-            "  Swept {}: +{} new, {} already present.",
+            "  Swept {}: +{} new / {} present",
             target.display(),
             result.drawers_added,
             result.drawers_already_present,
@@ -40,13 +40,23 @@ pub async fn run(connection: &Connection, target: &Path, wing: &str) -> Result<(
         }
     } else if target.is_dir() {
         let result = sweeper::sweep_directory(connection, target, wing).await?;
+        if result.files_attempted == 0 {
+            return Err(crate::error::Error::Other(format!(
+                "sweep: no .jsonl files found in {}",
+                target.display()
+            )));
+        }
+        let files_skipped = result
+            .files_attempted
+            .saturating_sub(result.files_succeeded);
         println!(
-            "  Swept {}/{} files from {}: +{} new, {} already present.",
-            result.files_succeeded,
-            result.files_attempted,
+            "  Swept {}: +{} new / {} present / {} skipped  ({}/{} files)",
             target.display(),
             result.drawers_added,
             result.drawers_already_present,
+            files_skipped,
+            result.files_succeeded,
+            result.files_attempted,
         );
     } else {
         return Err(crate::error::Error::Other(format!(
@@ -142,6 +152,25 @@ mod tests {
             drawer_count(&connection, "test_wing").await,
             1,
             "run must insert one drawer for the single user message"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_empty_directory_returns_error() {
+        // Empty directory branch: run must return Err when no .jsonl files exist.
+        // This distinguishes a misconfigured target from a silent no-op.
+        let dir = tempdir().expect("must create temp dir");
+        let (_database, connection) = crate::test_helpers::test_db().await;
+        let result = run(&connection, dir.path(), "test_wing").await;
+        assert!(
+            result.is_err(),
+            "run must return Err for a directory with no .jsonl files"
+        );
+        // Pair assertion: the error message must mention the target path.
+        let error_string = result.err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(
+            error_string.contains("no .jsonl"),
+            "error message must mention missing .jsonl files"
         );
     }
 

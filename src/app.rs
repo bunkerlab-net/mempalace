@@ -43,6 +43,7 @@ pub async fn run(cli: Cli) -> error::Result<()> {
             directory,
             yes,
             no_gitignore,
+            lang,
             llm,
             llm_provider,
             llm_model,
@@ -56,7 +57,7 @@ pub async fn run(cli: Cli) -> error::Result<()> {
                 endpoint: llm_endpoint,
                 api_key: llm_api_key,
             };
-            cli::init::run(&directory, yes, no_gitignore, &llm_opts)?;
+            cli::init::run(&directory, yes, no_gitignore, &lang, &llm_opts)?;
         }
 
         Command::Mine {
@@ -68,6 +69,7 @@ pub async fn run(cli: Cli) -> error::Result<()> {
             limit,
             dry_run,
             no_gitignore,
+            include_ignored,
         } => {
             run_mine(
                 palace_override,
@@ -79,6 +81,7 @@ pub async fn run(cli: Cli) -> error::Result<()> {
                 limit,
                 dry_run,
                 no_gitignore,
+                include_ignored,
             )
             .await?;
         }
@@ -138,12 +141,16 @@ pub async fn run(cli: Cli) -> error::Result<()> {
             run_dedup(palace_override, wing, threshold, dry_run, stats).await?;
         }
 
-        Command::Repair => {
+        Command::Repair { skip_confirm: _ } => {
             run_repair(palace_override).await?;
         }
 
-        Command::Mcp => {
-            run_mcp(palace_override).await?;
+        Command::Mcp { setup } => {
+            if setup {
+                println!("claude mcp add mempalace -- mempalace mcp");
+            } else {
+                run_mcp(palace_override).await?;
+            }
         }
 
         Command::Export {
@@ -390,6 +397,7 @@ async fn run_mine(
     limit: usize,
     dry_run: bool,
     no_gitignore: bool,
+    include_ignored: Vec<std::path::PathBuf>,
 ) -> error::Result<()> {
     let opts = palace::miner::MineParams {
         wing,
@@ -397,6 +405,7 @@ async fn run_mine(
         limit,
         dry_run,
         respect_gitignore: !no_gitignore,
+        include_ignored_paths: include_ignored,
     };
     match mode.as_str() {
         "projects" => {
@@ -440,6 +449,7 @@ mod tests {
             0,
             false,
             false,
+            vec![],
         )
         .await;
         assert!(result.is_err(), "unknown mine mode must return Err");

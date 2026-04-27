@@ -50,6 +50,10 @@ pub enum Command {
         #[arg(long)]
         no_gitignore: bool,
 
+        /// BCP-47 language codes for entity detection (comma-separated; default: en)
+        #[arg(long, value_delimiter = ',')]
+        lang: Vec<String>,
+
         /// Enable LLM-assisted entity refinement
         #[arg(long)]
         llm: bool,
@@ -81,7 +85,7 @@ pub enum Command {
         mode: String,
 
         /// Extraction mode for convos: exchange or general
-        #[arg(long, default_value = "exchange")]
+        #[arg(long, default_value = "exchange", alias = "extract")]
         extract_mode: String,
 
         /// Override the wing name (default: from mempalace.yaml or directory name)
@@ -103,6 +107,10 @@ pub enum Command {
         /// Disable .gitignore filtering (include all files regardless of gitignore rules)
         #[arg(long)]
         no_gitignore: bool,
+
+        /// Paths to include even when gitignore filtering is active (repeatable)
+        #[arg(long)]
+        include_ignored: Vec<PathBuf>,
     },
 
     /// Search the palace
@@ -119,7 +127,7 @@ pub enum Command {
         room: Option<String>,
 
         /// Number of results
-        #[arg(long, default_value = "10")]
+        #[arg(long, default_value = "5")]
         results: usize,
     },
 
@@ -216,10 +224,18 @@ pub enum Command {
     },
 
     /// Rebuild the inverted index (repair corrupted palace)
-    Repair,
+    Repair {
+        /// Skip the confirmation prompt (non-interactive / CI mode)
+        #[arg(long, short = 'y')]
+        skip_confirm: bool,
+    },
 
     /// Run as MCP server (JSON-RPC over stdio)
-    Mcp,
+    Mcp {
+        /// Print the `claude mcp add` install command and exit without starting the server
+        #[arg(long)]
+        setup: bool,
+    },
 
     /// Export palace drawers to markdown files on disk
     Export {

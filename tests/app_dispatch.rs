@@ -24,6 +24,7 @@ async fn app_run_init_creates_config_with_yes_flag() {
             directory: temp_directory.path().to_path_buf(),
             yes: true,
             no_gitignore: false,
+            lang: vec![],
             llm: false,
             llm_provider: "ollama".to_string(),
             llm_model: "gemma3:4b".to_string(),
@@ -147,6 +148,7 @@ async fn app_run_mine_with_projects_mode_and_db() {
             limit: 0,
             dry_run: false,
             no_gitignore: false,
+            include_ignored: vec![],
         },
     };
 
@@ -205,6 +207,7 @@ async fn app_run_mine_with_convos_mode_and_db() {
             limit: 0,
             dry_run: false,
             no_gitignore: false,
+            include_ignored: vec![],
         },
     };
 
@@ -491,7 +494,7 @@ async fn app_run_repair_with_palace() {
 
     let cli_instance = Cli {
         palace: None,
-        command: Command::Repair,
+        command: Command::Repair { skip_confirm: true },
     };
 
     temp_env::async_with_vars(
