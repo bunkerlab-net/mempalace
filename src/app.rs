@@ -79,8 +79,13 @@ pub async fn run(cli: Cli) -> error::Result<()> {
             run_search(query, wing, room, results).await?;
         }
 
-        Command::WakeUp { wing } => {
-            run_wakeup(wing).await?;
+        Command::WakeUp {
+            wing,
+            room,
+            query,
+            results,
+        } => {
+            run_wakeup(wing, room, query, results).await?;
         }
 
         Command::Compress {
@@ -118,6 +123,14 @@ pub async fn run(cli: Cli) -> error::Result<()> {
         Command::Mcp => {
             run_mcp().await?;
         }
+
+        Command::Instructions { name } => {
+            cli::instructions::run(&name)?;
+        }
+
+        Command::Hook { hook, harness } => {
+            cli::hook::run(&hook, &harness).await?;
+        }
     }
 
     Ok(())
@@ -142,9 +155,21 @@ async fn run_search(
 }
 
 /// Handle the `wakeup` sub-command — opens the palace and runs wake-up.
-async fn run_wakeup(wing: Option<String>) -> error::Result<()> {
+async fn run_wakeup(
+    wing: Option<String>,
+    room: Option<String>,
+    query: Option<String>,
+    results: usize,
+) -> error::Result<()> {
     let (_db, connection, _path) = open_palace().await?;
-    cli::wakeup::run(&connection, wing.as_deref()).await
+    cli::wakeup::run(
+        &connection,
+        wing.as_deref(),
+        room.as_deref(),
+        query.as_deref(),
+        results,
+    )
+    .await
 }
 
 /// Handle the `split` sub-command — expands `~` then delegates to the splitter.

@@ -330,6 +330,27 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
                 },
                 "required": ["wing", "room"]
             }
+        },
+        {
+            "name": "mempalace_hook_settings",
+            "description": "Get or set hook behavior. silent_save: true = save directly (no MCP clutter), false = legacy blocking. desktop_toast: true = show desktop notification via notify-send. Call with no args to view current settings.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "silent_save": {"type": "boolean", "description": "True = silent direct save, false = blocking MCP calls"},
+                    "desktop_toast": {"type": "boolean", "description": "True = show desktop toast via notify-send"}
+                }
+            }
+        },
+        {
+            "name": "mempalace_memories_filed_away",
+            "description": "Check if a recent palace checkpoint was saved by the stop hook. Returns message count and timestamp of the last silent save.",
+            "inputSchema": {"type": "object", "properties": {}}
+        },
+        {
+            "name": "mempalace_reconnect",
+            "description": "Confirm palace database connectivity and return the current drawer count. Use after external scripts modified the palace directly.",
+            "inputSchema": {"type": "object", "properties": {}}
         }
     ]).as_array()
         .expect("json!([...]) is always Value::Array; as_array() cannot return None here")
@@ -345,10 +366,10 @@ mod tests {
     #[test]
     fn tool_definitions_count() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 26, "expected 26 tool definitions");
+        assert_eq!(tools.len(), 29, "expected 29 tool definitions");
         // Verify the first and last tool names as a structural sanity check.
         assert_eq!(tools[0]["name"], "mempalace_status");
-        assert_eq!(tools[25]["name"], "mempalace_follow_tunnels");
+        assert_eq!(tools[28]["name"], "mempalace_reconnect");
     }
 
     #[test]

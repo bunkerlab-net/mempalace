@@ -1,7 +1,9 @@
 //! CLI command definitions and handlers for the `mempalace` binary.
 
 pub mod compress;
+pub mod hook;
 pub mod init;
+pub mod instructions;
 pub mod repair;
 pub mod search;
 pub mod split;
@@ -112,11 +114,23 @@ pub enum Command {
         results: usize,
     },
 
-    /// Generate wake-up context (L0 + L1)
+    /// Generate wake-up context (L0 + L1; L2 when --wing/--room is given; L3 with --query)
     WakeUp {
-        /// Filter by wing
+        /// Filter by wing (also enables L2 on-demand recall for that wing)
         #[arg(long)]
         wing: Option<String>,
+
+        /// Filter by room within the wing (requires --wing; enables L2 room-scoped recall)
+        #[arg(long)]
+        room: Option<String>,
+
+        /// Run a keyword search query and append L3 deep-search results
+        #[arg(long)]
+        query: Option<String>,
+
+        /// Number of results for L2 recall and L3 search
+        #[arg(long, default_value = "20")]
+        results: usize,
     },
 
     /// Compress drawers using AAAK dialect
@@ -178,4 +192,21 @@ pub enum Command {
 
     /// Run as MCP server (JSON-RPC over stdio)
     Mcp,
+
+    /// Print packaged skill instructions for a named `MemPalace` command
+    Instructions {
+        /// Instruction name: help, init, mine, search, or status
+        name: String,
+    },
+
+    /// Run a hook handler (session-start, stop, or precompact)
+    Hook {
+        /// Hook name: session-start, stop, or precompact
+        #[arg(long)]
+        hook: String,
+
+        /// Harness name: claude-code or codex
+        #[arg(long, default_value = "claude-code")]
+        harness: String,
+    },
 }

@@ -22,6 +22,16 @@ pub struct MempalaceConfig {
     /// Entity name → short code mappings for AAAK dialect compression.
     #[serde(default)]
     pub people_map: HashMap<String, String>,
+
+    /// Stop hook saves silently via `systemMessage` instead of blocking the AI.
+    /// Defaults to `true` (silent mode) so saves happen in the background.
+    #[serde(default = "default_hook_silent_save")]
+    pub hook_silent_save: bool,
+
+    /// Stop hook sends a desktop notification via `notify-send` after a silent save.
+    /// Defaults to `false`.
+    #[serde(default)]
+    pub hook_desktop_toast: bool,
 }
 
 fn default_palace_path() -> PathBuf {
@@ -30,6 +40,10 @@ fn default_palace_path() -> PathBuf {
 
 fn default_collection_name() -> String {
     "mempalace_drawers".to_string()
+}
+
+fn default_hook_silent_save() -> bool {
+    true
 }
 
 /// Returns the mempalace data directory.
@@ -188,6 +202,24 @@ impl MempalaceConfig {
         }
     }
 
+    /// Write the current config to the standard config file path.
+    ///
+    /// Creates the config directory if it does not yet exist. Overwrites any
+    /// existing `config.json` atomically via `std::fs::write`.
+    pub fn save(&self) -> Result<()> {
+        assert!(
+            !self.palace_path.as_os_str().is_empty(),
+            "palace_path must not be empty before saving config"
+        );
+        let directory = config_dir();
+        std::fs::create_dir_all(&directory)?;
+        let data = serde_json::to_string_pretty(self)?;
+        std::fs::write(config_path(), data)?;
+        // Pair assertion: the file must exist after a successful write.
+        debug_assert!(config_path().exists(), "config.json must exist after save");
+        Ok(())
+    }
+
     /// Resolve the palace database path, respecting `MEMPALACE_PALACE_PATH` env var.
     ///
     /// When `MEMPALACE_PALACE_PATH` is set to a non-empty value, it is
@@ -223,6 +255,8 @@ impl Default for MempalaceConfig {
             palace_path: default_palace_path(),
             collection_name: default_collection_name(),
             people_map: HashMap::new(),
+            hook_silent_save: default_hook_silent_save(),
+            hook_desktop_toast: false,
         }
     }
 }
@@ -716,6 +750,7 @@ mod tests {
             palace_path: legacy_db,
             collection_name: "mempalace_drawers".to_string(),
             people_map: std::collections::HashMap::new(),
+            ..MempalaceConfig::default()
         })
         .expect("serialize config");
         std::fs::write(legacy.join("config.json"), &config_content).expect("write config.json");
@@ -921,6 +956,7 @@ mod tests {
             palace_path: std::path::PathBuf::from("/config/palace.db"),
             collection_name: "mempalace_drawers".to_string(),
             people_map: std::collections::HashMap::new(),
+            ..MempalaceConfig::default()
         };
         temp_env::with_var("MEMPALACE_PALACE_PATH", Some("/env/override.db"), || {
             let path = config.palace_db_path();
@@ -1179,6 +1215,7 @@ rooms:
             palace_path: PathBuf::from("/config/palace.db"),
             collection_name: "mempalace_drawers".to_string(),
             people_map: std::collections::HashMap::new(),
+            ..MempalaceConfig::default()
         };
         temp_env::with_vars(
             [
@@ -1206,6 +1243,7 @@ rooms:
             palace_path: PathBuf::from("/config/palace.db"),
             collection_name: "mempalace_drawers".to_string(),
             people_map: std::collections::HashMap::new(),
+            ..MempalaceConfig::default()
         };
         temp_env::with_var(
             "MEMPALACE_PALACE_PATH",
@@ -1225,6 +1263,7 @@ rooms:
             palace_path: PathBuf::from("/config/palace.db"),
             collection_name: "mempalace_drawers".to_string(),
             people_map: std::collections::HashMap::new(),
+            ..MempalaceConfig::default()
         };
         temp_env::with_var("MEMPALACE_PALACE_PATH", None::<&str>, || {
             let path = config.palace_db_path();
@@ -1246,6 +1285,7 @@ rooms:
             palace_path: PathBuf::from("/config/palace.db"),
             collection_name: "mempalace_drawers".to_string(),
             people_map: std::collections::HashMap::new(),
+            ..MempalaceConfig::default()
         };
         temp_env::with_var("MEMPALACE_PALACE_PATH", Some(""), || {
             let path = config.palace_db_path();

@@ -8,10 +8,59 @@ use crate::db::query_all;
 use crate::error::Result;
 use crate::palace::drawer;
 
-/// Backup the palace database and rebuild the inverted word index.
+/// Backup the palace database, scan for inconsistencies, and rebuild the inverted word index.
 pub async fn run(connection: &Connection, palace_path: &Path) -> Result<()> {
     run_create_backup(connection, palace_path).await?;
+    run_scan(connection).await?;
     run_rebuild_index(connection).await
+}
+
+/// Scan for index inconsistencies and report them.
+///
+/// Reports two classes of problem:
+///   - Drawers with no `drawer_words` entries (content was never indexed).
+///   - Orphaned `drawer_words` rows pointing to non-existent drawers.
+///
+/// Both classes are fixed by the rebuild step that follows, so this function
+/// is informational only — it does not modify the database.
+async fn run_scan(connection: &Connection) -> Result<()> {
+    let unindexed_rows = query_all(
+        connection,
+        "SELECT id FROM drawers WHERE id NOT IN (SELECT DISTINCT drawer_id FROM drawer_words)",
+        (),
+    )
+    .await?;
+    let unindexed_count = unindexed_rows.len();
+
+    let orphan_rows = query_all(
+        connection,
+        "SELECT count(*) FROM drawer_words WHERE drawer_id NOT IN (SELECT id FROM drawers)",
+        (),
+    )
+    .await?;
+    let orphan_count: i64 = orphan_rows
+        .first()
+        .and_then(|row| row.get_value(0).ok())
+        .and_then(|cell| cell.as_integer().copied())
+        .unwrap_or(0);
+
+    if unindexed_count > 0 {
+        println!(
+            "Scan found {unindexed_count} drawer(s) with no index entries — will be re-indexed"
+        );
+    }
+    if orphan_count > 0 {
+        println!(
+            "Scan found {orphan_count} orphaned index row(s) — will be cleared during rebuild"
+        );
+    }
+    if unindexed_count == 0 && orphan_count == 0 {
+        println!("Scan: no inconsistencies found");
+    }
+
+    // Postconditions: counts are non-negative.
+    debug_assert!(orphan_count >= 0, "orphan count must be non-negative");
+    Ok(())
 }
 
 /// Checkpoint the WAL and copy the palace database (plus sidecar files) to `.db.bak`.

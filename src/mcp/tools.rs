@@ -65,6 +65,9 @@ pub async fn dispatch(connection: &Connection, name: &str, args: &Value) -> Valu
         "mempalace_follow_tunnels" => tool_follow_tunnels(connection, args).await,
         "mempalace_diary_write" => tool_diary_write(connection, args).await,
         "mempalace_diary_read" => tool_diary_read(connection, args).await,
+        "mempalace_hook_settings" => tool_hook_settings(args),
+        "mempalace_memories_filed_away" => tool_memories_filed_away(),
+        "mempalace_reconnect" => tool_reconnect(connection).await,
         _ => json!({"error": format!("Unknown tool: {name}"), "public": true}),
     }
 }
@@ -1558,6 +1561,116 @@ async fn tool_diary_read(connection: &Connection, args: &Value) -> Value {
             })
         }
         Err(error) => json!({"error": error.to_string()}),
+    }
+}
+
+/// Get or set the hook behavior settings (`hook_silent_save`, `hook_desktop_toast`).
+///
+/// Call with no arguments to read current settings. Pass one or both boolean
+/// fields to update them. Returns the current (post-update) values.
+fn tool_hook_settings(args: &Value) -> Value {
+    let mut config = match crate::config::MempalaceConfig::load() {
+        Ok(c) => c,
+        Err(e) => return json!({"success": false, "error": e.to_string()}),
+    };
+
+    let mut updated: Vec<String> = Vec::new();
+
+    if let Some(silent) = args.get("silent_save").and_then(Value::as_bool) {
+        config.hook_silent_save = silent;
+        updated.push(format!("silent_save \u{2192} {silent}"));
+    }
+    if let Some(toast) = args.get("desktop_toast").and_then(Value::as_bool) {
+        config.hook_desktop_toast = toast;
+        updated.push(format!("desktop_toast \u{2192} {toast}"));
+    }
+
+    if !updated.is_empty()
+        && let Err(save_error) = config.save()
+    {
+        return json!({"success": false, "error": save_error.to_string()});
+    }
+
+    // Re-read after potential write to confirm the on-disk state.
+    let current = crate::config::MempalaceConfig::load().unwrap_or(config);
+    let mut result = json!({
+        "success": true,
+        "settings": {
+            "silent_save": current.hook_silent_save,
+            "desktop_toast": current.hook_desktop_toast,
+        },
+    });
+    if !updated.is_empty() {
+        result["updated"] = json!(updated);
+    }
+    result
+}
+
+/// Acknowledge the latest silent-mode checkpoint written by the stop hook.
+///
+/// Reads and deletes `hook_state/last_checkpoint`. Returns message count and
+/// timestamp if a checkpoint was filed, or `status: "quiet"` when none exists.
+fn tool_memories_filed_away() -> Value {
+    let ack_file = crate::config::config_dir()
+        .join("hook_state")
+        .join("last_checkpoint");
+
+    if !ack_file.is_file() {
+        return json!({
+            "status": "quiet",
+            "message": "No recent journal entry",
+            "count": 0,
+            "timestamp": null,
+        });
+    }
+
+    match std::fs::read_to_string(&ack_file) {
+        Ok(content) => {
+            // Delete the ack file so the next call reflects only new activity.
+            let _ = std::fs::remove_file(&ack_file);
+            match serde_json::from_str::<Value>(&content) {
+                Ok(data) => {
+                    let msgs = data.get("msgs").and_then(Value::as_i64).unwrap_or(0);
+                    let ts = data.get("ts").cloned().unwrap_or(Value::Null);
+                    json!({
+                        "status": "ok",
+                        "message": format!("\u{2726} {msgs} messages tucked into drawers"),
+                        "count": msgs,
+                        "timestamp": ts,
+                    })
+                }
+                Err(_) => {
+                    json!({
+                        "status": "error",
+                        "message": "\u{2726} Journal entry filed in the palace",
+                        "count": 0,
+                        "timestamp": null,
+                    })
+                }
+            }
+        }
+        Err(e) => json!({"status": "error", "error": e.to_string()}),
+    }
+}
+
+/// Confirm palace database connectivity and return the current drawer count.
+///
+/// On turso/SQLite there is no in-memory HNSW index to invalidate, so this
+/// tool is a lightweight heartbeat: it opens the DB, runs `SELECT count(*)`,
+/// and returns the result. It is provided for harness compatibility with the
+/// Python implementation's `mempalace_reconnect`.
+async fn tool_reconnect(connection: &Connection) -> Value {
+    match query_all(connection, "SELECT count(*) FROM drawers", ()).await {
+        Ok(rows) => {
+            let count: i64 = rows
+                .first()
+                .and_then(|row| row.get_value(0).ok())
+                .and_then(|cell| cell.as_integer().copied())
+                .unwrap_or(0);
+            assert!(count >= 0, "drawer count must be non-negative");
+            json!({"success": true, "message": "Connected to palace", "drawers": count})
+        }
+        Err(e) => json!({"success": false, "error": e.to_string()}),
     }
 }
 

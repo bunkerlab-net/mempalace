@@ -285,7 +285,12 @@ async fn app_run_wakeup_with_palace() {
         .to_string();
 
     let cli_instance = Cli {
-        command: Command::WakeUp { wing: None },
+        command: Command::WakeUp {
+            wing: None,
+            room: None,
+            query: None,
+            results: 20,
+        },
     };
 
     temp_env::async_with_vars(
@@ -311,6 +316,96 @@ async fn app_run_wakeup_with_palace() {
     assert!(
         palace_db_path.exists(),
         "palace.db must exist after wakeup creates it via open_palace"
+    );
+}
+
+#[tokio::test]
+async fn app_run_wakeup_with_wing_exercises_l2_recall() {
+    // Command::WakeUp with --wing set must execute the L2 on-demand recall path.
+    let palace_directory = tempfile::tempdir()
+        .expect("failed to create temporary palace directory for wakeup-l2 test");
+    let palace_db_path = palace_directory.path().join("palace.db");
+    let palace_db_path_string = palace_db_path
+        .to_str()
+        .expect("palace database path must be valid UTF-8")
+        .to_string();
+
+    let cli_instance = Cli {
+        command: Command::WakeUp {
+            wing: Some("test_wing".to_string()),
+            room: None,
+            query: None,
+            results: 5,
+        },
+    };
+
+    temp_env::async_with_vars(
+        [
+            (
+                "MEMPALACE_DIR",
+                Some(palace_directory.path().to_str().expect("valid UTF-8")),
+            ),
+            (
+                "MEMPALACE_PALACE_PATH",
+                Some(palace_db_path_string.as_str()),
+            ),
+        ],
+        async {
+            mempalace::app::run(cli_instance)
+                .await
+                .expect("app::run with Command::WakeUp --wing should succeed");
+        },
+    )
+    .await;
+
+    assert!(
+        palace_db_path.exists(),
+        "palace.db must exist after wakeup l2 test"
+    );
+}
+
+#[tokio::test]
+async fn app_run_wakeup_with_query_exercises_l3_search() {
+    // Command::WakeUp with --query set must execute the L3 deep-search path.
+    let palace_directory = tempfile::tempdir()
+        .expect("failed to create temporary palace directory for wakeup-l3 test");
+    let palace_db_path = palace_directory.path().join("palace.db");
+    let palace_db_path_string = palace_db_path
+        .to_str()
+        .expect("palace database path must be valid UTF-8")
+        .to_string();
+
+    let cli_instance = Cli {
+        command: Command::WakeUp {
+            wing: None,
+            room: None,
+            query: Some("architecture".to_string()),
+            results: 5,
+        },
+    };
+
+    temp_env::async_with_vars(
+        [
+            (
+                "MEMPALACE_DIR",
+                Some(palace_directory.path().to_str().expect("valid UTF-8")),
+            ),
+            (
+                "MEMPALACE_PALACE_PATH",
+                Some(palace_db_path_string.as_str()),
+            ),
+        ],
+        async {
+            mempalace::app::run(cli_instance)
+                .await
+                .expect("app::run with Command::WakeUp --query should succeed");
+        },
+    )
+    .await;
+
+    assert!(
+        palace_db_path.exists(),
+        "palace.db must exist after wakeup l3 test"
     );
 }
 
