@@ -70,8 +70,11 @@ CREATE TABLE IF NOT EXISTS compressed (
     compression_ratio REAL,
     wing TEXT,
     room TEXT,
+    source_file TEXT,
     filed_at TEXT DEFAULT (datetime('now'))
 );
+
+CREATE INDEX IF NOT EXISTS idx_compressed_source ON compressed(source_file);
 
 -- Explicit cross-wing tunnels created by agents when they notice a connection
 -- between two specific rooms in different wings/projects.  Stored in SQLite
@@ -139,6 +142,14 @@ pub async fn ensure_schema(connection: &Connection) -> Result<()> {
     ignore_duplicate_column(
         connection
             .execute("ALTER TABLE triples ADD COLUMN adapter_name TEXT", ())
+            .await,
+    )?;
+
+    // Migration: add source_file to compressed for per-file closet operations.
+    // Fresh databases get it from the DDL; older databases need ALTER TABLE.
+    ignore_duplicate_column(
+        connection
+            .execute("ALTER TABLE compressed ADD COLUMN source_file TEXT", ())
             .await,
     )?;
 

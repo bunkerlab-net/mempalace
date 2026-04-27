@@ -7,12 +7,15 @@
 //! Bring-your-own-LLM. Endpoint is any OpenAI-compatible Chat Completions URL.
 //! Configure via env: `LLM_ENDPOINT`, `LLM_KEY`, `LLM_MODEL` or CLI flags.
 
+use std::collections::HashSet;
+
 use serde::Deserialize;
 use turso::Connection;
 
 use crate::db::query_all;
 use crate::error::Result;
 use crate::llm::client::LlmProvider;
+use crate::palace::closets;
 
 /// Maximum content characters sent to the LLM per drawer.
 const MAX_CONTENT_CHARS: usize = 30_000;
@@ -104,6 +107,12 @@ pub async fn regenerate_closets(
         drawers.len()
     };
 
+    // Purge stale closets before regenerating so that chunks deleted from the
+    // drawers table do not leave orphaned entries in `compressed`.
+    if !dry_run && !drawers.is_empty() {
+        regenerate_closets_purge_sources(connection, &drawers[..limit]).await?;
+    }
+
     let mut stats = RegenerateStats::default();
     for drawer in drawers.into_iter().take(limit) {
         if dry_run {
@@ -179,6 +188,37 @@ async fn regenerate_closets_fetch_drawers(
     Ok(drawers)
 }
 
+/// Called by `regenerate_closets` to purge stale closets before regenerating.
+///
+/// Collects unique non-empty source paths from `drawers` and calls
+/// [`closets::purge_file_closets`] for each, so that chunks removed from the
+/// `drawers` table do not leave orphaned entries in `compressed`.
+async fn regenerate_closets_purge_sources(
+    connection: &Connection,
+    drawers: &[DrawerRow],
+) -> Result<()> {
+    assert!(
+        !drawers.is_empty(),
+        "regenerate_closets_purge_sources: drawers must not be empty"
+    );
+
+    let mut seen: HashSet<&str> = HashSet::new();
+    for drawer in drawers {
+        if drawer.source_file.is_empty() {
+            continue;
+        }
+        if seen.insert(drawer.source_file.as_str()) {
+            closets::purge_file_closets(connection, &drawer.source_file).await?;
+        }
+    }
+
+    assert!(
+        seen.len() <= drawers.len(),
+        "regenerate_closets_purge_sources: unique source count must not exceed drawer count"
+    );
+    Ok(())
+}
+
 /// Called by `regenerate_closets` to process one drawer through the LLM and upsert the result.
 ///
 /// Builds a user prompt from the drawer's metadata and content, calls the provider,
@@ -223,14 +263,7 @@ async fn regenerate_closets_process_drawer(
         )));
     }
 
-    // Byte lengths for display-only ratio; precision loss negligible for practical sizes.
-    #[allow(clippy::cast_precision_loss)]
-    let ratio = drawer.content.len() as f64 / compressed.len().max(1) as f64;
-
-    connection.execute(
-        "INSERT OR REPLACE INTO compressed (id, content, compression_ratio, wing, room) VALUES (?, ?, ?, ?, ?)",
-        (drawer.id.as_str(), compressed.as_str(), ratio, drawer.wing.as_str(), drawer.room.as_str()),
-    ).await?;
+    closets::upsert_closet_lines(connection, &drawer.id, &drawer.source_file, &compressed).await?;
 
     Ok(())
 }

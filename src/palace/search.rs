@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::path::Path;
 
@@ -6,6 +7,7 @@ use turso::Connection;
 
 use crate::db;
 use crate::error::Result;
+use crate::palace::closets;
 use crate::palace::entity_registry::EntityRegistry;
 
 /// BM25 saturation parameter: controls how quickly TF saturates (k1=1.5 is standard).
@@ -84,8 +86,21 @@ pub async fn search_memories(
         search_memories_doc_lengths(connection, &candidate_ids),
     )?;
 
-    let results =
+    let mut results =
         search_memories_compute_bm25(candidates, &tf_data, &doc_lengths, &words, n_results);
+
+    // Apply closet rank boosts: source files with matching topics in `compressed`
+    // receive a multiplicative relevance multiplier proportional to hit rank.
+    if !results.is_empty() {
+        let source_paths = search_memories_collect_sources(&results);
+        if !source_paths.is_empty()
+            && let Ok(boost_map) =
+                closets::search_closet_boost(connection, &source_paths, &words).await
+            && !boost_map.is_empty()
+        {
+            search_memories_apply_closet_boost(&mut results, &boost_map);
+        }
+    }
 
     // Postcondition: result count bounded by the requested limit.
     debug_assert!(results.len() <= n_results);
@@ -573,6 +588,56 @@ fn search_memories_enrich_with_people(mut words: Vec<String>, query: &str) -> Ve
         "search_memories_enrich_with_people: result must not be empty"
     );
     words
+}
+
+/// Collect unique, non-empty source paths from `results`.
+///
+/// Called by [`search_memories`] to assemble the path list for
+/// [`closets::search_closet_boost`]. Preserves result order while deduplicating.
+fn search_memories_collect_sources(results: &[SearchResult]) -> Vec<String> {
+    assert!(
+        !results.is_empty(),
+        "search_memories_collect_sources: results must not be empty"
+    );
+
+    let mut seen: HashSet<&str> = HashSet::new();
+    let paths: Vec<String> = results
+        .iter()
+        .filter(|result| !result.source_path.is_empty())
+        .filter(|result| seen.insert(result.source_path.as_str()))
+        .map(|result| result.source_path.clone())
+        .collect();
+
+    assert!(
+        paths.len() <= results.len(),
+        "search_memories_collect_sources: unique paths must not exceed result count"
+    );
+    paths
+}
+
+/// Apply per-source-file closet rank boosts to `results` in place.
+///
+/// Called by [`search_memories`] when [`closets::search_closet_boost`] returns a
+/// non-empty map. Each matching result's relevance is scaled by `1.0 + boost` so
+/// the effect is proportional to the existing BM25 score.
+fn search_memories_apply_closet_boost(
+    results: &mut [SearchResult],
+    boost_map: &HashMap<String, f64>,
+) {
+    assert!(
+        !results.is_empty(),
+        "search_memories_apply_closet_boost: results must not be empty"
+    );
+    assert!(
+        !boost_map.is_empty(),
+        "search_memories_apply_closet_boost: boost_map must not be empty"
+    );
+
+    for result in results.iter_mut() {
+        if let Some(&boost) = boost_map.get(&result.source_path) {
+            result.relevance *= 1.0 + boost;
+        }
+    }
 }
 
 #[cfg(test)]

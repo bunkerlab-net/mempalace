@@ -67,11 +67,14 @@ async fn run_compress_row(
             println!("  ({original_len} → {compressed_len} bytes, {ratio:.1}x)\n");
         }
     } else {
-        connection.execute(
-            "INSERT OR REPLACE INTO compressed (id, content, compression_ratio, wing, room) VALUES (?, ?, ?, ?, ?)",
-            (id, compressed, ratio, wing_val, room),
-        )
-        .await?;
+        connection
+            .execute(
+                "INSERT OR REPLACE INTO compressed \
+             (id, content, compression_ratio, wing, room, source_file) \
+             VALUES (?, ?, ?, ?, ?, ?)",
+                (id, compressed, ratio, wing_val, room, source),
+            )
+            .await?;
     }
 
     Ok((original_len, compressed_len))
