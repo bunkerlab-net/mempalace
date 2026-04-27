@@ -4,6 +4,7 @@ mod config;
 mod db;
 mod dialect;
 mod error;
+mod i18n;
 mod kg;
 mod llm;
 mod mcp;

@@ -5,6 +5,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
+use crate::i18n::{EntityPatterns, get_entity_patterns};
 use crate::palace::entities::DetectedEntity;
 
 // Regex statics are compile-time literals; .expect() cannot fail at runtime.
@@ -29,13 +30,8 @@ static MULTI_RE: LazyLock<Regex> = LazyLock::new(|| {
     )
 });
 
-// Regex pattern is a compile-time literal and cannot fail to compile at runtime.
-#[allow(clippy::expect_used)]
-// Matches gendered and plural pronouns to score person-like proximity.
-static PRONOUN_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(she|her|hers|he|him|his|they|them|their)\b")
-        .expect("pronoun regex is a compile-time literal and cannot fail to compile")
-});
+/// Maximum bytes read per file during entity detection to bound memory usage.
+const BYTES_PER_FILE_MAX: usize = 5000;
 
 /// Detection results grouped by type.
 pub struct DetectionResult {
@@ -44,38 +40,25 @@ pub struct DetectionResult {
     pub uncertain: Vec<DetectedEntity>,
 }
 
-/// Scan files and detect entity candidates.
-pub fn detect_entities(file_paths: &[&Path], files_max: usize) -> DetectionResult {
+/// Scan files and detect entity candidates using the specified locale languages.
+///
+/// Language codes are BCP 47 tags (e.g., `"en"`, `"de"`, `"pt-br"`). Stopwords
+/// and pronoun patterns are merged across all requested locales so multi-language
+/// content is handled correctly without false-positive candidates.
+pub fn detect_entities(
+    file_paths: &[&Path],
+    files_max: usize,
+    languages: &[&str],
+) -> DetectionResult {
     assert!(files_max > 0, "detect_entities: files_max must be positive");
-    let mut all_text = String::new();
-    let mut all_lines = Vec::new();
-    let bytes_per_file_max = 5000;
+    assert!(
+        !languages.is_empty(),
+        "detect_entities: languages must not be empty"
+    );
 
-    for (i, path) in file_paths.iter().enumerate() {
-        if i >= files_max {
-            break;
-        }
-        if let Ok(content) = fs::read_to_string(path) {
-            let truncated = if content.len() > bytes_per_file_max {
-                // Walk backward from the byte limit to find a valid UTF-8 char
-                // boundary.  Slicing at a raw byte offset can land mid-codepoint
-                // for multi-byte characters (emoji, CJK, accented letters) and panic.
-                let mut end = bytes_per_file_max;
-                while end > 0 && !content.is_char_boundary(end) {
-                    end -= 1;
-                }
-                &content[..end]
-            } else {
-                &content
-            };
-            all_text.push_str(truncated);
-            all_text.push('\n');
-            all_lines.extend(truncated.lines().map(String::from));
-        }
-    }
+    let (all_text, all_lines) = detect_entities_load_text(file_paths, files_max);
 
-    // Guard against the case where no files were readable: extract_candidates
-    // has an assert!(!text.is_empty()) that would panic on empty input.
+    // Guard: extract_candidates asserts non-empty text, so return early here.
     if all_text.is_empty() {
         return DetectionResult {
             people: vec![],
@@ -83,7 +66,11 @@ pub fn detect_entities(file_paths: &[&Path], files_max: usize) -> DetectionResul
             uncertain: vec![],
         };
     }
-    let candidates = extract_candidates(&all_text);
+
+    let patterns = get_entity_patterns(languages);
+    let pronoun_re = detect_entities_build_pronoun_re(&patterns);
+    let candidates = extract_candidates(&all_text, &patterns);
+
     if candidates.is_empty() {
         return DetectionResult {
             people: vec![],
@@ -100,9 +87,8 @@ pub fn detect_entities(file_paths: &[&Path], files_max: usize) -> DetectionResul
     sorted_candidates.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     for (name, frequency) in sorted_candidates {
-        let scores = score_entity(&name, &all_text, &all_lines);
+        let scores = score_entity(&name, &all_text, &all_lines, &pronoun_re, &patterns);
         let entity = classify_entity(&name, frequency, &scores);
-
         match entity.entity_type.as_str() {
             "person" => people.push(entity),
             "project" => projects.push(entity),
@@ -111,12 +97,70 @@ pub fn detect_entities(file_paths: &[&Path], files_max: usize) -> DetectionResul
     }
 
     detect_entities_sort_and_truncate(&mut people, &mut projects, &mut uncertain);
-
     DetectionResult {
         people,
         projects,
         uncertain,
     }
+}
+
+/// Called by `detect_entities` to load and concatenate file content.
+///
+/// Reads up to `files_max` files from `file_paths`, truncating each at 5 000 bytes
+/// on a valid UTF-8 boundary to keep memory bounded for large files.
+/// Returns `(combined_text, lines)`.
+fn detect_entities_load_text(file_paths: &[&Path], files_max: usize) -> (String, Vec<String>) {
+    assert!(
+        files_max > 0,
+        "detect_entities_load_text: files_max must be positive"
+    );
+
+    let mut all_text = String::new();
+    let mut all_lines = Vec::new();
+
+    for (index, path) in file_paths.iter().enumerate() {
+        if index >= files_max {
+            break;
+        }
+        if let Ok(content) = fs::read_to_string(path) {
+            let truncated = if content.len() > BYTES_PER_FILE_MAX {
+                // Walk backward from the byte limit to find a valid UTF-8 char
+                // boundary. Slicing at a raw byte offset can panic on multi-byte chars.
+                let mut end = BYTES_PER_FILE_MAX;
+                while end > 0 && !content.is_char_boundary(end) {
+                    end -= 1;
+                }
+                &content[..end]
+            } else {
+                &content
+            };
+            all_text.push_str(truncated);
+            all_text.push('\n');
+            all_lines.extend(truncated.lines().map(String::from));
+        }
+    }
+
+    (all_text, all_lines)
+}
+
+/// Called by `detect_entities` to build the pronoun proximity regex from locale patterns.
+///
+/// Joins all pronoun patterns from `EntityPatterns` into a single alternation.
+/// Falls back to hard-coded English pronouns when the locale list is empty.
+fn detect_entities_build_pronoun_re(patterns: &EntityPatterns) -> Regex {
+    // Locale-specific patterns already contain `\b` boundaries.
+    let joined = if patterns.pronoun_patterns.is_empty() {
+        r"(?i)\b(she|her|hers|he|him|his|they|them|their)\b".to_string()
+    } else {
+        format!("(?i)({})", patterns.pronoun_patterns.join("|"))
+    };
+    // The fallback pattern is a compile-time literal and cannot fail.
+    // Runtime patterns from locales are validated JSON — failures are silent.
+    #[allow(clippy::expect_used)]
+    Regex::new(&joined).unwrap_or_else(|_| {
+        Regex::new(r"(?i)\b(she|her|hers|he|him|his|they|them|their)\b")
+            .expect("English pronoun fallback regex is a compile-time literal")
+    })
 }
 
 /// Called by `detect_entities` to keep that function within the 70-line limit.
@@ -205,29 +249,54 @@ fn extract_candidates_stop_words() -> HashSet<&'static str> {
 
 /// Extract capitalized-word candidates from `text`, filtered by stop words and a
 /// minimum frequency of 3 occurrences.  Returns a map of candidate name to count.
-fn extract_candidates(text: &str) -> HashMap<String, usize> {
+///
+/// `patterns` provides locale-specific stopwords (merged from requested languages)
+/// and supplemental multi-word patterns for non-Latin scripts. Locale stopwords
+/// are checked alongside the base English stop list from `extract_candidates_stop_words`.
+fn extract_candidates(text: &str, patterns: &EntityPatterns) -> HashMap<String, usize> {
     assert!(
         !text.is_empty(),
         "extract_candidates: text must not be empty"
     );
-    let stops = extract_candidates_stop_words();
+    let base_stops = extract_candidates_stop_words();
+    let locale_stops = &patterns.stopwords;
 
     let mut counts: HashMap<String, usize> = HashMap::new();
 
     for cap in SINGLE_RE.captures_iter(text) {
         let word = &cap[1];
-        if word.len() > 1 && !stops.contains(word.to_lowercase().as_str()) {
+        let lower = word.to_lowercase();
+        if word.len() > 1 && !base_stops.contains(lower.as_str()) && !locale_stops.contains(&lower)
+        {
             *counts.entry(word.to_string()).or_insert(0) += 1;
         }
     }
 
     for cap in MULTI_RE.captures_iter(text) {
         let phrase = &cap[1];
-        if !phrase
-            .split_whitespace()
-            .any(|w| stops.contains(w.to_lowercase().as_str()))
-        {
+        let is_stopped = phrase.split_whitespace().any(|token| {
+            let lower = token.to_lowercase();
+            base_stops.contains(lower.as_str()) || locale_stops.contains(&lower)
+        });
+        if !is_stopped {
             *counts.entry(phrase.to_string()).or_insert(0) += 1;
+        }
+    }
+
+    // Locale-specific multi-word patterns supplement MULTI_RE for non-Latin scripts
+    // whose word boundaries are not captured by the base ASCII regex.
+    for pattern in &patterns.multi_word_patterns {
+        if let Ok(re) = Regex::new(pattern) {
+            for cap in re.captures_iter(text) {
+                let phrase = &cap[1];
+                let is_stopped = phrase.split_whitespace().any(|token| {
+                    let lower = token.to_lowercase();
+                    base_stops.contains(lower.as_str()) || locale_stops.contains(&lower)
+                });
+                if !is_stopped {
+                    *counts.entry(phrase.to_string()).or_insert(0) += 1;
+                }
+            }
         }
     }
 
@@ -251,9 +320,18 @@ struct EntityScores {
 }
 
 /// Score person-related signals: verb patterns, dialogue markers, pronouns, direct address.
+///
+/// `pronoun_re` is the compiled locale pronoun regex built from `EntityPatterns`.
 /// Returns `(score, category_count)` where `category_count` is the number of distinct
 /// signal categories that fired (verb, dialogue, pronoun, addressed — max 4).
-fn score_entity_person(name: &str, escaped: &str, text: &str, lines: &[String]) -> (i32, usize) {
+fn score_entity_person(
+    name: &str,
+    escaped: &str,
+    text: &str,
+    lines: &[String],
+    pronoun_re: &Regex,
+    patterns: &EntityPatterns,
+) -> (i32, usize) {
     let mut score = 0i32;
     let mut category_count: usize = 0;
 
@@ -294,7 +372,7 @@ fn score_entity_person(name: &str, escaped: &str, text: &str, lines: &[String]) 
         category_count += 1;
     }
 
-    let pronoun_hits = score_entity_person_pronoun_score(name, lines);
+    let pronoun_hits = score_entity_person_pronoun_score(name, lines, pronoun_re);
     if pronoun_hits > 0 {
         score += pronoun_hits * 2;
         category_count += 1;
@@ -310,15 +388,17 @@ fn score_entity_person(name: &str, escaped: &str, text: &str, lines: &[String]) 
         }
     }
 
-    (score, category_count)
+    let (locale_score, locale_categories) =
+        score_entity_person_locale_signals(escaped, text, patterns);
+    (score + locale_score, category_count + locale_categories)
 }
 
 /// Called by `score_entity_person` to keep that function within the 70-line limit.
 ///
-/// Scan `lines` for lines containing `name` and count how many have a gendered or
-/// plural pronoun within a ±2-line window, indicating a person-like antecedent.
+/// Scan `lines` for lines containing `name` and count how many have a pronoun from
+/// `pronoun_re` within a ±2-line window, indicating a person-like antecedent.
 /// Returns the raw hit count (caller multiplies by weight).
-fn score_entity_person_pronoun_score(name: &str, lines: &[String]) -> i32 {
+fn score_entity_person_pronoun_score(name: &str, lines: &[String], pronoun_re: &Regex) -> i32 {
     assert!(!name.is_empty(), "name must not be empty");
 
     let name_lower = name.to_lowercase();
@@ -328,12 +408,12 @@ fn score_entity_person_pronoun_score(name: &str, lines: &[String]) -> i32 {
     let escaped = regex::escape(&name_lower);
     let name_re = Regex::new(&format!(r"(?i)\b{escaped}\b")).ok();
     let mut pronoun_hits = 0i32;
-    for (i, line) in lines.iter().enumerate() {
+    for (index, line) in lines.iter().enumerate() {
         if name_re.as_ref().is_some_and(|re| re.is_match(line)) {
-            let start = i.saturating_sub(2);
-            let end = (i + 3).min(lines.len());
+            let start = index.saturating_sub(2);
+            let end = (index + 3).min(lines.len());
             let window: String = lines[start..end].join(" ");
-            if PRONOUN_RE.is_match(&window) {
+            if pronoun_re.is_match(&window) {
                 pronoun_hits += 1;
             }
         }
@@ -345,8 +425,77 @@ fn score_entity_person_pronoun_score(name: &str, lines: &[String]) -> i32 {
     pronoun_hits
 }
 
+/// Called by `score_entity_person` to apply locale-specific verb, dialogue, and direct-address signals.
+///
+/// Each template substitutes `{name}` with `escaped` before compilation.
+/// Verb hits weight 2×, dialogue 3×, direct-address 4× — matching the hardcoded English weights.
+/// Returns `(score, category_count)` for the locale signal categories that fired.
+fn score_entity_person_locale_signals(
+    escaped: &str,
+    text: &str,
+    patterns: &EntityPatterns,
+) -> (i32, usize) {
+    assert!(
+        !escaped.is_empty(),
+        "score_entity_person_locale_signals: escaped must not be empty"
+    );
+
+    let mut score = 0i32;
+    let mut category_count: usize = 0;
+
+    let mut verb_hit = false;
+    for template in &patterns.person_verb_patterns {
+        let pat = template.replace("{name}", escaped);
+        if let Ok(re) = Regex::new(&format!("(?i){pat}")) {
+            let count = re.find_iter(text).count();
+            if count > 0 {
+                score += i32::try_from(count).unwrap_or(i32::MAX) * 2;
+                verb_hit = true;
+            }
+        }
+    }
+    if verb_hit {
+        category_count += 1;
+    }
+
+    let mut dialogue_hit = false;
+    for template in &patterns.dialogue_patterns {
+        let pat = template.replace("{name}", escaped);
+        if let Ok(re) = Regex::new(&format!("(?im){pat}")) {
+            let count = re.find_iter(text).count();
+            if count > 0 {
+                score += i32::try_from(count).unwrap_or(i32::MAX) * 3;
+                dialogue_hit = true;
+            }
+        }
+    }
+    if dialogue_hit {
+        category_count += 1;
+    }
+
+    let mut address_hit = false;
+    for template in &patterns.direct_address_patterns {
+        let pat = template.replace("{name}", escaped);
+        if let Ok(re) = Regex::new(&format!("(?i){pat}")) {
+            let count = re.find_iter(text).count();
+            if count > 0 {
+                score += i32::try_from(count).unwrap_or(i32::MAX) * 4;
+                address_hit = true;
+            }
+        }
+    }
+    if address_hit {
+        category_count += 1;
+    }
+
+    // Postcondition: at most 3 categories (verb, dialogue, direct-address).
+    debug_assert!(category_count <= 3);
+
+    (score, category_count)
+}
+
 /// Score project-related signals for `escaped` against `text`: build/deploy verbs and versioned references.
-fn score_entity_project(escaped: &str, text: &str) -> i32 {
+fn score_entity_project(escaped: &str, text: &str, patterns: &EntityPatterns) -> i32 {
     let mut score = 0i32;
 
     let project_pats = [
@@ -377,21 +526,40 @@ fn score_entity_project(escaped: &str, text: &str) -> i32 {
         }
     }
 
+    // Locale-specific project verb templates supplement the hardcoded English verbs above.
+    for template in &patterns.project_verb_patterns {
+        let pat = template.replace("{name}", escaped);
+        if let Ok(re) = Regex::new(&format!("(?i){pat}")) {
+            let count = re.find_iter(text).count();
+            if count > 0 {
+                score += i32::try_from(count).unwrap_or(i32::MAX) * 2;
+            }
+        }
+    }
+
     score
 }
 
 /// Compute person and project signal scores for `name` against `text` and `lines`.
 ///
+/// `pronoun_re` is the locale pronoun regex from `detect_entities_build_pronoun_re`.
 /// Returns an [`EntityScores`] combining the outputs of `score_entity_person`
 /// and `score_entity_project`.
-fn score_entity(name: &str, text: &str, lines: &[String]) -> EntityScores {
+fn score_entity(
+    name: &str,
+    text: &str,
+    lines: &[String],
+    pronoun_re: &Regex,
+    patterns: &EntityPatterns,
+) -> EntityScores {
     assert!(!name.is_empty(), "score_entity: name must not be empty");
     let escaped = regex::escape(name);
 
-    let (person_score, person_category_count) = score_entity_person(name, &escaped, text, lines);
+    let (person_score, person_category_count) =
+        score_entity_person(name, &escaped, text, lines, pronoun_re, patterns);
     EntityScores {
         person_score,
-        project_score: score_entity_project(&escaped, text),
+        project_score: score_entity_project(&escaped, text, patterns),
         person_category_count,
     }
 }
@@ -550,12 +718,19 @@ mod tests {
     use std::io::Write as _;
     use tempfile;
 
+    /// Return a compiled English pronoun regex for use in tests that call `score_entity`
+    /// directly.  Production code builds this via `detect_entities_build_pronoun_re`.
+    fn test_pronoun_re() -> Regex {
+        Regex::new(r"(?i)\b(she|her|hers|he|him|his|they|them|their)\b")
+            .expect("hardcoded English pronoun regex cannot fail to compile")
+    }
+
     #[test]
     fn extract_candidates_finds_capitalized_names() {
         // "Alice" appears 5 times — well above the frequency threshold of 3.
         let text =
             "Alice went to the store. Alice bought milk. Alice came home. Alice cooked. Alice ate.";
-        let candidates = extract_candidates(text);
+        let candidates = extract_candidates(text, &get_entity_patterns(&["en"]));
         assert!(
             candidates.contains_key("Alice"),
             "Alice should be detected as a candidate"
@@ -570,7 +745,7 @@ mod tests {
     fn extract_candidates_ignores_low_frequency() {
         // "Bartholomew" appears only once — below the threshold of 3.
         let text = "Bartholomew visited the library. Xander Xander Xander was there.";
-        let candidates = extract_candidates(text);
+        let candidates = extract_candidates(text, &get_entity_patterns(&["en"]));
         assert!(
             !candidates.contains_key("Bartholomew"),
             "Single-occurrence names should be filtered out"
@@ -586,7 +761,7 @@ mod tests {
         // "John Smith" repeated 3 times should be detected as a multi-word candidate.
         let text =
             "John Smith led the team. John Smith reviewed the code. John Smith merged the PR.";
-        let candidates = extract_candidates(text);
+        let candidates = extract_candidates(text, &get_entity_patterns(&["en"]));
         assert!(
             candidates.contains_key("John Smith"),
             "Multi-word names should be detected"
@@ -606,7 +781,7 @@ mod tests {
         // even at high frequency.
         let text =
             "The quick fox. The lazy dog. The bright sun. This is great. This is fine. This works.";
-        let candidates = extract_candidates(text);
+        let candidates = extract_candidates(text, &get_entity_patterns(&["en"]));
         assert!(
             !candidates.contains_key("The"),
             "Stop word 'The' should be filtered"
@@ -622,7 +797,13 @@ mod tests {
         let name = "Alice";
         let text = "Alice said hello. Alice asked a question. Alice told a story.";
         let lines: Vec<String> = text.lines().map(String::from).collect();
-        let scores = score_entity(name, text, &lines);
+        let scores = score_entity(
+            name,
+            text,
+            &lines,
+            &test_pronoun_re(),
+            &get_entity_patterns(&["en"]),
+        );
         assert!(
             scores.person_score > 0,
             "Person score should be positive when speech verbs are present"
@@ -638,7 +819,13 @@ mod tests {
         let text =
             "building Mempalace from scratch. deploying Mempalace to prod. shipping Mempalace v2.";
         let lines: Vec<String> = text.lines().map(String::from).collect();
-        let scores = score_entity("Mempalace", text, &lines);
+        let scores = score_entity(
+            "Mempalace",
+            text,
+            &lines,
+            &test_pronoun_re(),
+            &get_entity_patterns(&["en"]),
+        );
         assert!(
             scores.project_score > 0,
             "Project score should be positive when build verbs are present"
@@ -705,7 +892,7 @@ mod tests {
             .expect("write should succeed");
 
         let paths: Vec<&Path> = vec![file_path.as_path()];
-        let result = detect_entities(&paths, 10);
+        let result = detect_entities(&paths, 10, &["en"]);
 
         // At least one category should be non-empty since "Alice" appears 5 times
         // with person-verb signals.
@@ -779,7 +966,7 @@ Clara said the migration is complete. He agreed.\n";
             detect_entities_with_project_entities_setup_files();
 
         let paths: Vec<&Path> = vec![file_path_one.as_path(), file_path_two.as_path()];
-        let result = detect_entities(&paths, 10);
+        let result = detect_entities(&paths, 10, &["en"]);
 
         // Postcondition: detection found entities across multiple categories.
         let entities_total = result.people.len() + result.projects.len() + result.uncertain.len();
@@ -838,7 +1025,7 @@ Clara said the migration is complete. He agreed.\n";
         // all_text is non-empty after accumulation. With a single empty file,
         // all_text is "\n" which is non-empty but has no capitalized words.
         let paths: Vec<&Path> = vec![file_path.as_path()];
-        let result = detect_entities(&paths, 10);
+        let result = detect_entities(&paths, 10, &["en"]);
 
         assert!(result.people.is_empty(), "No people from empty file");
         assert!(result.projects.is_empty(), "No projects from empty file");

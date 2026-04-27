@@ -20,6 +20,7 @@ pub mod db;
 pub mod dialect;
 pub mod error;
 pub mod extract;
+pub mod i18n;
 pub mod kg;
 pub mod llm;
 pub mod mcp;
