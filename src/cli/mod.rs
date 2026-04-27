@@ -340,3 +340,49 @@ fn parse_results_nonzero(raw: &str) -> Result<usize, String> {
     }
     Ok(count)
 }
+
+#[cfg(test)]
+// Test code — .expect() with a descriptive message is acceptable; panics are the correct failure mode.
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::parse_results_nonzero;
+
+    #[test]
+    fn parse_results_nonzero_accepts_positive_number() {
+        // A valid positive string must parse to its numeric value without error.
+        let result = parse_results_nonzero("5");
+        assert!(result.is_ok(), "positive number '5' must be accepted");
+        assert_eq!(
+            result.expect("already asserted Ok"),
+            5,
+            "parsed value must equal 5"
+        );
+    }
+
+    #[test]
+    fn parse_results_nonzero_rejects_zero() {
+        // Zero is explicitly forbidden — the flag requires at least one result.
+        let result = parse_results_nonzero("0");
+        assert!(
+            result.is_err(),
+            "zero must be rejected by parse_results_nonzero"
+        );
+        let error_message = result.err().unwrap_or_default();
+        assert!(
+            error_message.contains("at least 1"),
+            "error message must mention 'at least 1'; got: {error_message}"
+        );
+    }
+
+    #[test]
+    fn parse_results_nonzero_rejects_non_numeric_input() {
+        // Non-numeric strings must produce a parse error with the raw input echoed.
+        let result = parse_results_nonzero("abc");
+        assert!(result.is_err(), "non-numeric input must be rejected");
+        let error_message = result.err().unwrap_or_default();
+        assert!(
+            error_message.contains("abc"),
+            "error message must echo the invalid input; got: {error_message}"
+        );
+    }
+}

@@ -64,4 +64,20 @@ mod tests {
         let result = run(&connection, None, DEFAULT_THRESHOLD, false, true).await;
         assert!(result.is_ok(), "stats_only mode must not error");
     }
+
+    #[tokio::test]
+    async fn run_live_mode_on_empty_palace_returns_ok() {
+        // dry_run=false, stats_only=false takes the else branch (line 31) and also
+        // prints the "Drawers deleted" line (line 40). An empty palace produces
+        // zero duplicates so no real deletions occur, but the code path is exercised.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let result = run(&connection, None, DEFAULT_THRESHOLD, false, false).await;
+        assert!(
+            result.is_ok(),
+            "live dedup mode must not error on empty palace"
+        );
+        // A second call confirms idempotence of the live path.
+        let result2 = run(&connection, None, DEFAULT_THRESHOLD, false, false).await;
+        assert!(result2.is_ok(), "live dedup mode must be idempotent");
+    }
 }

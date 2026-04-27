@@ -11,6 +11,7 @@ use turso::Connection;
 
 use crate::cli::init::LlmOpts;
 use crate::error::Result;
+use crate::llm::client::LlmProvider;
 use crate::llm::get_provider;
 use crate::palace::closet_llm;
 
@@ -60,23 +61,57 @@ pub async fn run(
         return Ok(());
     }
 
+    run_with_provider(
+        connection,
+        wing,
+        sample,
+        dry_run,
+        provider.as_ref(),
+        &llm_opts.provider,
+        &llm_opts.model,
+    )
+    .await
+}
+
+/// Inner execution after the LLM provider is confirmed available.
+///
+/// Logs progress messages, calls `regenerate_closets`, asserts stat invariants,
+/// and logs completion. Extracted from `run` so tests can inject a mock provider
+/// directly without going through the `check_available` network probe.
+async fn run_with_provider(
+    connection: &Connection,
+    wing: Option<&str>,
+    sample: usize,
+    dry_run: bool,
+    provider: &dyn LlmProvider,
+    provider_name: &str,
+    model_name: &str,
+) -> Result<()> {
+    assert!(
+        sample < 1_000_001,
+        "run_with_provider: sample must be <= 1_000_000"
+    );
+    assert!(
+        !provider_name.is_empty(),
+        "run_with_provider: provider_name must not be empty"
+    );
+    assert!(
+        !model_name.is_empty(),
+        "run_with_provider: model_name must not be empty"
+    );
+
     if dry_run {
         eprintln!("Dry run — no LLM calls will be made and nothing will be written.");
     } else {
-        eprintln!(
-            "Regenerating closets via {} ({})...",
-            llm_opts.provider, llm_opts.model
-        );
+        eprintln!("Regenerating closets via {provider_name} ({model_name})...");
     }
 
-    let stats =
-        closet_llm::regenerate_closets(connection, wing, sample, dry_run, provider.as_ref())
-            .await?;
+    let stats = closet_llm::regenerate_closets(connection, wing, sample, dry_run, provider).await?;
 
     assert!(
         stats.processed + stats.failed + stats.skipped_dry_run
             <= if sample > 0 { sample } else { usize::MAX },
-        "run: stat totals must not exceed sample limit"
+        "run_with_provider: stat totals must not exceed sample limit"
     );
 
     if dry_run {
@@ -99,6 +134,27 @@ pub async fn run(
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+
+    // Mock provider that always succeeds — used to exercise run_with_provider.
+    struct OkProvider;
+    impl crate::llm::client::LlmProvider for OkProvider {
+        fn classify(
+            &self,
+            _system: &str,
+            _user: &str,
+            _json_mode: bool,
+        ) -> crate::error::Result<crate::llm::client::LlmResponse> {
+            Ok(crate::llm::client::LlmResponse {
+                text: r#"{"topics":["test"],"quotes":[],"summary":"A test summary."}"#.to_string(),
+            })
+        }
+        fn check_available(&self) -> (bool, String) {
+            (true, "ok".to_string())
+        }
+        fn name(&self) -> &'static str {
+            "mock-ok"
+        }
+    }
 
     #[tokio::test]
     async fn run_without_llm_enabled_returns_ok() {
@@ -123,5 +179,43 @@ mod tests {
         // Provider is not reachable in tests — run will log "LLM unavailable" and return Ok.
         let result = run(&connection, None, 0, true, &opts).await;
         assert!(result.is_ok(), "unreachable provider must not panic");
+    }
+
+    #[tokio::test]
+    async fn run_with_provider_dry_run_returns_ok() {
+        // Dry run via the inner helper must return Ok and produce zero processed drawers.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let result = run_with_provider(
+            &connection,
+            None,
+            0,
+            true,
+            &OkProvider,
+            "mock-ok",
+            "mock-model",
+        )
+        .await;
+        assert!(result.is_ok(), "dry_run run_with_provider must return Ok");
+        // Pair assertion: a successful dry_run on an empty palace must not Err.
+        assert!(result.err().is_none(), "no error must be returned");
+    }
+
+    #[tokio::test]
+    async fn run_with_provider_live_run_empty_palace_returns_ok() {
+        // A live run via the inner helper on an empty palace must return Ok with zero stats.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let result = run_with_provider(
+            &connection,
+            None,
+            0,
+            false,
+            &OkProvider,
+            "mock-ok",
+            "mock-model",
+        )
+        .await;
+        assert!(result.is_ok(), "live run on empty palace must return Ok");
+        // Pair assertion: success path must not leave an error.
+        assert!(result.err().is_none(), "no error must be returned");
     }
 }

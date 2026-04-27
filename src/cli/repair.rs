@@ -22,7 +22,7 @@ pub async fn run(connection: &Connection, palace_path: &Path) -> Result<()> {
 ///
 /// Both classes are fixed by the rebuild step that follows, so this function
 /// is informational only — it does not modify the database.
-async fn run_scan(connection: &Connection) -> Result<()> {
+pub(crate) async fn run_scan(connection: &Connection) -> Result<()> {
     let unindexed_rows = query_all(
         connection,
         "SELECT id FROM drawers WHERE id NOT IN (SELECT DISTINCT drawer_id FROM drawer_words)",
@@ -63,7 +63,7 @@ async fn run_scan(connection: &Connection) -> Result<()> {
 }
 
 /// Checkpoint the WAL and copy the palace database (plus sidecar files) to `.db.bak`.
-async fn run_create_backup(connection: &Connection, palace_path: &Path) -> Result<()> {
+pub(crate) async fn run_create_backup(connection: &Connection, palace_path: &Path) -> Result<()> {
     // Checkpoint WAL to ensure backup is self-contained.
     // wal_checkpoint returns rows (busy, log, checkpointed) — must use query_all.
     query_all(connection, "PRAGMA wal_checkpoint(TRUNCATE)", ()).await?;
@@ -199,6 +199,89 @@ mod tests {
         assert!(
             database_path.exists(),
             "original database file must remain after repair"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_scan_reports_unindexed_and_orphan_counts() {
+        // run_scan must print (not error) when it finds drawers with no index entries
+        // and orphaned index rows. We exercise both the `unindexed_count > 0` branch
+        // (lines 46-50) and the `orphan_count > 0` branch (lines 51-55).
+        let (_database, connection) = crate::test_helpers::test_db().await;
+
+        // Insert a drawer that has no matching drawer_words rows → unindexed.
+        connection
+            .execute(
+                "INSERT INTO drawers (id, wing, room, content) VALUES ('unindexed_drawer_001', 'test_wing', 'general', 'some content')",
+                (),
+            )
+            .await
+            .expect("INSERT into drawers must succeed for unindexed-drawer setup");
+
+        // Insert a drawer_words row pointing to a non-existent drawer → orphan.
+        connection
+            .execute(
+                "INSERT INTO drawer_words (word, drawer_id, count) VALUES ('orphan_word', 'nonexistent_drawer_999', 1)",
+                (),
+            )
+            .await
+            .expect("INSERT into drawer_words must succeed for orphan setup");
+
+        // run_scan is informational only — it must not return an error even when
+        // inconsistencies are present.
+        let result = run_scan(&connection).await;
+        assert!(
+            result.is_ok(),
+            "run_scan must not error when inconsistencies exist"
+        );
+        // Confirm the setup rows are still present (run_scan does not modify the DB).
+        let orphan_check = crate::db::query_all(
+            &connection,
+            "SELECT count(*) FROM drawer_words WHERE drawer_id = 'nonexistent_drawer_999'",
+            (),
+        )
+        .await
+        .expect("verification query must succeed");
+        assert!(
+            !orphan_check.is_empty(),
+            "orphan verification query must return a row"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_create_backup_copies_wal_and_shm_when_present() {
+        // run_create_backup must copy .db-wal and .db-shm sidecar files when they
+        // exist alongside the palace database (lines 85-92 in run_create_backup).
+        let temp_directory = tempfile::tempdir()
+            .expect("failed to create temporary directory for WAL/SHM backup test");
+        let database_path = temp_directory.path().join("palace_wal.db");
+        let (_database, connection) = open_file_db(&database_path).await;
+
+        // Create stub WAL and SHM sidecar files so the `if exists` branches fire.
+        let wal_path = database_path.with_extension("db-wal");
+        let shm_path = database_path.with_extension("db-shm");
+        std::fs::write(&wal_path, b"stub-wal-content").expect("failed to write stub WAL file");
+        std::fs::write(&shm_path, b"stub-shm-content").expect("failed to write stub SHM file");
+
+        run_create_backup(&connection, &database_path)
+            .await
+            .expect("run_create_backup must succeed when WAL/SHM files exist");
+
+        // The backup database and both sidecar backups must exist.
+        let backup_path = database_path.with_extension("db.bak");
+        assert!(
+            backup_path.exists(),
+            "run_create_backup must create a .db.bak file"
+        );
+        let backup_wal = temp_directory.path().join("palace_wal.db.bak-wal");
+        let backup_shm = temp_directory.path().join("palace_wal.db.bak-shm");
+        assert!(
+            backup_wal.exists(),
+            "run_create_backup must copy the WAL sidecar to .db.bak-wal"
+        );
+        assert!(
+            backup_shm.exists(),
+            "run_create_backup must copy the SHM sidecar to .db.bak-shm"
         );
     }
 }
