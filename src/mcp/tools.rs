@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::db::query_all;
 use crate::kg;
-use crate::palace::{drawer, graph, query_sanitizer, search};
+use crate::palace::{drawer, fact_checker, graph, query_sanitizer, search};
 
 use super::protocol::{AAAK_SPEC, PALACE_PROTOCOL};
 
@@ -68,6 +68,7 @@ pub async fn dispatch(connection: &Connection, name: &str, args: &Value) -> Valu
         "mempalace_hook_settings" => tool_hook_settings(args),
         "mempalace_memories_filed_away" => tool_memories_filed_away(),
         "mempalace_reconnect" => tool_reconnect(connection).await,
+        "mempalace_check_facts" => tool_check_facts(connection, args).await,
         _ => json!({"error": format!("Unknown tool: {name}"), "public": true}),
     }
 }
@@ -1673,6 +1674,27 @@ async fn tool_reconnect(connection: &Connection) -> Value {
             json!({"success": true, "message": "Connected to palace", "drawers": count})
         }
         Err(e) => json!({"success": false, "error": e.to_string()}),
+    }
+}
+
+/// Check `text` for entity confusion and KG contradictions.
+///
+/// Returns `issues` — a list of detected problems — or an empty list when clean.
+/// Each issue has a `type` field: `"similar_name"`, `"relationship_mismatch"`, or
+/// `"stale_fact"`, plus a `detail` string and type-specific fields.
+async fn tool_check_facts(connection: &Connection, args: &Value) -> Value {
+    let text = str_arg(args, "text");
+    if text.is_empty() {
+        return json!({"error": "text argument is required", "public": true});
+    }
+    assert!(!text.is_empty(), "tool_check_facts: text guard passed");
+    match fact_checker::check_text(text, connection).await {
+        Ok(issues) => {
+            let is_clean = issues.is_empty();
+            assert!(issues.iter().all(|i| !i.issue_type.is_empty()));
+            json!({"issues": issues, "clean": is_clean})
+        }
+        Err(error) => json!({"error": error.to_string()}),
     }
 }
 

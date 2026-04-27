@@ -351,6 +351,17 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
             "name": "mempalace_reconnect",
             "description": "Confirm palace database connectivity and return the current drawer count. Use after external scripts modified the palace directly.",
             "inputSchema": {"type": "object", "properties": {}}
+        },
+        {
+            "name": "mempalace_check_facts",
+            "description": "Check text for entity confusion and KG contradictions. Returns a list of issues: similar_name (possible typo), relationship_mismatch (KG disagrees), stale_fact (closed KG fact).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Text to check for factual issues"}
+                },
+                "required": ["text"]
+            }
         }
     ]).as_array()
         .expect("json!([...]) is always Value::Array; as_array() cannot return None here")
@@ -366,10 +377,10 @@ mod tests {
     #[test]
     fn tool_definitions_count() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 29, "expected 29 tool definitions");
+        assert_eq!(tools.len(), 30, "expected 30 tool definitions");
         // Verify the first and last tool names as a structural sanity check.
         assert_eq!(tools[0]["name"], "mempalace_status");
-        assert_eq!(tools[28]["name"], "mempalace_reconnect");
+        assert_eq!(tools[29]["name"], "mempalace_check_facts");
     }
 
     #[test]
