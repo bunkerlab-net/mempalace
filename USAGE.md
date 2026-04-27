@@ -57,6 +57,34 @@ export MEMPALACE_DIR=/path/to/mempalace           # overrides the entire data di
 export MEMPALACE_PALACE_PATH=/path/to/palace.db   # overrides only the database path
 ```
 
+### Global `--palace` flag
+
+All subcommands accept `--palace <path>` to point at a specific palace database
+without setting environment variables:
+
+```bash
+mempalace --palace ~/work.db search "api design"
+mempalace --palace ~/work.db status
+mempalace --palace ~/work.db mcp
+```
+
+`--palace` takes priority over `MEMPALACE_PALACE_PATH` and `MEMPALACE_DIR`.
+
+---
+
+### Plugin installation (Claude Code and Codex CLI)
+
+The `.claude-plugin/` and `.codex-plugin/` directories in the repository ship
+pre-configured hooks and a skill file.  The easiest way to configure the MCP
+server is to run the setup printer:
+
+```bash
+mempalace mcp --setup
+# prints:  claude mcp add mempalace -- mempalace mcp
+```
+
+Copy and run that command to register MemPalace as an MCP server in Claude Code.
+
 **Legacy migration:** On first run after upgrading from an older install, the binary
 automatically moves `~/.mempalace/` to the XDG location — `config.json`,
 `identity.txt`, `palace.db` (plus WAL files), and `wal/`. If `palace_path` in
@@ -104,14 +132,20 @@ saves them to `entities.json` and the global registry (`~/.local/share/mempalace
 
 ```bash
 mempalace init ~/my-project
-mempalace init ~/my-project --yes           # non-interactive / CI mode
-mempalace init ~/my-project --no-gitignore  # include gitignored files
+mempalace init ~/my-project --yes              # non-interactive / CI mode
+mempalace init ~/my-project --no-gitignore     # include gitignored files
+mempalace init ~/my-project --lang de,fr       # set entity detection languages
 
 # LLM-assisted entity refinement (requires Ollama running locally by default)
 mempalace init ~/my-project --llm
 mempalace init ~/my-project --llm --llm-provider anthropic --llm-api-key $ANTHROPIC_API_KEY
 mempalace init ~/my-project --llm --llm-provider openai-compat --llm-endpoint http://localhost:8080
 ```
+
+After writing `mempalace.yaml`, `init` automatically appends `mempalace.yaml` and
+`entities.json` to `.gitignore` when the target directory is a git worktree root.
+Pass `--lang` with comma-separated BCP-47 codes to persist the entity detection
+language list to `config.json`.
 
 LLM flags:
 
@@ -136,13 +170,16 @@ Ingests files from a directory into the palace.
 mempalace mine <dir> [OPTIONS]
 
 Options:
-  --mode <mode>          projects | convos  (default: projects)
-  --extract-mode <mode>  exchange | general (default: exchange, convos only)
-  --wing <name>          Override wing name (default: from mempalace.yaml or dir name)
-  --agent <name>         Agent name recorded on each drawer (default: mempalace)
-  --limit <n>            Maximum files to process; 0 = no limit (default: 0)
-  --dry-run              Preview what would be filed without writing
-  --no-gitignore         Disable .gitignore filtering (include all files)
+  --mode <mode>             projects | convos  (default: projects)
+  --extract-mode <mode>     exchange | general (default: exchange, convos only)
+  --extract <mode>          alias for --extract-mode
+  --wing <name>             Override wing name (default: from mempalace.yaml or dir name)
+  --agent <name>            Agent name recorded on each drawer (default: mempalace)
+  --limit <n>               Maximum files to process; 0 = no limit (default: 0)
+  --dry-run                 Preview what would be filed without writing
+  --no-gitignore            Disable .gitignore filtering (include all files)
+  --include-ignored <path>  Always include this path even when gitignore is active
+                            (repeatable: --include-ignored path/a --include-ignored path/b)
 ```
 
 **Projects mode** (`--mode projects`): Reads source files (`.py`, `.rs`, `.ts`, `.go`,
@@ -212,6 +249,9 @@ Each drawer contains one raw user or assistant message. The message UUID from th
 is embedded in the drawer ID (`sweep_{session_id}_{uuid}`), so repeated runs never create
 duplicates.
 
+Output format: `+N new / M present / K skipped  (X/Y files)`.
+Returns a non-zero exit code when a directory target contains no `.jsonl` files.
+
 **Difference from `mine --mode convos`:** `mine --mode convos` normalises Claude Code JSONL into
 exchange pairs (user turn + AI response) and chunks them at 800-character boundaries. `sweep`
 inserts raw individual messages with no chunking or pairing — useful when you want message-level
@@ -229,8 +269,8 @@ mempalace search "riley" --wing wing_family
 mempalace search "api design" --room architecture --results 20
 ```
 
-Results are ranked by total word-hit count across matched drawers.
-Output includes wing, room, source file, hit count, and verbatim drawer content.
+`--results` defaults to `5`.  Results are ranked by total word-hit count across matched
+drawers. Output includes wing, room, source file, hit count, and verbatim drawer content.
 
 Search is keyword-only — no fuzzy or semantic matching. Use specific nouns for best results.
 
@@ -296,7 +336,31 @@ Use this if search results seem wrong after an interrupted mine or a manual DB e
 
 ```bash
 mempalace repair
+mempalace repair --yes     # -y: skip confirmation (CI-friendly)
 # Creates palace.db.bak, then re-indexes all drawers
+```
+
+---
+
+### `mempalace export`
+
+Exports all palace drawers to a directory of markdown files, one file per wing/room
+combination. Also writes `index.md` at the output root for navigation.
+
+```bash
+mempalace export
+mempalace export --output /tmp/my-palace
+mempalace export --wing my_project        # export one wing only
+mempalace export --dry-run                # count files without writing
+```
+
+Output layout:
+
+```text
+palace-export/
+  index.md           ← navigation index (all wings and rooms)
+  <wing>/
+    <room>.md        ← one file per wing/room combination
 ```
 
 ---
@@ -305,6 +369,14 @@ mempalace repair
 
 Runs the MCP server over stdio (JSON-RPC 2.0). This is the mode used by Claude Code after
 `claude mcp add`.
+
+```bash
+mempalace mcp                # start the server
+mempalace mcp --setup        # print the install command and exit
+```
+
+`--setup` prints `claude mcp add mempalace -- mempalace mcp` — copy and run it to
+register MemPalace in Claude Code.
 
 ---
 

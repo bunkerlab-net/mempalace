@@ -276,6 +276,7 @@ async fn hook_stop_save_silently(
         } else {
             format!(" \u{2014} {}", themes.join(", "))
         };
+        hook_try_desktop_toast(&format!("{count} memories woven into the palace{tag}"));
         hook_output(&json!({
             "systemMessage": format!("\u{2726} {count} memories woven into the palace{tag}"),
         }));
@@ -801,6 +802,23 @@ fn hook_log(state_dir: &Path, message: &str) {
 ///
 /// Hooks communicate back to the harness via a single JSON object on stdout.
 /// Using `println!` ensures the output is flushed with a trailing newline.
+/// Fire-and-forget desktop notification via `notify-send`.
+///
+/// Best-effort: silently no-ops when `notify-send` is not installed or when
+/// the spawn fails (e.g. no D-Bus session on headless CI). The hook must not
+/// fail because of a missing notification daemon.
+fn hook_try_desktop_toast(message: &str) {
+    assert!(
+        !message.is_empty(),
+        "hook_try_desktop_toast: message must not be empty"
+    );
+    // notify-send is Linux/freedesktop only; ignore errors on other platforms.
+    let _ = std::process::Command::new("notify-send")
+        .arg("MemPalace")
+        .arg(message)
+        .spawn();
+}
+
 fn hook_output(data: &Value) {
     let payload = serde_json::to_string_pretty(data).unwrap_or_else(|_| "{}".to_string());
     println!("{payload}");

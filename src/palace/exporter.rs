@@ -3,6 +3,7 @@
 //! Output layout:
 //! ```text
 //! output_dir/
+//!   index.md        ← navigation index listing all wings and rooms
 //!   <wing>/
 //!     <room>.md   ← one file per wing/room combination
 //! ```
@@ -10,6 +11,7 @@
 //! per drawer, in chronological order.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as FmtWrite;
 use std::path::Path;
 
 use turso::Connection;
@@ -57,6 +59,7 @@ pub async fn export_palace(
         for ((wing_name, room_name), sections) in &grouped {
             export_write_room(output_dir, wing_name, room_name, sections)?;
         }
+        export_write_index(output_dir, &grouped)?;
     }
 
     let stats = ExportStats {
@@ -180,6 +183,43 @@ fn export_write_room(
     std::fs::write(&file_path, &content)?;
     // Pair assertion: file must exist after write.
     assert!(file_path.exists(), "export file must exist after write");
+    Ok(())
+}
+
+/// Write a navigation `index.md` to `output_dir` listing all wings and rooms.
+///
+/// Called by [`export_palace`] after all room files are written.
+/// The index is a flat markdown file with one `##` heading per wing and one
+/// `- [Room](wing/room.md)` link per room under each wing.
+fn export_write_index(
+    output_dir: &Path,
+    grouped: &BTreeMap<(String, String), Vec<(String, String)>>,
+) -> Result<()> {
+    assert!(
+        !output_dir.as_os_str().is_empty(),
+        "export_write_index: output_dir must not be empty"
+    );
+    if grouped.is_empty() {
+        return Ok(());
+    }
+
+    let mut content = String::from("# Palace Export\n\n");
+    let mut current_wing = String::new();
+    for (wing_name, room_name) in grouped.keys() {
+        if wing_name != &current_wing {
+            current_wing.clone_from(wing_name);
+            // write! on String is infallible; the result is intentionally discarded.
+            let _ = write!(content, "\n## {wing_name}\n\n");
+        }
+        let wing_slug = sanitize_path_component(wing_name);
+        let room_slug = sanitize_path_component(room_name);
+        let _ = writeln!(content, "- [{room_name}]({wing_slug}/{room_slug}.md)");
+    }
+
+    let index_path = output_dir.join("index.md");
+    std::fs::write(&index_path, &content)?;
+    // Pair assertion: index.md must exist after write.
+    assert!(index_path.exists(), "index.md must exist after write");
     Ok(())
 }
 
@@ -323,6 +363,18 @@ mod tests {
             output_dir.path().join("alpha").join("backend.md").exists(),
             "alpha/backend.md must be created"
         );
+        // Navigation index must also be written.
+        let index_path = output_dir.path().join("index.md");
+        assert!(
+            index_path.exists(),
+            "index.md must be created by export_palace"
+        );
+        let index_content =
+            std::fs::read_to_string(&index_path).expect("index.md must be readable");
+        assert!(
+            index_content.contains("alpha"),
+            "index.md must reference the wing name"
+        );
     }
 
     #[tokio::test]
@@ -358,6 +410,10 @@ mod tests {
         assert!(
             !output_dir.path().join("beta").exists(),
             "dry run must not create any directories"
+        );
+        assert!(
+            !output_dir.path().join("index.md").exists(),
+            "dry run must not create index.md"
         );
     }
 }
