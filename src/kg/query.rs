@@ -162,6 +162,71 @@ pub async fn query_entity(
     Ok(results)
 }
 
+/// Query all facts for a given subject and predicate across all object entities.
+///
+/// Returns every triple (active and expired) where the subject entity matches
+/// `subject` and the relationship type equals `predicate`. Use `query_entity`
+/// when you need facts across all predicates; use this helper when the predicate
+/// is already known, such as L1 KG-fact blending in `palace::layers`.
+pub async fn query_relationship(
+    connection: &Connection,
+    subject: &str,
+    predicate: &str,
+) -> Result<Vec<Fact>> {
+    if subject.is_empty() {
+        return Err(crate::error::Error::Other(
+            "query_relationship: subject must not be empty".to_string(),
+        ));
+    }
+    if predicate.is_empty() {
+        return Err(crate::error::Error::Other(
+            "query_relationship: predicate must not be empty".to_string(),
+        ));
+    }
+
+    let subject_id = entity_id(subject);
+    let predicate_normalized = predicate.to_lowercase().replace(' ', "_");
+
+    assert!(
+        !subject_id.is_empty(),
+        "query_relationship: subject normalizes to empty id"
+    );
+    assert!(
+        !predicate_normalized.is_empty(),
+        "query_relationship: predicate normalizes to empty"
+    );
+
+    let rows = db::query_all(
+        connection,
+        "SELECT t.subject, t.predicate, t.object, t.valid_from, t.valid_to, t.confidence, e.name \
+         FROM triples t JOIN entities e ON t.object = e.id \
+         WHERE t.subject = ?1 AND t.predicate = ?2",
+        turso::params![subject_id.as_str(), predicate_normalized.as_str()],
+    )
+    .await?;
+
+    let mut facts = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let obj_name = row
+            .get_value(6)
+            .ok()
+            .and_then(|cell| cell.as_text().cloned())
+            .unwrap_or_default();
+        facts.push(query_entity_row_to_fact(
+            row, "outgoing", subject, &obj_name,
+        ));
+    }
+
+    // Postcondition: every row must produce exactly one fact.
+    assert!(
+        facts.len() == rows.len(),
+        "query_relationship: facts.len() {} must equal rows.len() {}",
+        facts.len(),
+        rows.len()
+    );
+    Ok(facts)
+}
+
 /// Get chronological timeline of facts.
 pub async fn timeline(connection: &Connection, entity: Option<&str>) -> Result<Vec<Fact>> {
     // Precondition: when provided, the entity filter must be a non-empty, trimmed name.
@@ -464,6 +529,54 @@ mod tests {
         assert_eq!(
             kg_stats.facts_current, kg_stats.triples,
             "no expired facts yet"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_relationship_returns_matching_facts() {
+        // A known (subject, predicate) pair must return the corresponding fact.
+        let (_db, conn) = crate::test_helpers::test_db().await;
+        seed_alice_knows_bob(&conn).await;
+
+        let facts = query_relationship(&conn, "Alice", "knows")
+            .await
+            .expect("query_relationship should succeed for seeded subject and predicate");
+
+        assert_eq!(facts.len(), 1, "Alice knows should return exactly one fact");
+        assert_eq!(facts[0].subject, "Alice");
+        assert_eq!(facts[0].predicate, "knows");
+        assert_eq!(facts[0].object, "Bob");
+        assert_eq!(facts[0].direction, "outgoing");
+    }
+
+    #[tokio::test]
+    async fn query_relationship_unknown_predicate_returns_empty() {
+        // A predicate that was never stored must return an empty Vec, not an error.
+        let (_db, conn) = crate::test_helpers::test_db().await;
+        seed_alice_knows_bob(&conn).await;
+
+        let facts = query_relationship(&conn, "Alice", "hates")
+            .await
+            .expect("query_relationship should succeed even when no facts match");
+
+        assert!(
+            facts.is_empty(),
+            "unknown predicate must return empty result"
+        );
+        assert_eq!(facts.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn query_relationship_empty_subject_returns_error() {
+        // An empty subject is a caller error and must be rejected.
+        let (_db, conn) = crate::test_helpers::test_db().await;
+        let result = query_relationship(&conn, "", "knows").await;
+        assert!(result.is_err(), "empty subject must return an error");
+        assert!(
+            result
+                .err()
+                .is_some_and(|error| error.to_string().contains("subject")),
+            "error must mention subject"
         );
     }
 }

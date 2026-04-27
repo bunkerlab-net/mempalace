@@ -298,6 +298,33 @@ mod async_tests {
     }
 
     #[tokio::test]
+    async fn seed_from_entity_facts_inserts_all_triples() {
+        // seed_from_entity_facts must insert one triple per input pair and return the count.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let count = seed_from_entity_facts(
+            &connection,
+            "Dave",
+            &[("knows", "Eve"), ("works_at", "Initech")],
+        )
+        .await
+        .expect("seed_from_entity_facts should succeed for valid subject and pairs");
+        assert_eq!(count, 2, "two pairs must produce two inserted triples");
+        // Pair assertion: both triples must exist in the graph.
+        let rows = crate::db::query_all(&connection, "SELECT COUNT(*) FROM triples", ())
+            .await
+            .expect("SELECT COUNT from triples must succeed after seed");
+        let triple_count: i64 = rows
+            .first()
+            .and_then(|r| r.get_value(0).ok())
+            .and_then(|c| c.as_integer().copied())
+            .unwrap_or(0);
+        assert_eq!(
+            triple_count, 2,
+            "triples table must contain exactly 2 rows after seed"
+        );
+    }
+
+    #[tokio::test]
     async fn invalidate_sets_valid_to() {
         let (_db, connection) = crate::test_helpers::test_db().await;
         let _tid = add_triple(
@@ -371,6 +398,64 @@ pub async fn add_entity(
         )
         .await?;
     Ok(entity_identifier)
+}
+
+/// Bulk-seed KG triples for a subject from a `(predicate, object)` slice.
+///
+/// Each pair is inserted via `add_triple` with default confidence and no date
+/// bounds. Returns the number of triples inserted. Used in tests to build
+/// entity relationship graphs without calling `add_triple` individually.
+#[cfg(test)]
+pub async fn seed_from_entity_facts(
+    connection: &Connection,
+    subject: &str,
+    facts: &[(&str, &str)],
+) -> Result<usize> {
+    assert!(
+        !subject.is_empty(),
+        "seed_from_entity_facts: subject must not be empty"
+    );
+    assert!(
+        !facts.is_empty(),
+        "seed_from_entity_facts: facts slice must not be empty"
+    );
+
+    let mut inserted = 0usize;
+    for &(predicate, object) in facts {
+        assert!(
+            !predicate.is_empty(),
+            "seed_from_entity_facts: predicate must not be empty"
+        );
+        assert!(
+            !object.is_empty(),
+            "seed_from_entity_facts: object must not be empty"
+        );
+        add_triple(
+            connection,
+            &TripleParams {
+                subject,
+                predicate,
+                object,
+                valid_from: None,
+                valid_to: None,
+                confidence: 1.0,
+                source_closet: None,
+                source_file: None,
+                source_drawer_id: None,
+                adapter_name: None,
+            },
+        )
+        .await?;
+        inserted += 1;
+    }
+
+    // Postcondition: one triple must have been processed per input pair.
+    assert!(
+        inserted == facts.len(),
+        "seed_from_entity_facts: inserted {inserted} but expected {}",
+        facts.len()
+    );
+    Ok(inserted)
 }
 
 /// Parameters for [`add_triple`].

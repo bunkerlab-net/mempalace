@@ -109,6 +109,15 @@ pub async fn layer1(connection: &Connection, wing: Option<&str>) -> Result<Strin
         }
     }
 
+    let kg_fact_lines = layer1_append_kg_facts(connection).await?;
+    for fact_line in kg_fact_lines {
+        if total_len + fact_line.len() > CHARS_MAX {
+            break;
+        }
+        total_len += fact_line.len();
+        lines.push(fact_line);
+    }
+
     Ok(lines.join("\n"))
 }
 
@@ -142,6 +151,69 @@ fn layer1_build_room_map(rows: &[turso::Row]) -> HashMap<String, Vec<(String, St
             .push((content, source_name));
     }
     by_room
+}
+
+/// Query active KG facts and format them as display lines for L1 context injection.
+///
+/// Called by `layer1` to append entity-relationship context below the room-based
+/// drawer summaries. Capped at 20 distinct (subject, predicate) pairs to bound
+/// the number of follow-up `query_relationship` calls and output size.
+async fn layer1_append_kg_facts(connection: &Connection) -> Result<Vec<String>> {
+    const PAIRS_LIMIT: usize = 20;
+
+    let pair_rows = db::query_all(
+        connection,
+        "SELECT DISTINCT s.name, t.predicate \
+         FROM triples t JOIN entities s ON t.subject = s.id \
+         WHERE t.valid_to IS NULL LIMIT 20",
+        (),
+    )
+    .await?;
+
+    if pair_rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Precondition: LIMIT 20 in the SQL bounds this slice to PAIRS_LIMIT.
+    assert!(
+        pair_rows.len() <= PAIRS_LIMIT,
+        "layer1_append_kg_facts: pair_rows.len() {} must not exceed {PAIRS_LIMIT}",
+        pair_rows.len()
+    );
+
+    let mut lines = vec!["\n[knowledge graph]".to_string()];
+    for row in &pair_rows {
+        let subject_name = row
+            .get_value(0)
+            .ok()
+            .and_then(|cell| cell.as_text().cloned())
+            .unwrap_or_default();
+        let predicate = row
+            .get_value(1)
+            .ok()
+            .and_then(|cell| cell.as_text().cloned())
+            .unwrap_or_default();
+
+        if subject_name.is_empty() || predicate.is_empty() {
+            continue;
+        }
+
+        let facts =
+            crate::kg::query::query_relationship(connection, &subject_name, &predicate).await?;
+        for fact in &facts {
+            lines.push(format!(
+                "  - {} {} {}",
+                fact.subject, fact.predicate, fact.object
+            ));
+        }
+    }
+
+    // Postcondition: at least the header line is always present.
+    assert!(
+        !lines.is_empty(),
+        "layer1_append_kg_facts: lines must contain at least the header"
+    );
+    Ok(lines)
 }
 
 /// Generate full wake-up text (L0 + L1).
@@ -541,6 +613,66 @@ mod tests {
         assert!(
             empty.contains("No drawers found"),
             "wrong wing must return empty result"
+        );
+    }
+
+    #[tokio::test]
+    async fn layer1_includes_kg_facts_when_triples_exist() {
+        // When active KG triples are present, layer1 must append a knowledge graph block.
+        // A drawer must also exist to bypass the no-drawers early return.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+
+        drawer::add_drawer(
+            &connection,
+            &DrawerParams {
+                id: "d_kg_blend_1",
+                wing: "research",
+                room: "general",
+                content: "Background context for knowledge graph blending test",
+                source_file: "kg_blend.md",
+                chunk_index: 0,
+                added_by: "test",
+                ingest_mode: "projects",
+                source_mtime: None,
+            },
+        )
+        .await
+        .expect("add_drawer should succeed for KG blending test setup");
+
+        crate::kg::add_triple(
+            &connection,
+            &crate::kg::TripleParams {
+                subject: "Grace",
+                predicate: "works_at",
+                object: "DeepMind",
+                valid_from: None,
+                valid_to: None,
+                confidence: 1.0,
+                source_closet: None,
+                source_file: None,
+                source_drawer_id: None,
+                adapter_name: None,
+            },
+        )
+        .await
+        .expect("add_triple should succeed for layer1 KG blending test");
+
+        let result = layer1(&connection, None)
+            .await
+            .expect("layer1 should succeed with seeded drawer and triple");
+
+        assert!(
+            result.contains("knowledge graph"),
+            "layer1 must include a knowledge graph section when triples exist"
+        );
+        assert!(
+            result.contains("Grace"),
+            "layer1 KG section must include the subject entity name"
+        );
+        // Pair assertion: result must include the drawer content too.
+        assert!(
+            result.contains("Background context"),
+            "layer1 must still include the seeded drawer content alongside KG facts"
         );
     }
 
