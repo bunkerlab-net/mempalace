@@ -32,6 +32,11 @@ pub struct MempalaceConfig {
     /// Defaults to `false`.
     #[serde(default)]
     pub hook_desktop_toast: bool,
+
+    /// Language codes for multilingual entity detection (e.g. `["en", "de"]`).
+    /// Defaults to `["en"]`.
+    #[serde(default = "default_entity_languages")]
+    pub entity_languages: Vec<String>,
 }
 
 fn default_palace_path() -> PathBuf {
@@ -46,17 +51,24 @@ fn default_hook_silent_save() -> bool {
     true
 }
 
+fn default_entity_languages() -> Vec<String> {
+    vec!["en".to_string()]
+}
+
 /// Returns the mempalace data directory.
 ///
 /// Resolution order:
 ///   1. `MEMPALACE_DIR` env var — explicit user, container, or test override.
-///   2. `$XDG_DATA_HOME/mempalace` — XDG standard location.
-///   3. `~/.local/share/mempalace` — XDG default fallback.
+///   2. `MEMPAL_DIR` env var — short alias accepted by the Python implementation.
+///   3. `$XDG_DATA_HOME/mempalace` — XDG standard location.
+///   4. `~/.local/share/mempalace` — XDG default fallback.
 pub fn config_dir() -> PathBuf {
-    if let Ok(env_path) = std::env::var("MEMPALACE_DIR")
-        && !env_path.is_empty()
-    {
-        return PathBuf::from(env_path);
+    for var in &["MEMPALACE_DIR", "MEMPAL_DIR"] {
+        if let Ok(env_path) = std::env::var(var)
+            && !env_path.is_empty()
+        {
+            return PathBuf::from(env_path);
+        }
     }
     let data_directory = xdg_data_dir().join("mempalace");
     assert!(!data_directory.as_os_str().is_empty());
@@ -220,26 +232,28 @@ impl MempalaceConfig {
         Ok(())
     }
 
-    /// Resolve the palace database path, respecting `MEMPALACE_PALACE_PATH` env var.
+    /// Resolve the palace database path, checking env vars in priority order.
     ///
-    /// When `MEMPALACE_PALACE_PATH` is set to a non-empty value, it is
-    /// tilde-expanded and resolved to an absolute path so that relative or
-    /// home-relative paths (e.g. `~/palace.db`) work correctly regardless of
-    /// the working directory. An empty or whitespace-only value is treated as
-    /// unset (falls through to the configured `palace_path`) rather than
-    /// panicking, because shells often export empty vars when clearing them.
+    /// Resolution order:
+    ///   1. `MEMPALACE_PALACE_PATH` — primary override.
+    ///   2. `MEMPAL_PALACE_PATH` — short alias accepted by the Python implementation.
+    ///   3. `palace_path` from config file.
+    ///
+    /// Env values are tilde-expanded and resolved to absolute paths. Empty or
+    /// whitespace-only values are treated as unset, because shells commonly
+    /// export empty vars when clearing them.
     pub fn palace_db_path(&self) -> PathBuf {
-        // Check env override first — it can recover from an empty config value.
-        // An empty or whitespace-only env var is treated as unset (fall through).
-        if let Ok(env_path) = std::env::var("MEMPALACE_PALACE_PATH")
-            && !env_path.trim().is_empty()
-        {
-            let expanded = expand_tilde(Path::new(&env_path));
-            // std::path::absolute is available since Rust 1.79 (MSRV is 1.88).
-            // unwrap_or(expanded.clone()) falls back to the expanded path if
-            // the OS call fails (e.g. path refers to a not-yet-created dir).
-            let resolved = std::path::absolute(&expanded).unwrap_or(expanded);
-            return resolved;
+        for var in &["MEMPALACE_PALACE_PATH", "MEMPAL_PALACE_PATH"] {
+            if let Ok(env_path) = std::env::var(var)
+                && !env_path.trim().is_empty()
+            {
+                let expanded = expand_tilde(Path::new(&env_path));
+                // std::path::absolute is available since Rust 1.79 (MSRV is 1.88).
+                // unwrap_or(expanded.clone()) falls back to the expanded path if
+                // the OS call fails (e.g. path refers to a not-yet-created dir).
+                let resolved = std::path::absolute(&expanded).unwrap_or(expanded);
+                return resolved;
+            }
         }
         assert!(
             !self.palace_path.as_os_str().is_empty(),
@@ -257,6 +271,7 @@ impl Default for MempalaceConfig {
             people_map: HashMap::new(),
             hook_silent_save: default_hook_silent_save(),
             hook_desktop_toast: false,
+            entity_languages: default_entity_languages(),
         }
     }
 }
@@ -266,13 +281,15 @@ impl Default for MempalaceConfig {
 /// Migrate from `~/.mempalace` to `$XDG_DATA_HOME/mempalace` if needed.
 ///
 /// Idempotent: returns immediately if already migrated, legacy dir absent,
-/// or `MEMPALACE_DIR` is set.
+/// or either dir env var alias is set.
 fn maybe_migrate() -> Result<()> {
-    // MEMPALACE_DIR means the caller manages paths — skip migration entirely.
-    if let Ok(mempalace_dir) = std::env::var("MEMPALACE_DIR")
-        && !mempalace_dir.is_empty()
-    {
-        return Ok(());
+    // MEMPALACE_DIR / MEMPAL_DIR means the caller manages paths — skip migration.
+    for var in &["MEMPALACE_DIR", "MEMPAL_DIR"] {
+        if let Ok(env_value) = std::env::var(var)
+            && !env_value.is_empty()
+        {
+            return Ok(());
+        }
     }
 
     // Without a resolvable home directory there is no legacy ~/.mempalace to
@@ -1274,6 +1291,143 @@ rooms:
             );
             assert!(path.is_absolute(), "config path must be absolute");
         });
+    }
+
+    #[test]
+    fn config_dir_respects_mempal_dir_alias() {
+        // MEMPAL_DIR (short alias) must resolve the same as MEMPALACE_DIR.
+        let tempdir = tempfile::tempdir().expect("failed to create temp dir");
+        temp_env::with_vars(
+            [
+                ("MEMPALACE_DIR", None::<&str>),
+                (
+                    "MEMPAL_DIR",
+                    Some(tempdir.path().to_str().expect("valid path")),
+                ),
+            ],
+            || {
+                assert_eq!(config_dir(), tempdir.path());
+            },
+        );
+    }
+
+    #[test]
+    fn mempalace_dir_takes_priority_over_mempal_dir_alias() {
+        // MEMPALACE_DIR must win over MEMPAL_DIR when both are set.
+        let primary = tempfile::tempdir().expect("failed to create temp dir");
+        let alias = tempfile::tempdir().expect("failed to create temp dir");
+        temp_env::with_vars(
+            [
+                (
+                    "MEMPALACE_DIR",
+                    Some(primary.path().to_str().expect("valid path")),
+                ),
+                (
+                    "MEMPAL_DIR",
+                    Some(alias.path().to_str().expect("valid path")),
+                ),
+            ],
+            || {
+                assert_eq!(config_dir(), primary.path());
+                assert_ne!(config_dir(), alias.path());
+            },
+        );
+    }
+
+    #[test]
+    fn palace_db_path_mempal_alias_overrides_config() {
+        // MEMPAL_PALACE_PATH (short alias) must override the config field.
+        let config = MempalaceConfig {
+            palace_path: PathBuf::from("/config/palace.db"),
+            collection_name: "mempalace_drawers".to_string(),
+            people_map: std::collections::HashMap::new(),
+            ..MempalaceConfig::default()
+        };
+        temp_env::with_vars(
+            [
+                ("MEMPALACE_PALACE_PATH", None::<&str>),
+                ("MEMPAL_PALACE_PATH", Some("/alias/override.db")),
+            ],
+            || {
+                let path = config.palace_db_path();
+                assert_eq!(path, PathBuf::from("/alias/override.db"));
+                assert!(!path.to_string_lossy().contains("config"));
+            },
+        );
+    }
+
+    #[test]
+    fn mempalace_palace_path_takes_priority_over_mempal_alias() {
+        // MEMPALACE_PALACE_PATH must win over MEMPAL_PALACE_PATH when both are set.
+        let config = MempalaceConfig {
+            palace_path: PathBuf::from("/config/palace.db"),
+            collection_name: "mempalace_drawers".to_string(),
+            people_map: std::collections::HashMap::new(),
+            ..MempalaceConfig::default()
+        };
+        temp_env::with_vars(
+            [
+                ("MEMPALACE_PALACE_PATH", Some("/primary/palace.db")),
+                ("MEMPAL_PALACE_PATH", Some("/alias/palace.db")),
+            ],
+            || {
+                let path = config.palace_db_path();
+                assert_eq!(path, PathBuf::from("/primary/palace.db"));
+            },
+        );
+    }
+
+    #[test]
+    fn default_config_has_entity_languages_en() {
+        // Default config must contain exactly ["en"] as entity_languages.
+        let config = MempalaceConfig::default();
+        assert_eq!(config.entity_languages, vec!["en".to_string()]);
+        assert!(!config.entity_languages.is_empty());
+    }
+
+    #[test]
+    fn entity_languages_round_trips_via_json() {
+        // entity_languages must survive a JSON serialize/deserialize round-trip.
+        let json = r#"{"palace_path":"/tmp/p.db","collection_name":"x","people_map":{},"entity_languages":["en","de"]}"#;
+        let config: MempalaceConfig = serde_json::from_str(json).expect("parse json");
+        assert_eq!(config.entity_languages, vec!["en", "de"]);
+        assert_eq!(config.entity_languages.len(), 2);
+    }
+
+    #[test]
+    fn entity_languages_defaults_when_absent_from_json() {
+        // JSON without entity_languages must deserialize to the default ["en"].
+        let json = r#"{"palace_path":"/tmp/p.db","collection_name":"x","people_map":{}}"#;
+        let config: MempalaceConfig = serde_json::from_str(json).expect("parse json");
+        assert_eq!(config.entity_languages, vec!["en".to_string()]);
+        assert!(!config.entity_languages.is_empty());
+    }
+
+    #[test]
+    fn migrate_skipped_when_mempal_dir_set() {
+        // When MEMPAL_DIR (alias) is set, migration must be skipped — same behaviour as MEMPALACE_DIR.
+        let home = tempfile::tempdir().expect("failed to create temp dir");
+        let legacy = home.path().join(".mempalace");
+        std::fs::create_dir_all(&legacy).expect("create legacy dir");
+        std::fs::write(legacy.join("config.json"), "{}").expect("write config.json");
+
+        let override_dir = tempfile::tempdir().expect("create override dir");
+        temp_env::with_vars(
+            [
+                ("HOME", Some(home.path().to_str().expect("valid path"))),
+                ("MEMPALACE_DIR", None),
+                (
+                    "MEMPAL_DIR",
+                    Some(override_dir.path().to_str().expect("valid path")),
+                ),
+                ("XDG_DATA_HOME", None),
+            ],
+            || {
+                maybe_migrate().expect("should return ok without migrating");
+                // Legacy dir must still exist — migration was skipped due to MEMPAL_DIR.
+                assert!(legacy.join("config.json").exists());
+            },
+        );
     }
 
     #[test]

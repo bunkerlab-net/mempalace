@@ -304,21 +304,64 @@ pub async fn layer3(
         };
         // 1-based index for human readability in the context block.
         lines.push(format!(
-            "  [{}] {}/{} (score={:.1})",
+            "  [{}] {}/{} (score={:.1}, chunk={})",
             index + 1,
             hit.wing,
             hit.room,
-            hit.relevance
+            hit.relevance,
+            hit.chunk_index
         ));
         lines.push(format!("      {snippet}"));
-        if !hit.source_file.is_empty() {
-            lines.push(format!("      src: {}", hit.source_file));
+        if !hit.source_path.is_empty() {
+            lines.push(format!("      src: {}", hit.source_path));
         }
+    }
+
+    // Expand the top result's neighbors for additional context if it's part of
+    // a multi-chunk source (chunk_index > 0 or other chunks exist nearby).
+    if let Some(top_hit) = hits.first()
+        && !top_hit.source_path.is_empty()
+    {
+        layer3_add_neighbor_context(connection, top_hit, &mut lines).await?;
     }
 
     let result = lines.join("\n");
     assert!(!result.is_empty(), "layer3 output must not be empty");
     Ok(result)
+}
+
+/// Expand the anchor result's adjacent chunks and append them to the output lines.
+///
+/// Radius of 2 means up to 4 adjacent chunks are fetched (2 before, 2 after).
+/// A no-op when the source has only a single chunk.
+async fn layer3_add_neighbor_context(
+    connection: &Connection,
+    anchor: &search::SearchResult,
+    lines: &mut Vec<String>,
+) -> Result<()> {
+    assert!(!anchor.source_path.is_empty());
+
+    let neighbors =
+        search::search_expand_neighbors(connection, &anchor.source_path, anchor.chunk_index, 2)
+            .await?;
+
+    if neighbors.is_empty() {
+        return Ok(());
+    }
+
+    lines.push("      nearby context:".to_string());
+    for neighbor in &neighbors {
+        let snippet: String = neighbor.text.chars().take(SNIPPET_LEN_MAX).collect();
+        let snippet = snippet.replace('\n', " ");
+        lines.push(format!(
+            "        chunk {}: {}",
+            neighbor.chunk_index, snippet
+        ));
+    }
+
+    // Postcondition: adding neighbors must produce more lines.
+    assert!(!lines.is_empty());
+    Ok(())
 }
 
 #[cfg(test)]

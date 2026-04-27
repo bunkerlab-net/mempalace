@@ -534,6 +534,8 @@ async fn tool_search(connection: &Connection, args: &Value) -> Value {
                         "room": result.room,
                         "content": result.text,
                         "source_file": result.source_file,
+                        "source_path": result.source_path,
+                        "chunk_index": result.chunk_index,
                         "created_at": result.created_at,
                         "similarity": result.relevance,
                     })
