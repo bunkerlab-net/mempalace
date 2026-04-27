@@ -141,6 +141,26 @@ pub async fn run(cli: Cli) -> error::Result<()> {
             run_diary_ingest(directory, wing, agent, force).await?;
         }
 
+        Command::ClosetLlm {
+            wing,
+            sample,
+            dry_run,
+            llm,
+            llm_provider,
+            llm_model,
+            llm_endpoint,
+            llm_api_key,
+        } => {
+            let llm_opts = cli::init::LlmOpts {
+                enabled: llm,
+                provider: llm_provider,
+                model: llm_model,
+                endpoint: llm_endpoint,
+                api_key: llm_api_key,
+            };
+            run_closet_llm(wing, sample, dry_run, llm_opts).await?;
+        }
+
         Command::Instructions { name } => {
             cli::instructions::run(&name)?;
         }
@@ -278,6 +298,17 @@ async fn run_diary_ingest(
     let directory = expand_tilde(&directory);
     let (_db, connection, _path) = open_palace().await?;
     cli::diary_ingest::run(&connection, &directory, &wing, &agent, force).await
+}
+
+/// Handle the `closet-llm` sub-command — regenerates closets using a configured LLM.
+async fn run_closet_llm(
+    wing: Option<String>,
+    sample: usize,
+    dry_run: bool,
+    llm_opts: cli::init::LlmOpts,
+) -> error::Result<()> {
+    let (_db, connection, _path) = open_palace().await?;
+    cli::closet_llm::run(&connection, wing.as_deref(), sample, dry_run, &llm_opts).await
 }
 
 /// Handle the `export` sub-command — exports palace drawers to markdown files.

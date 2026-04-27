@@ -1,5 +1,6 @@
 //! CLI command definitions and handlers for the `mempalace` binary.
 
+pub mod closet_llm;
 pub mod compress;
 pub mod diary_ingest;
 pub mod export;
@@ -243,5 +244,40 @@ pub enum Command {
         /// Re-ingest all sections even if already filed
         #[arg(long)]
         force: bool,
+    },
+
+    /// Regenerate compressed closets using a configured LLM for richer topic extraction
+    ClosetLlm {
+        /// Limit regeneration to a specific wing (default: all wings)
+        #[arg(long)]
+        wing: Option<String>,
+
+        /// Only process the first N drawers; 0 means all
+        #[arg(long, default_value = "0")]
+        sample: usize,
+
+        /// Preview work without calling the LLM or writing to the palace
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Enable LLM (required)
+        #[arg(long)]
+        llm: bool,
+
+        /// LLM provider: ollama, openai-compat, or anthropic
+        #[arg(long, default_value = "ollama")]
+        llm_provider: String,
+
+        /// LLM model name (e.g. llama3:8b, gpt-4o-mini, claude-haiku-4-5-20251001)
+        #[arg(long, default_value = "llama3:8b")]
+        llm_model: String,
+
+        /// LLM API endpoint URL (required for openai-compat, optional for others)
+        #[arg(long)]
+        llm_endpoint: Option<String>,
+
+        /// LLM API key (for anthropic or authenticated openai-compat endpoints)
+        #[arg(long)]
+        llm_api_key: Option<String>,
     },
 }

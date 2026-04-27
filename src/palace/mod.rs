@@ -5,6 +5,7 @@
 pub const WALK_DEPTH_LIMIT: usize = 64;
 
 pub mod chunker;
+pub mod closet_llm;
 pub mod convo_miner;
 pub mod diary_ingest;
 pub mod drawer;
