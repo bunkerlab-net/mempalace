@@ -244,6 +244,13 @@ fn sanitize_path_component(name: &str) -> String {
             }
         })
         .collect();
+    // "." and ".." are reserved path components on all platforms; rewrite them
+    // to prevent directory traversal when joined with output_dir.
+    let sanitized = if sanitized == "." || sanitized == ".." {
+        "_".to_string()
+    } else {
+        sanitized
+    };
     assert!(!sanitized.is_empty());
     sanitized
 }

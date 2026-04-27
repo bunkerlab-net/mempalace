@@ -8,7 +8,6 @@
 //! Ports `palace.py::{upsert_closet_lines,purge_file_closets}` from the
 //! Python reference, adapted for the `TursoDB` SQL backend (no `ChromaDB`).
 
-use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
@@ -71,7 +70,8 @@ pub async fn upsert_closet_lines(
 ///
 /// Call before re-mining or re-compressing a file so stale closet topics do
 /// not accumulate. Returns the number of rows deleted.
-pub async fn purge_file_closets(connection: &Connection, source_file: &str) -> Result<u64> {
+#[cfg(test)]
+pub(crate) async fn purge_file_closets(connection: &Connection, source_file: &str) -> Result<u64> {
     assert!(
         !source_file.is_empty(),
         "purge_file_closets: source_file must not be empty"
@@ -125,7 +125,7 @@ pub async fn search_closet_boost(
     let rows = search_closet_boost_fetch(connection, source_paths).await?;
 
     let mut scored = search_closet_boost_score(&rows, query_words);
-    scored.sort_unstable_by_key(|item| Reverse(item.1));
+    scored.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
     let mut boosts: HashMap<String, f64> = HashMap::with_capacity(scored.len());
     for (rank, (source_file, _)) in scored.iter().enumerate() {

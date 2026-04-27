@@ -411,7 +411,13 @@ fn run_derive_wing_name(projects: &[ProjectInfo], directory: &Path) -> String {
 /// `init`.
 fn run_persist_lang(lang: &[String]) {
     assert!(!lang.is_empty(), "run_persist_lang: lang must not be empty");
-    let mut config = crate::config::MempalaceConfig::load().unwrap_or_default();
+    let mut config = match crate::config::MempalaceConfig::load() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("  Warning: could not load config to persist --lang: {error}");
+            return;
+        }
+    };
     config.entity_languages = lang.to_vec();
     assert!(
         !config.entity_languages.is_empty(),
@@ -437,7 +443,14 @@ fn run_gitignore_protect(directory: &Path) {
         return;
     }
     let gitignore_path = directory.join(".gitignore");
-    let existing = std::fs::read_to_string(&gitignore_path).unwrap_or_default();
+    let existing = match std::fs::read_to_string(&gitignore_path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            eprintln!("  Warning: could not read .gitignore: {error}");
+            return;
+        }
+    };
     assert!(
         existing.len() < 10 * 1024 * 1024,
         "run_gitignore_protect: .gitignore must be < 10 MB"

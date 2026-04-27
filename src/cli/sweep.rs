@@ -71,13 +71,20 @@ pub async fn run(connection: &Connection, target: &Path, wing: &str) -> Result<(
 /// Scan swept file content for new entity candidates and update the local registry.
 ///
 /// Called by [`run`] after a file sweep that added at least one drawer. Best-effort:
-/// a failed registry write does not abort the sweep. Uses English language detection
-/// as the default; the registry ignores duplicates so repeated calls are safe.
+/// a failed registry write does not abort the sweep. Loads configured entity languages
+/// from config; falls back to English. The registry ignores duplicates so repeated calls are safe.
 fn run_learn_from_file(content: &str) {
     assert!(
         !content.is_empty(),
         "run_learn_from_file: content must not be empty"
     );
+    let languages: Vec<String> = crate::config::MempalaceConfig::load()
+        .map_or_else(|_| vec!["en".to_string()], |config| config.entity_languages);
+    assert!(
+        !languages.is_empty(),
+        "run_learn_from_file: language list must not be empty"
+    );
+    let language_refs: Vec<&str> = languages.iter().map(String::as_str).collect();
     let mut registry = EntityRegistry::load();
     // Registry summary is always non-empty — confirms the load succeeded.
     assert!(
@@ -85,7 +92,7 @@ fn run_learn_from_file(content: &str) {
         "run_learn_from_file: registry must load successfully"
     );
     // Best-effort: a failed write does not abort the parent sweep.
-    let _ = registry.learn_from_text(content, 0.7, &["en"]);
+    let _ = registry.learn_from_text(content, 0.7, &language_refs);
 }
 
 #[cfg(test)]

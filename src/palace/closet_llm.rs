@@ -7,8 +7,6 @@
 //! Bring-your-own-LLM. Endpoint is any OpenAI-compatible Chat Completions URL.
 //! Configure via env: `LLM_ENDPOINT`, `LLM_KEY`, `LLM_MODEL` or CLI flags.
 
-use std::collections::HashSet;
-
 use serde::Deserialize;
 use turso::Connection;
 
@@ -110,7 +108,7 @@ pub async fn regenerate_closets(
     // Purge stale closets before regenerating so that chunks deleted from the
     // drawers table do not leave orphaned entries in `compressed`.
     if !dry_run && !drawers.is_empty() {
-        regenerate_closets_purge_sources(connection, &drawers[..limit]).await?;
+        regenerate_closets_purge_drawers(connection, &drawers[..limit]).await?;
     }
 
     let mut stats = RegenerateStats::default();
@@ -188,34 +186,28 @@ async fn regenerate_closets_fetch_drawers(
     Ok(drawers)
 }
 
-/// Called by `regenerate_closets` to purge stale closets before regenerating.
+/// Delete `compressed` rows for the specific drawer IDs being regenerated.
 ///
-/// Collects unique non-empty source paths from `drawers` and calls
-/// [`closets::purge_file_closets`] for each, so that chunks removed from the
-/// `drawers` table do not leave orphaned entries in `compressed`.
-async fn regenerate_closets_purge_sources(
+/// Used instead of source-file purging so that when `sample > 0`, only the
+/// sampled drawers' closet entries are removed — unsampled drawers sharing the
+/// same source file are left untouched.
+async fn regenerate_closets_purge_drawers(
     connection: &Connection,
     drawers: &[DrawerRow],
 ) -> Result<()> {
     assert!(
         !drawers.is_empty(),
-        "regenerate_closets_purge_sources: drawers must not be empty"
+        "regenerate_closets_purge_drawers: drawers must not be empty"
     );
-
-    let mut seen: HashSet<&str> = HashSet::new();
     for drawer in drawers {
-        if drawer.source_file.is_empty() {
-            continue;
-        }
-        if seen.insert(drawer.source_file.as_str()) {
-            closets::purge_file_closets(connection, &drawer.source_file).await?;
-        }
+        assert!(
+            !drawer.id.is_empty(),
+            "regenerate_closets_purge_drawers: drawer id must not be empty"
+        );
+        connection
+            .execute("DELETE FROM compressed WHERE id = ?", (drawer.id.as_str(),))
+            .await?;
     }
-
-    assert!(
-        seen.len() <= drawers.len(),
-        "regenerate_closets_purge_sources: unique source count must not exceed drawer count"
-    );
     Ok(())
 }
 
@@ -253,6 +245,12 @@ async fn regenerate_closets_process_drawer(
     );
 
     let response = provider.classify(SYSTEM_PROMPT, &user_prompt, true)?;
+    if response.text.trim().is_empty() {
+        return Err(crate::error::Error::Other(format!(
+            "LLM returned empty response for drawer {}",
+            &drawer.id[..8.min(drawer.id.len())]
+        )));
+    }
     let output = regenerate_closets_parse_response(&response.text);
     let compressed = regenerate_closets_format_content(&output);
 

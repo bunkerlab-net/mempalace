@@ -327,7 +327,9 @@ fn onboarding_maybe_scan(
     )? {
         return Ok(people);
     }
-    let detected = onboarding_scan_directory(directory, &people);
+    let config = crate::config::MempalaceConfig::load().unwrap_or_default();
+    let language_refs: Vec<&str> = config.entity_languages.iter().map(String::as_str).collect();
+    let detected = onboarding_scan_directory(directory, &people, &language_refs);
     if detected.is_empty() {
         println!("  No additional candidates found.");
         return Ok(people);
@@ -341,7 +343,12 @@ fn onboarding_maybe_scan(
 fn onboarding_scan_directory(
     directory: &Path,
     known_people: &[PersonEntry],
+    languages: &[&str],
 ) -> Vec<DetectedEntity> {
+    assert!(
+        !languages.is_empty(),
+        "onboarding_scan_directory: languages must not be empty"
+    );
     assert!(
         known_people.len() <= PEOPLE_LIMIT,
         "people list must not exceed PEOPLE_LIMIT"
@@ -355,7 +362,7 @@ fn onboarding_scan_directory(
         return vec![];
     }
     let path_refs: Vec<&Path> = path_bufs.iter().map(std::path::PathBuf::as_path).collect();
-    let result = detect_entities(&path_refs, SCAN_FILES_MAX, &["en"]);
+    let result = detect_entities(&path_refs, SCAN_FILES_MAX, languages);
 
     result
         .people
@@ -538,12 +545,43 @@ fn onboarding_generate_entity_codes(people: &[PersonEntry]) -> Vec<(String, Stri
             .collect::<String>()
             .to_uppercase();
         let code = if used.contains(&base) {
-            person
-                .name
-                .chars()
-                .take(4)
-                .collect::<String>()
-                .to_uppercase()
+            // Progressively widen the prefix until unique; fall back to numeric suffix.
+            let name_chars: Vec<char> = person.name.chars().collect();
+            let mut candidate = String::new();
+            let mut found = false;
+            for length in 4..=name_chars.len() {
+                candidate = name_chars[..length]
+                    .iter()
+                    .collect::<String>()
+                    .to_uppercase();
+                if !used.contains(&candidate) {
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                // All prefix lengths are taken; append a numeric suffix.
+                let mut suffix = 1usize;
+                loop {
+                    candidate = format!(
+                        "{}{}",
+                        name_chars[..name_chars.len().min(4)]
+                            .iter()
+                            .collect::<String>()
+                            .to_uppercase(),
+                        suffix
+                    );
+                    if !used.contains(&candidate) {
+                        break;
+                    }
+                    suffix += 1;
+                    assert!(
+                        suffix < 1000,
+                        "onboarding_generate_entity_codes: too many collisions"
+                    );
+                }
+            }
+            candidate
         } else {
             base
         };

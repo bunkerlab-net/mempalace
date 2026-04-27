@@ -99,6 +99,12 @@ pub async fn search_memories(
             && !boost_map.is_empty()
         {
             search_memories_apply_closet_boost(&mut results, &boost_map);
+            // Re-sort so boosted entries appear at the top.
+            results.sort_unstable_by(|a, b| {
+                b.relevance
+                    .partial_cmp(&a.relevance)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
         }
     }
 

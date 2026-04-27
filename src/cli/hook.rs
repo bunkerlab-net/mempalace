@@ -571,8 +571,12 @@ fn hook_wing_from_transcript(transcript_path: &str) -> String {
         && let Some(caps) = re.captures(&normalized)
     {
         let encoded = &caps[1];
-        if let Some(project) = encoded.rsplit('-').next().filter(|token| !token.is_empty()) {
-            return format!("wing_{}", project.to_lowercase().replace(' ', "_"));
+        if !encoded.is_empty() {
+            let project = encoded.to_lowercase().replace(['-', ' '], "_");
+            let project = project.trim_matches('_');
+            if !project.is_empty() {
+                return format!("wing_{project}");
+            }
         }
     }
 
@@ -882,10 +886,10 @@ mod tests {
 
     #[test]
     fn hook_wing_from_transcript_extracts_project_name() {
-        // The last dash-token of the encoded folder becomes the wing name.
+        // The full encoded folder slug is normalized (dashes → underscores) to form the wing name.
         let path = "/Users/alice/.claude/projects/-Users-alice-Projects-myapp/session.jsonl";
         let wing = hook_wing_from_transcript(path);
-        assert_eq!(wing, "wing_myapp");
+        assert_eq!(wing, "wing_users_alice_projects_myapp");
         assert!(wing.starts_with("wing_"));
     }
 

@@ -220,6 +220,8 @@ pub async fn run(
         println!(
             "  Tokens (est.): {original_tokens_total} → {compressed_tokens_total} ({token_ratio:.1}x)"
         );
+    } else if original_tokens_total > 0 {
+        println!("  Tokens (est.): {original_tokens_total} → 0 (collapsed/no tokens produced)");
     }
 
     Ok(())

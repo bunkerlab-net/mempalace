@@ -226,8 +226,12 @@ impl MempalaceConfig {
         let directory = config_dir();
         std::fs::create_dir_all(&directory)?;
         let data = serde_json::to_string_pretty(self)?;
-        std::fs::write(config_path(), data)?;
-        // Pair assertion: the file must exist after a successful write.
+        // Write to a temp file in the same directory, then rename atomically so a
+        // partial write never leaves a truncated config.json on disk.
+        let tmp_path = directory.join("config.json.tmp");
+        std::fs::write(&tmp_path, &data)?;
+        std::fs::rename(&tmp_path, config_path())?;
+        // Pair assertion: the file must exist after a successful rename.
         debug_assert!(config_path().exists(), "config.json must exist after save");
         Ok(())
     }

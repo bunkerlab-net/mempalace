@@ -308,7 +308,7 @@ mod async_tests {
         )
         .await
         .expect("seed_from_entity_facts should succeed for valid subject and pairs");
-        assert_eq!(count, 2, "two pairs must produce two inserted triples");
+        assert_eq!(count, 2, "two pairs must produce two processed triples");
         // Pair assertion: both triples must exist in the graph.
         let rows = crate::db::query_all(&connection, "SELECT COUNT(*) FROM triples", ())
             .await
@@ -403,10 +403,10 @@ pub async fn add_entity(
 /// Bulk-seed KG triples for a subject from a `(predicate, object)` slice.
 ///
 /// Each pair is inserted via `add_triple` with default confidence and no date
-/// bounds. Returns the number of triples inserted. Used in tests to build
+/// bounds. Returns the number of fact pairs processed. Used in tests to build
 /// entity relationship graphs without calling `add_triple` individually.
 #[cfg(test)]
-pub async fn seed_from_entity_facts(
+async fn seed_from_entity_facts(
     connection: &Connection,
     subject: &str,
     facts: &[(&str, &str)],
@@ -420,7 +420,7 @@ pub async fn seed_from_entity_facts(
         "seed_from_entity_facts: facts slice must not be empty"
     );
 
-    let mut inserted = 0usize;
+    let mut processed = 0usize;
     for &(predicate, object) in facts {
         assert!(
             !predicate.is_empty(),
@@ -446,16 +446,16 @@ pub async fn seed_from_entity_facts(
             },
         )
         .await?;
-        inserted += 1;
+        processed += 1;
     }
 
     // Postcondition: one triple must have been processed per input pair.
     assert!(
-        inserted == facts.len(),
-        "seed_from_entity_facts: inserted {inserted} but expected {}",
+        processed == facts.len(),
+        "seed_from_entity_facts: processed {processed} but expected {}",
         facts.len()
     );
-    Ok(inserted)
+    Ok(processed)
 }
 
 /// Parameters for [`add_triple`].

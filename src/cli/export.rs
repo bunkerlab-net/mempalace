@@ -21,18 +21,47 @@ pub async fn run(
 
     let stats = exporter::export_palace(connection, output_dir, wing, dry_run).await?;
 
-    assert!(stats.rooms <= stats.drawers || stats.drawers == 0);
+    assert!(
+        stats.drawers != 0 || stats.rooms == 0,
+        "export: rooms must be zero when no drawers were exported"
+    );
+    assert!(
+        stats.rooms <= stats.drawers,
+        "export: room count must not exceed drawer count"
+    );
 
     if dry_run {
+        if let Some(wing_filter) = wing {
+            println!(
+                "Dry run: {} drawer(s) across {} wing(s) / {} room(s) would be exported to {} (wing: {wing_filter})",
+                stats.drawers,
+                stats.wings,
+                stats.rooms,
+                output_dir.display()
+            );
+        } else {
+            println!(
+                "Dry run: {} drawer(s) across {} wing(s) / {} room(s) would be exported to {}",
+                stats.drawers,
+                stats.wings,
+                stats.rooms,
+                output_dir.display()
+            );
+        }
+    } else if stats.drawers == 0 {
+        if let Some(wing_filter) = wing {
+            println!("No drawers found to export (wing: {wing_filter}).");
+        } else {
+            println!("No drawers found to export.");
+        }
+    } else if let Some(wing_filter) = wing {
         println!(
-            "Dry run: {} drawer(s) across {} wing(s) / {} room(s) would be exported to {}",
+            "Exported {} drawer(s) across {} wing(s) / {} room(s) to {} (wing: {wing_filter})",
             stats.drawers,
             stats.wings,
             stats.rooms,
             output_dir.display()
         );
-    } else if stats.drawers == 0 {
-        println!("No drawers found to export.");
     } else {
         println!(
             "Exported {} drawer(s) across {} wing(s) / {} room(s) to {}",

@@ -271,10 +271,6 @@ fn dedup_jaccard(set_a: &HashSet<String>, set_b: &HashSet<String>) -> f64 {
 /// Delete one drawer and its associated `drawer_words` and `compressed` rows.
 async fn dedup_delete_drawer(connection: &Connection, id: &str) -> Result<()> {
     assert!(!id.is_empty(), "dedup_delete_drawer: id must not be empty");
-    assert!(
-        id.starts_with("drawer_"),
-        "dedup_delete_drawer: id must have drawer_ prefix"
-    );
 
     connection
         .execute("DELETE FROM drawers WHERE id = ?", (id,))

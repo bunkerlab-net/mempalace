@@ -21,12 +21,12 @@ pub struct MineParams {
     pub dry_run: bool,
     /// If `true`, respect `.gitignore` rules when scanning (default: true).
     pub respect_gitignore: bool,
-    /// Paths to include even when `respect_gitignore` is `true`.
+    /// Paths (regular files only) to include even when `respect_gitignore` is `true`.
     ///
-    /// After the gitignore-aware scan, any path listed here (or any path
-    /// under a directory listed here) that is not already in the scan
-    /// results is appended verbatim. Ignored when `respect_gitignore` is
-    /// `false` since all paths are already included.
+    /// After the gitignore-aware scan, any regular file path listed here that
+    /// is not already in the scan results is appended verbatim. Directory
+    /// entries are skipped — only regular files are added. Ignored when
+    /// `respect_gitignore` is `false` since all paths are already included.
     pub include_ignored_paths: Vec<std::path::PathBuf>,
 }
 

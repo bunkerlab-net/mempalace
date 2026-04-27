@@ -112,9 +112,20 @@ fn check_text_flatten_names(raw_json: &str) -> HashSet<String> {
     let Ok(root) = serde_json::from_str::<serde_json::Value>(raw_json) else {
         return names;
     };
+    if let Some(arr) = root.as_array() {
+        // Top-level array: collect non-empty string items directly.
+        for item in arr {
+            if let Some(name) = item.as_str().filter(|n| !n.is_empty()) {
+                names.insert(name.to_string());
+            }
+        }
+        return names;
+    }
     let Some(obj) = root.as_object() else {
         return names;
     };
+    // Top-level object: recurse into values to collect names from nested arrays/objects.
+    // Keys are category labels (e.g. "people", "companies") — not entity names themselves.
     for value in obj.values() {
         match value {
             serde_json::Value::Array(arr) => {

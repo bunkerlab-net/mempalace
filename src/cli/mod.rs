@@ -146,7 +146,7 @@ pub enum Command {
         query: Option<String>,
 
         /// Number of results for L2 recall and L3 search
-        #[arg(long, default_value = "20")]
+        #[arg(long, default_value = "20", value_parser = parse_results_nonzero)]
         results: usize,
     },
 
@@ -328,4 +328,15 @@ pub enum Command {
         #[arg(long)]
         llm_api_key: Option<String>,
     },
+}
+
+/// Parse `--results` for `WakeUp`, rejecting zero as invalid.
+fn parse_results_nonzero(raw: &str) -> Result<usize, String> {
+    let count: usize = raw
+        .parse()
+        .map_err(|_| format!("'{raw}' is not a valid number of results"))?;
+    if count == 0 {
+        return Err("--results must be at least 1".to_string());
+    }
+    Ok(count)
 }
