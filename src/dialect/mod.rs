@@ -360,11 +360,10 @@ impl Dialect {
         assert!(!text.is_empty(), "count_tokens: text must not be empty");
         let word_count = text.split_ascii_whitespace().count();
         // 1.3 tokens per word: (wc * 13 + 5) / 10 gives standard rounding.
-        let tokens = (word_count * 13 + 5) / 10;
-        assert!(
-            tokens > 0,
-            "count_tokens: non-empty text must yield positive token count"
-        );
+        // Floor to 1: whitespace-only input yields 0 words, but 1 token is a safer
+        // estimate than 0 for LLM context budgeting.
+        let tokens = ((word_count * 13 + 5) / 10).max(1);
+        assert!(tokens > 0, "count_tokens: result must be positive");
         tokens
     }
 

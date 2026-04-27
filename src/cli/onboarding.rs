@@ -761,6 +761,7 @@ fn onboarding_readline_yn(prompt: &str, default_yes: bool) -> Result<bool> {
 }
 
 #[cfg(test)]
+// Test code — .expect() with a descriptive message is acceptable; panics are the correct failure mode.
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;

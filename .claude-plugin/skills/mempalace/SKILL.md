@@ -19,7 +19,7 @@ via MCP tools or the `mempalace` CLI. No cloud services or API keys required.
 - **Wake up** at the start of a session: check `mempalace_status` and the
   L0/L1 context from `mempalace wakeup` to orient yourself.
 - **File important facts**: use `mempalace_add_drawer` to store decisions,
-  preferences, milestones, and key facts the user wants remembered.
+  preferences, milestones, and key facts the user wants to be remembered.
 - **Mine projects**: run `mempalace mine <dir>` to ingest a project directory
   or conversation exports into the palace.
 
@@ -59,7 +59,6 @@ via MCP tools or the `mempalace` CLI. No cloud services or API keys required.
 ### Graph stats
 
     mempalace_graph_stats()    -- connected components, clustering
-    mempalace_kg_stats()       -- entity/triple counts
 
 ## Slash Commands
 

@@ -56,7 +56,7 @@ pub async fn ingest_diaries(
         "diary_dir must be an existing directory"
     );
 
-    let cursor_path = diary_ingest_cursor_path(diary_dir);
+    let cursor_path = diary_ingest_cursor_path();
     let mut cursor = diary_ingest_load_cursor(&cursor_path);
 
     let files = diary_ingest_scan_files(diary_dir)?;
@@ -81,8 +81,11 @@ pub async fn ingest_diaries(
 }
 
 /// Find `<config_dir>/diary_cursors.json`.
-fn diary_ingest_cursor_path(diary_dir: &Path) -> PathBuf {
-    assert!(diary_dir.is_absolute() || !diary_dir.as_os_str().is_empty());
+///
+/// The cursor file is global (not per-directory) so ingestion state is shared
+/// across all diary roots — a file ingested from one path is not re-ingested
+/// from another.
+fn diary_ingest_cursor_path() -> PathBuf {
     config::config_dir().join("diary_cursors.json")
 }
 
@@ -133,13 +136,13 @@ fn diary_ingest_is_diary_file(path: &Path) -> bool {
         .file_stem()
         .and_then(|stem_os| stem_os.to_str())
         .unwrap_or("");
-    // Require at least "YYYY-MM-DD" at the start (10 chars, digit-digit-digit pattern).
-    if stem.len() < 10 {
+    // Require at least "YYYY-MM-DD" at the start (10 bytes; all ASCII so byte == char length).
+    // Work on raw bytes to avoid a char-boundary panic for non-ASCII filenames.
+    let bytes = stem.as_bytes();
+    if bytes.len() < 10 {
         return false;
     }
-    let prefix = &stem[..10];
     // Pattern: 4 digits, '-', 2 digits, '-', 2 digits.
-    let bytes = prefix.as_bytes();
     bytes[4] == b'-'
         && bytes[7] == b'-'
         && bytes[..4].iter().all(u8::is_ascii_digit)

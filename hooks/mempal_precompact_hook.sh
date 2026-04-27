@@ -1,7 +1,7 @@
 #!/bin/bash
 # MEMPALACE PRE-COMPACT HOOK — Synchronous mine before context compression
 #
-# Claude Code "PreCompact" hook. Delegates to `mempalace hook run --hook precompact`.
+# Claude Code "PreCompact" hook. Delegates to `mempalace hook --hook precompact --harness claude-code`.
 # The Rust binary mines the transcript directory synchronously so memories land
 # before the compaction window closes, then outputs `{}` to allow compaction.
 #

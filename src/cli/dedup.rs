@@ -45,6 +45,7 @@ pub async fn run(
 }
 
 #[cfg(test)]
+// Test code — .expect() with a descriptive message is acceptable; panics are the correct failure mode.
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;

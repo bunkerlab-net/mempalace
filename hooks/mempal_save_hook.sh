@@ -1,7 +1,7 @@
 #!/bin/bash
 # MEMPALACE SAVE HOOK — Auto-save every N exchanges
 #
-# Claude Code "Stop" hook. Delegates to `mempalace hook run --hook stop`.
+# Claude Code "Stop" hook. Delegates to `mempalace hook --hook stop --harness claude-code`.
 # The Rust binary counts messages, manages save state, writes diary entries,
 # and emits the correct JSON response on stdout.
 #
@@ -35,7 +35,7 @@
 # MEMPALACE_DIR — override the palace data directory (optional).
 #                 Defaults to $XDG_DATA_HOME/mempalace or ~/.local/share/mempalace.
 #
-# hook_silent_save — set via `mempalace hook_settings` MCP tool.
+# hook_silent_save — set via `mempalace_hook_settings` MCP tool.
 #                    true (default) = write diary directly, emit systemMessage.
 #                    false = return {"decision":"block"} and ask Claude to save.
 

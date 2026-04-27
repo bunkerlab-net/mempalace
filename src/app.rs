@@ -141,8 +141,8 @@ pub async fn run(cli: Cli) -> error::Result<()> {
             run_dedup(palace_override, wing, threshold, dry_run, stats).await?;
         }
 
-        Command::Repair { skip_confirm: _ } => {
-            run_repair(palace_override).await?;
+        Command::Repair { skip_confirm } => {
+            run_repair(palace_override, skip_confirm).await?;
         }
 
         Command::Mcp { setup } => {
@@ -277,9 +277,30 @@ async fn run_dedup(
     cli::dedup::run(&connection, wing.as_deref(), threshold, dry_run, stats).await
 }
 
-/// Handle the `repair` sub-command — opens the palace and runs repair.
-async fn run_repair(palace_override: Option<&std::path::Path>) -> error::Result<()> {
+/// Handle the `repair` sub-command — prompts for confirmation then rebuilds the index.
+///
+/// `skip_confirm` maps to the `-y` / `--yes` CLI flag; when false the user must
+/// type "y" before the repair proceeds.
+async fn run_repair(
+    palace_override: Option<&std::path::Path>,
+    skip_confirm: bool,
+) -> error::Result<()> {
+    if !skip_confirm {
+        use std::io::{BufRead, Write};
+        print!("Rebuild the inverted index? This rewrites drawer_words. [y/N] ");
+        std::io::stdout().flush().ok();
+        let mut answer = String::new();
+        std::io::stdin().lock().read_line(&mut answer).ok();
+        if answer.trim().to_lowercase() != "y" {
+            println!("Aborted.");
+            return Ok(());
+        }
+    }
     let (_db, connection, palace_path) = open_palace(palace_override).await?;
+    assert!(
+        !palace_path.as_os_str().is_empty(),
+        "run_repair: palace_path must not be empty"
+    );
     cli::repair::run(&connection, &palace_path).await
 }
 
