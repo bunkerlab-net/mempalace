@@ -1,0 +1,16 @@
+{
+  "Stop": [
+    {
+      "type": "command",
+      "command": "mempalace hook --hook stop --harness codex",
+      "timeout": 30
+    }
+  ],
+  "PreCompact": [
+    {
+      "type": "command",
+      "command": "mempalace hook --hook precompact --harness codex",
+      "timeout": 120
+    }
+  ]
+}
