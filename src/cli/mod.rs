@@ -1,6 +1,7 @@
 //! CLI command definitions and handlers for the `mempalace` binary.
 
 pub mod compress;
+pub mod diary_ingest;
 pub mod export;
 pub mod hook;
 pub mod init;
@@ -224,5 +225,23 @@ pub enum Command {
         /// Harness name: claude-code or codex
         #[arg(long, default_value = "claude-code")]
         harness: String,
+    },
+
+    /// Ingest on-disk markdown diary files (`YYYY-MM-DD*.md`) into the palace
+    DiaryIngest {
+        /// Path to the directory containing diary markdown files
+        directory: PathBuf,
+
+        /// Wing to file diary drawers under
+        #[arg(long, default_value = "diary")]
+        wing: String,
+
+        /// Agent name recorded on each drawer
+        #[arg(long, default_value = "mempalace")]
+        agent: String,
+
+        /// Re-ingest all sections even if already filed
+        #[arg(long)]
+        force: bool,
     },
 }

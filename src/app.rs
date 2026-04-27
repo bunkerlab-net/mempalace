@@ -132,6 +132,15 @@ pub async fn run(cli: Cli) -> error::Result<()> {
             run_export(output, wing, dry_run).await?;
         }
 
+        Command::DiaryIngest {
+            directory,
+            wing,
+            agent,
+            force,
+        } => {
+            run_diary_ingest(directory, wing, agent, force).await?;
+        }
+
         Command::Instructions { name } => {
             cli::instructions::run(&name)?;
         }
@@ -257,6 +266,18 @@ async fn run_sweep(target: std::path::PathBuf, wing: String) -> error::Result<()
     let target = expand_tilde(&target);
     let (_db, connection, _path) = open_palace().await?;
     cli::sweep::run(&connection, &target, &wing).await
+}
+
+/// Handle the `diary-ingest` sub-command — ingests diary markdown files into the palace.
+async fn run_diary_ingest(
+    directory: std::path::PathBuf,
+    wing: String,
+    agent: String,
+    force: bool,
+) -> error::Result<()> {
+    let directory = expand_tilde(&directory);
+    let (_db, connection, _path) = open_palace().await?;
+    cli::diary_ingest::run(&connection, &directory, &wing, &agent, force).await
 }
 
 /// Handle the `export` sub-command — exports palace drawers to markdown files.
