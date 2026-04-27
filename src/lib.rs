@@ -27,4 +27,5 @@ pub mod mcp;
 pub mod normalize;
 pub mod palace;
 pub mod schema;
+pub mod sources;
 pub mod test_helpers;
