@@ -168,6 +168,11 @@ pub async fn run(cli: Cli) -> error::Result<()> {
         Command::Hook { hook, harness } => {
             cli::hook::run(&hook, &harness).await?;
         }
+
+        Command::Onboard { directory } => {
+            let directory = expand_tilde(&directory);
+            cli::onboarding::run(&directory)?;
+        }
     }
 
     Ok(())

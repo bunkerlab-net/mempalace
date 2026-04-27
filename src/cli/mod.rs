@@ -7,6 +7,7 @@ pub mod export;
 pub mod hook;
 pub mod init;
 pub mod instructions;
+pub mod onboarding;
 pub mod repair;
 pub mod search;
 pub mod split;
@@ -215,6 +216,13 @@ pub enum Command {
     Instructions {
         /// Instruction name: help, init, mine, search, or status
         name: String,
+    },
+
+    /// First-run interactive setup wizard — seeds your entity registry
+    Onboard {
+        /// Directory to scan for additional entity candidates (default: current dir)
+        #[arg(long, short = 'd', default_value = ".")]
+        directory: PathBuf,
     },
 
     /// Run a hook handler (session-start, stop, or precompact)
