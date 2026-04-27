@@ -652,6 +652,204 @@ fn search_memories_apply_closet_boost(
 mod tests {
     use super::*;
 
+    // ── search_memories_collect_sources ──────────────────────────────────
+
+    #[test]
+    fn search_memories_collect_sources_deduplicates_paths() {
+        // Two results sharing a source_path must produce only one entry.
+        let results = vec![
+            SearchResult {
+                text: "alpha".into(),
+                wing: "w".into(),
+                room: "r".into(),
+                source_file: "a.rs".into(),
+                source_path: "/src/a.rs".into(),
+                chunk_index: 0,
+                relevance: 1.0,
+                created_at: String::new(),
+            },
+            SearchResult {
+                text: "beta".into(),
+                wing: "w".into(),
+                room: "r".into(),
+                source_file: "a.rs".into(),
+                source_path: "/src/a.rs".into(),
+                chunk_index: 1,
+                relevance: 0.5,
+                created_at: String::new(),
+            },
+        ];
+        let paths = search_memories_collect_sources(&results);
+        assert_eq!(paths.len(), 1, "duplicate source_path must be deduplicated");
+        assert_eq!(paths[0], "/src/a.rs");
+    }
+
+    #[test]
+    fn search_memories_collect_sources_filters_empty_paths() {
+        // Results with an empty source_path must be excluded from the output.
+        let results = vec![
+            SearchResult {
+                text: "alpha".into(),
+                wing: "w".into(),
+                room: "r".into(),
+                source_file: String::new(),
+                source_path: String::new(),
+                chunk_index: 0,
+                relevance: 1.0,
+                created_at: String::new(),
+            },
+            SearchResult {
+                text: "beta".into(),
+                wing: "w".into(),
+                room: "r".into(),
+                source_file: "b.rs".into(),
+                source_path: "/src/b.rs".into(),
+                chunk_index: 0,
+                relevance: 0.8,
+                created_at: String::new(),
+            },
+        ];
+        let paths = search_memories_collect_sources(&results);
+        assert_eq!(paths.len(), 1, "empty source_path must be excluded");
+        assert_eq!(paths[0], "/src/b.rs");
+    }
+
+    #[test]
+    fn search_memories_collect_sources_preserves_order() {
+        // Output order must match the first occurrence of each path in results.
+        let results = vec![
+            SearchResult {
+                text: "first".into(),
+                wing: "w".into(),
+                room: "r".into(),
+                source_file: "a.rs".into(),
+                source_path: "/src/a.rs".into(),
+                chunk_index: 0,
+                relevance: 1.0,
+                created_at: String::new(),
+            },
+            SearchResult {
+                text: "second".into(),
+                wing: "w".into(),
+                room: "r".into(),
+                source_file: "b.rs".into(),
+                source_path: "/src/b.rs".into(),
+                chunk_index: 0,
+                relevance: 0.9,
+                created_at: String::new(),
+            },
+        ];
+        let paths = search_memories_collect_sources(&results);
+        assert_eq!(paths.len(), 2);
+        assert_eq!(
+            paths[0], "/src/a.rs",
+            "first path must preserve insertion order"
+        );
+        assert_eq!(
+            paths[1], "/src/b.rs",
+            "second path must preserve insertion order"
+        );
+    }
+
+    // ── search_memories_apply_closet_boost ───────────────────────────────
+
+    #[test]
+    fn search_memories_apply_closet_boost_scales_matching_result() {
+        // A result whose source_path appears in the boost map must have its
+        // relevance multiplied by (1.0 + boost).
+        let mut results = vec![SearchResult {
+            text: "relevant content".into(),
+            wing: "w".into(),
+            room: "r".into(),
+            source_file: "main.rs".into(),
+            source_path: "/src/main.rs".into(),
+            chunk_index: 0,
+            relevance: 2.0,
+            created_at: String::new(),
+        }];
+        let mut boost_map = HashMap::new();
+        boost_map.insert("/src/main.rs".to_string(), 0.4_f64);
+
+        search_memories_apply_closet_boost(&mut results, &boost_map);
+
+        // 2.0 * (1.0 + 0.4) == 2.8.
+        assert!(
+            (results[0].relevance - 2.8).abs() < 1e-9,
+            "boosted relevance must be 2.8, got {}",
+            results[0].relevance
+        );
+        assert!(results[0].relevance > 2.0, "boost must increase relevance");
+    }
+
+    #[test]
+    fn search_memories_apply_closet_boost_leaves_non_matching_result_unchanged() {
+        // A result whose source_path is absent from the boost map must be unchanged.
+        let original_relevance = 1.5_f64;
+        let mut results = vec![SearchResult {
+            text: "other content".into(),
+            wing: "w".into(),
+            room: "r".into(),
+            source_file: "other.rs".into(),
+            source_path: "/src/other.rs".into(),
+            chunk_index: 0,
+            relevance: original_relevance,
+            created_at: String::new(),
+        }];
+        let mut boost_map = HashMap::new();
+        boost_map.insert("/src/main.rs".to_string(), 0.4_f64);
+
+        search_memories_apply_closet_boost(&mut results, &boost_map);
+
+        assert!(
+            (results[0].relevance - original_relevance).abs() < 1e-9,
+            "relevance must be unchanged when source_path is absent from boost map"
+        );
+    }
+
+    // ── search_memories_compute_bm25 edge cases ──────────────────────────
+
+    #[test]
+    fn search_memories_compute_bm25_empty_candidates_returns_empty() {
+        // An empty candidate list must short-circuit and return an empty vec.
+        let tf_data: HashMap<String, HashMap<String, i64>> = HashMap::new();
+        let doc_lengths: HashMap<String, i64> = HashMap::new();
+        let words = vec!["rust".to_string()];
+        let result = search_memories_compute_bm25(vec![], &tf_data, &doc_lengths, &words, 5);
+        assert!(
+            result.is_empty(),
+            "empty candidates must yield empty results"
+        );
+        assert_eq!(result.len(), 0);
+    }
+
+    // ── search_memories_compute_idf zero-df branch ───────────────────────
+
+    #[test]
+    fn search_memories_compute_idf_df_zero_returns_zero_idf() {
+        // A query term absent from all candidates must receive an IDF of 0.0.
+        let candidates = vec![Candidate {
+            id: "c1".into(),
+            text: String::new(),
+            wing: String::new(),
+            room: String::new(),
+            source_path: String::new(),
+            chunk_index: 0,
+            created_at: String::new(),
+        }];
+        // tf_data has no entry for "absent_term", so df=0.
+        let tf_data: HashMap<String, HashMap<String, i64>> = HashMap::new();
+        let words = vec!["absent_term".to_string()];
+        let idf = search_memories_compute_idf(&candidates, &tf_data, &words);
+        // The df=0 branch assigns the literal 0.0. Using abs() < epsilon rather
+        // than assert_eq! to satisfy the float_cmp lint.
+        let absent_idf = idf.get("absent_term").copied().unwrap_or(-1.0);
+        assert!(
+            absent_idf.abs() < 1e-12,
+            "absent term must have IDF of exactly 0.0, got {absent_idf}"
+        );
+        assert!(idf.contains_key("absent_term"));
+    }
+
     #[test]
     fn tokenize_query_basic() {
         let tokens = tokenize_query("rust programming language");
@@ -943,6 +1141,86 @@ mod async_tests {
         assert!(
             neighbors.is_empty(),
             "single-chunk source must have no neighbors"
+        );
+    }
+
+    // ── search_memories early-return when query tokenizes to empty (line 70) ──
+
+    #[tokio::test]
+    async fn search_memories_returns_empty_when_query_is_all_stopwords() {
+        // Queries whose tokens are all filtered (stop words or too short) must
+        // return Ok(vec![]) immediately without querying the database.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        seed_drawers(&connection).await;
+
+        // "the and for" all pass the length filter but are stop words, so
+        // tokenize_query returns an empty vec, triggering the early return at line 70.
+        let results = search_memories(&connection, "the and for", None, None, 5)
+            .await
+            .expect("search_memories must return Ok(vec![]) for all-stopword query");
+
+        assert!(
+            results.is_empty(),
+            "all-stopword query must produce empty results"
+        );
+        // Pair assertion: query of only 1-2 char tokens also tokenizes to empty.
+        let results_short = search_memories(&connection, "a b it go", None, None, 5)
+            .await
+            .expect("search_memories must return Ok(vec![]) for all-short-token query");
+        assert!(
+            results_short.is_empty(),
+            "all-short-token query must produce empty results"
+        );
+    }
+
+    // ── closet boost integration path (lines 101-109) ────────────────────
+
+    #[tokio::test]
+    async fn search_memories_applies_closet_boost_when_closet_matches() {
+        // Insert a drawer, insert a matching closet entry for its source_file,
+        // then search. The closet boost must increase the relevance of the
+        // matching result (exercising lines 94–109 of search_memories).
+        let (_db, connection) = crate::test_helpers::test_db().await;
+
+        crate::palace::drawer::add_drawer(
+            &connection,
+            &crate::palace::drawer::DrawerParams {
+                id: "boost_src",
+                wing: "boost_wing",
+                room: "boost_room",
+                content: "astronomy telescope observation galaxy stars",
+                source_file: "astronomy.rs",
+                chunk_index: 0,
+                added_by: "test",
+                ingest_mode: "projects",
+                source_mtime: None,
+            },
+        )
+        .await
+        .expect("add_drawer must succeed for closet boost test");
+
+        // Upsert a closet entry whose content matches the query terms.
+        // The `source_file` column in `compressed` must match the drawer's
+        // source_file so that search_closet_boost can join them.
+        crate::palace::closets::upsert_closet_lines(
+            &connection,
+            "boost_src",
+            "astronomy.rs",
+            "astronomy telescope observation galaxy stars",
+        )
+        .await
+        .expect("upsert_closet_lines must succeed for boost test");
+
+        let results = search_memories(&connection, "astronomy telescope", None, None, 5)
+            .await
+            .expect("search_memories must succeed when closet boost is applicable");
+
+        assert!(!results.is_empty(), "search must find the astronomy drawer");
+        assert_eq!(results[0].source_file, "astronomy.rs");
+        // Relevance is boosted so it must be greater than zero.
+        assert!(
+            results[0].relevance > 0.0,
+            "boosted result relevance must be positive"
         );
     }
 }

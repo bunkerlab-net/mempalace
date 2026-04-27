@@ -1339,4 +1339,638 @@ mod tests {
             "my_entities.json should not be skipped"
         );
     }
+
+    #[test]
+    fn is_skip_file_excludes_all_project_config_files() {
+        // All four config file names must be excluded so they are not mined as content.
+        for config_name in PROJECT_CONFIG_FILES {
+            assert!(
+                is_skip_file(config_name),
+                "{config_name} must be in the skip list"
+            );
+        }
+        // Pair assertion: an unrelated YAML file must not be skipped.
+        assert!(
+            !is_skip_file("other.yaml"),
+            "other.yaml must not be in the skip list"
+        );
+    }
+
+    #[test]
+    fn is_skip_file_excludes_gitignore_and_lock_files() {
+        // .gitignore and lock files are skip-worthy — not meaningful project text.
+        assert!(is_skip_file(".gitignore"), ".gitignore must be skipped");
+        assert!(
+            is_skip_file("package-lock.json"),
+            "package-lock.json must be skipped"
+        );
+        assert!(is_skip_file("Cargo.lock"), "Cargo.lock must be skipped");
+        // Pair assertion: normal source files must not be skipped.
+        assert!(!is_skip_file("main.rs"), "main.rs must not be skipped");
+        assert!(!is_skip_file("notes.txt"), "notes.txt must not be skipped");
+    }
+
+    #[test]
+    fn apply_include_ignored_skips_nonexistent_paths() {
+        // A path that does not exist on disk cannot be canonicalized and must be silently skipped.
+        let dir = tempfile::tempdir().expect("tempdir must succeed");
+        let existing_file = dir.path().join("real.txt");
+        std::fs::write(&existing_file, "content").expect("write must succeed");
+        let canonical_existing = existing_file
+            .canonicalize()
+            .expect("canonicalize must succeed");
+        let scanned = vec![canonical_existing.clone()];
+        // Include a path that does not exist.
+        let phantom = dir.path().join("does_not_exist.txt");
+        let result = mine_apply_include_ignored(scanned, &[phantom]);
+        assert_eq!(
+            result.len(),
+            1,
+            "nonexistent include path must be silently skipped"
+        );
+        assert_eq!(
+            result[0], canonical_existing,
+            "original scanned entry must be preserved"
+        );
+    }
+
+    #[test]
+    fn apply_include_ignored_skips_directory_paths() {
+        // Only regular files may be appended; directories must be skipped.
+        let dir = tempfile::tempdir().expect("tempdir must succeed");
+        let sub_dir = dir.path().join("subdir");
+        std::fs::create_dir_all(&sub_dir).expect("create_dir must succeed");
+        let scanned: Vec<PathBuf> = vec![];
+        // Pass the subdirectory as an include path — it should be ignored.
+        let result = mine_apply_include_ignored(scanned, &[sub_dir]);
+        assert_eq!(
+            result.len(),
+            0,
+            "directory include path must be silently skipped"
+        );
+    }
+
+    // --- walk_dir_gitignore: skip-dir component check ---
+
+    #[test]
+    fn walk_dir_gitignore_skips_skip_dir_components() {
+        // walk_dir_gitignore must not return files from directories matching is_skip_dir()
+        // even when respect_gitignore=true. The component-level check on L118-123 is the
+        // path under test.
+        let dir = tempfile::tempdir().expect("tempdir must succeed");
+        let node_modules = dir.path().join("node_modules");
+        std::fs::create_dir_all(&node_modules).expect("create node_modules must succeed");
+        std::fs::write(node_modules.join("index.js"), "console.log('hi')")
+            .expect("write node_modules/index.js must succeed");
+        std::fs::write(dir.path().join("main.rs"), "fn main() {}")
+            .expect("write main.rs must succeed");
+
+        // Use walk_dir_gitignore directly to exercise the component-skip path.
+        let files = walk_dir_gitignore(dir.path());
+        let names: Vec<String> = files
+            .iter()
+            .map(|p| {
+                p.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+
+        assert!(
+            names.contains(&"main.rs".to_string()),
+            "main.rs must appear"
+        );
+        // Pair assertion: the file inside node_modules must be excluded.
+        assert!(
+            !names.contains(&"index.js".to_string()),
+            "node_modules/index.js must be excluded by skip-dir component check"
+        );
+    }
+
+    // --- walk_dir: no-extension file is silently skipped ---
+
+    #[test]
+    fn walk_dir_skips_files_without_extension() {
+        // Files that have no extension fall through the `if let Some(extension)` branch
+        // and are silently skipped. Covers the implicit else on L179.
+        let dir = tempfile::tempdir().expect("tempdir must succeed");
+        // "Makefile" has no extension.
+        std::fs::write(dir.path().join("Makefile"), "all:\n\t@echo hi")
+            .expect("write Makefile must succeed");
+        std::fs::write(dir.path().join("code.rs"), "fn main() {}")
+            .expect("write code.rs must succeed");
+
+        let mut files: Vec<PathBuf> = Vec::new();
+        walk_dir(dir.path(), &mut files);
+
+        let names: Vec<String> = files
+            .iter()
+            .map(|p| {
+                p.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+
+        assert!(
+            names.contains(&"code.rs".to_string()),
+            "code.rs must appear"
+        );
+        // Pair assertion: Makefile (no extension) must be excluded.
+        assert!(
+            !names.contains(&"Makefile".to_string()),
+            "Makefile without extension must be skipped"
+        );
+    }
+
+    // --- mine(): empty rooms fallback ---
+
+    #[tokio::test]
+    async fn mine_with_empty_rooms_in_config_falls_back_to_general() {
+        // When mempalace.yaml has an empty rooms list, mine() must inject a "general"
+        // room rather than failing with a detect_room precondition violation.
+        // Covers the `if rooms.is_empty()` branch on L638-646.
+        let dir = tempfile::tempdir().expect("tempdir must succeed");
+        // Write a config with an empty rooms list.
+        std::fs::write(
+            dir.path().join("mempalace.yaml"),
+            "wing: test_wing\nrooms: []\n",
+        )
+        .expect("write mempalace.yaml must succeed");
+        let body = "This is a sufficiently long note with plenty of content here.";
+        std::fs::write(dir.path().join("notes.txt"), body).expect("write notes.txt must succeed");
+
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let opts = MineParams {
+            wing: None,
+            agent: "test".to_string(),
+            limit: 0,
+            dry_run: false,
+            respect_gitignore: false,
+            include_ignored_paths: vec![],
+        };
+
+        mine(&connection, dir.path(), &opts)
+            .await
+            .expect("mine must succeed even with empty rooms in config");
+
+        // Drawers must exist and be in the injected 'general' room.
+        let rows = crate::db::query_all(
+            &connection,
+            "SELECT room FROM drawers WHERE wing = 'test_wing'",
+            (),
+        )
+        .await
+        .expect("query must succeed");
+        assert!(!rows.is_empty(), "at least one drawer must be filed");
+        let room: String = rows[0].get(0).expect("room column must be readable");
+        assert_eq!(room, "general", "injected general room must be used");
+    }
+
+    // --- mine(): limit applied ---
+
+    #[tokio::test]
+    async fn mine_with_limit_caps_files_processed() {
+        // When opts.limit > 0, mine must process at most `limit` files.
+        // Covers the `else { all_files.into_iter().take(opts.limit).collect() }` branch.
+        let dir = tempfile::tempdir().expect("tempdir must succeed");
+        std::fs::write(
+            dir.path().join("mempalace.yaml"),
+            "wing: limit_test\nrooms:\n  - name: general\n    description: ''\n",
+        )
+        .expect("write config must succeed");
+        let body = "This note has enough content to exceed the fifty character minimum for mining.";
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(dir.path().join(name), body).expect("write test file must succeed");
+        }
+
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let opts = MineParams {
+            wing: None,
+            agent: "test".to_string(),
+            limit: 1,
+            dry_run: false,
+            respect_gitignore: false,
+            include_ignored_paths: vec![],
+        };
+
+        mine(&connection, dir.path(), &opts)
+            .await
+            .expect("mine with limit=1 must succeed");
+
+        let rows = crate::db::query_all(
+            &connection,
+            "SELECT DISTINCT source_file FROM drawers WHERE wing = 'limit_test'",
+            (),
+        )
+        .await
+        .expect("query must succeed");
+        assert_eq!(rows.len(), 1, "limit=1 must cap at one source file");
+    }
+
+    // --- mine_print_summary: unreadable/too-short counter display ---
+
+    #[test]
+    fn mine_print_summary_with_nonzero_unreadable_prints_without_panic() {
+        // When files_unreadable_or_too_short > 0 the conditional println is executed.
+        // Covers the `if files_unreadable_or_too_short > 0` branch on L269-273.
+        let mut room_counts: HashMap<String, usize> = HashMap::new();
+        room_counts.insert("general".to_string(), 1);
+
+        // Must not panic for any combination of counts.
+        mine_print_summary(false, 3, 1, 1, 0, &room_counts);
+        mine_print_summary(true, 3, 0, 2, 1, &room_counts);
+
+        // Pair assertion: room_counts is unmodified after the call.
+        assert_eq!(room_counts.len(), 1, "room_counts must be unmodified");
+    }
+
+    // --- mine_process_files: entity_count > 0 println ---
+
+    #[tokio::test]
+    async fn mine_processes_entity_rich_file_without_panic() {
+        // A file with proper-noun names triggers entity detection and the
+        // `if entity_count > 0` println on L497-499.
+        let dir = tempfile::tempdir().expect("tempdir must succeed");
+        std::fs::write(
+            dir.path().join("mempalace.yaml"),
+            "wing: entity_wing\nrooms:\n  - name: general\n    description: ''\n",
+        )
+        .expect("write config must succeed");
+        // Repeat names to raise entity detection likelihood.
+        std::fs::write(
+            dir.path().join("names.txt"),
+            "Alice Smith reviewed the proposal with Bob Jones. \
+             Alice Smith approved it. Bob Jones merged the pull request. \
+             Alice Smith and Bob Jones collaborated on the architecture design.",
+        )
+        .expect("write names.txt must succeed");
+
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let opts = MineParams {
+            wing: None,
+            agent: "test".to_string(),
+            limit: 0,
+            dry_run: false,
+            respect_gitignore: false,
+            include_ignored_paths: vec![],
+        };
+
+        // Must not panic even when entity_count > 0 triggers the extra println.
+        mine(&connection, dir.path(), &opts)
+            .await
+            .expect("mine must succeed with entity-rich file");
+
+        let rows = crate::db::query_all(
+            &connection,
+            "SELECT id FROM drawers WHERE wing = 'entity_wing'",
+            (),
+        )
+        .await
+        .expect("query must succeed");
+        assert!(!rows.is_empty(), "at least one drawer must be filed");
+    }
+
+    // --- mine_print_summary: dry_run=false "Next:" line ---
+
+    #[test]
+    fn mine_print_summary_non_dry_run_with_empty_room_counts() {
+        // Covers the `if !dry_run` println on L285 and an empty room_counts map.
+        let room_counts: HashMap<String, usize> = HashMap::new();
+        // Must not panic with zero room counts in non-dry-run mode.
+        mine_print_summary(false, 0, 0, 0, 0, &room_counts);
+        // Pair assertion: empty map is unchanged.
+        assert!(room_counts.is_empty(), "room_counts must remain empty");
+    }
+
+    #[test]
+    fn mine_load_config_falls_back_to_mempal_yaml() {
+        // mempal.yaml must be loaded when the mempalace.* variants are absent.
+        let dir = tempfile::tempdir().expect("tempdir must succeed");
+        std::fs::write(
+            dir.path().join("mempal.yaml"),
+            "wing: mempal-wing\nrooms:\n  - name: r\n    description: ''\n",
+        )
+        .expect("write mempal.yaml must succeed");
+        let config = mine_load_config(dir.path(), None).expect("should load mempal.yaml");
+        assert_eq!(
+            config.wing, "mempal-wing",
+            "wing must come from mempal.yaml"
+        );
+        assert_eq!(
+            config.rooms.len(),
+            1,
+            "rooms must be loaded from mempal.yaml"
+        );
+    }
+
+    #[test]
+    fn mine_load_config_falls_back_to_mempal_yml() {
+        // mempal.yml is the lowest-priority config file; must be used when all others absent.
+        let dir = tempfile::tempdir().expect("tempdir must succeed");
+        std::fs::write(
+            dir.path().join("mempal.yml"),
+            "wing: mempal-yml-wing\nrooms:\n  - name: r\n    description: ''\n",
+        )
+        .expect("write mempal.yml must succeed");
+        let config = mine_load_config(dir.path(), None).expect("should load mempal.yml");
+        assert_eq!(
+            config.wing, "mempal-yml-wing",
+            "wing must come from mempal.yml"
+        );
+        assert_eq!(
+            config.rooms.len(),
+            1,
+            "rooms must be loaded from mempal.yml"
+        );
+    }
+
+    #[test]
+    fn detect_hall_returns_correct_subdirectory_for_deeply_nested_file() {
+        // The hall is always the FIRST-level subdirectory, even for deeply nested files.
+        let dir = tempfile::tempdir().expect("tempdir must succeed");
+        let deep = dir.path().join("src").join("utils").join("helpers");
+        std::fs::create_dir_all(&deep).expect("create deep dirs must succeed");
+        let filepath = deep.join("math.rs");
+        std::fs::write(&filepath, "fn add() {}").expect("write file must succeed");
+
+        let hall = detect_hall(&filepath, dir.path());
+        assert!(hall.is_some(), "deeply nested file must have a hall");
+        assert_eq!(
+            hall.expect("hall must be Some for nested file"),
+            "src",
+            "hall must be the first-level subdirectory, not a deeper component"
+        );
+    }
+
+    #[test]
+    fn mine_read_file_returns_none_for_too_short_content() {
+        // Files whose trimmed content is fewer than 50 chars must return None.
+        let dir = tempfile::tempdir().expect("tempdir must succeed");
+        let filepath = dir.path().join("tiny.txt");
+        // 49 non-whitespace characters.
+        std::fs::write(&filepath, "a".repeat(49)).expect("write must succeed");
+        let result = mine_read_file(&filepath);
+        assert!(
+            result.is_none(),
+            "content shorter than 50 chars must return None"
+        );
+    }
+
+    #[test]
+    fn mine_read_file_returns_content_for_readable_file() {
+        // A file with content >= 50 chars must return the trimmed content.
+        let dir = tempfile::tempdir().expect("tempdir must succeed");
+        let filepath = dir.path().join("notes.txt");
+        let body = "This is a sufficiently long note to exceed the fifty character minimum.";
+        std::fs::write(&filepath, body).expect("write must succeed");
+        let result = mine_read_file(&filepath);
+        assert!(result.is_some(), "readable file must return Some");
+        assert_eq!(
+            result.expect("result must be Some for readable file"),
+            body,
+            "returned content must match the file body"
+        );
+    }
+
+    #[test]
+    fn mine_get_mtime_returns_some_for_real_file() {
+        // A real file on disk must produce a non-zero mtime.
+        let dir = tempfile::tempdir().expect("tempdir must succeed");
+        let filepath = dir.path().join("stamped.txt");
+        std::fs::write(&filepath, "content").expect("write must succeed");
+        let mtime = mine_get_mtime(&filepath);
+        assert!(mtime.is_some(), "real file must have a readable mtime");
+        assert!(
+            mtime.expect("mtime must be Some") > 0.0,
+            "mtime must be a positive Unix timestamp"
+        );
+    }
+
+    #[test]
+    fn mine_get_mtime_returns_none_for_nonexistent_file() {
+        // A path that does not exist must return None without panicking.
+        let dir = tempfile::tempdir().expect("tempdir must succeed");
+        let filepath = dir.path().join("ghost.txt");
+        let mtime = mine_get_mtime(&filepath);
+        assert!(
+            mtime.is_none(),
+            "nonexistent file must return None for mtime"
+        );
+    }
+
+    #[test]
+    fn scan_project_without_gitignore_includes_all_readable_files() {
+        // When respect_gitignore=false the walk_dir() path is taken — all readable
+        // files must be returned regardless of any .gitignore rules.
+        let dir = tempfile::tempdir().expect("tempdir must succeed");
+        std::fs::write(dir.path().join("main.rs"), "fn main() {}")
+            .expect("write main.rs must succeed");
+        std::fs::write(dir.path().join("notes.md"), "# notes")
+            .expect("write notes.md must succeed");
+        // This file would normally be gitignored — with respect_gitignore=false it must appear.
+        let sub = dir.path().join("subdir");
+        std::fs::create_dir_all(&sub).expect("create subdir must succeed");
+        std::fs::write(sub.join("helper.py"), "def helper(): pass")
+            .expect("write helper.py must succeed");
+
+        let files = scan_project_with_opts(dir.path(), false);
+        let names: Vec<String> = files
+            .iter()
+            .map(|p| {
+                p.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+
+        assert!(
+            names.contains(&"main.rs".to_string()),
+            "main.rs must be found"
+        );
+        assert!(
+            names.contains(&"notes.md".to_string()),
+            "notes.md must be found"
+        );
+        assert!(
+            names.contains(&"helper.py".to_string()),
+            "helper.py must be found"
+        );
+    }
+
+    #[tokio::test]
+    async fn mine_returns_error_for_non_directory_path() {
+        // mine() must return Err when the project_dir is not a directory.
+        let dir = tempfile::tempdir().expect("tempdir must succeed");
+        let file_path = dir.path().join("file.txt");
+        std::fs::write(&file_path, "content").expect("write must succeed");
+
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let opts = MineParams {
+            wing: Some("test_wing".to_string()),
+            agent: "agent".to_string(),
+            limit: 0,
+            dry_run: false,
+            respect_gitignore: false,
+            include_ignored_paths: vec![],
+        };
+
+        let result = mine(&connection, &file_path, &opts).await;
+        assert!(result.is_err(), "non-directory path must return Err");
+        assert!(
+            result
+                .err()
+                .is_some_and(|e| e.to_string().contains("directory")),
+            "error message must mention 'directory'"
+        );
+    }
+
+    #[tokio::test]
+    async fn mine_dry_run_does_not_write_drawers() {
+        // In dry-run mode, mine must report files without inserting any drawers.
+        let dir = tempfile::tempdir().expect("tempdir must succeed");
+        std::fs::write(
+            dir.path().join("mempalace.yaml"),
+            "wing: dry-wing\nrooms:\n  - name: general\n    description: ''\n",
+        )
+        .expect("write config must succeed");
+        let body = "This is a sufficiently long note with enough content to pass the threshold.";
+        std::fs::write(dir.path().join("notes.txt"), body).expect("write notes.txt must succeed");
+
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let opts = MineParams {
+            wing: Some("dry-wing".to_string()),
+            agent: "agent".to_string(),
+            limit: 0,
+            dry_run: true,
+            respect_gitignore: false,
+            include_ignored_paths: vec![],
+        };
+
+        mine(&connection, dir.path(), &opts)
+            .await
+            .expect("mine dry run must succeed");
+
+        let rows = crate::db::query_all(
+            &connection,
+            "SELECT id FROM drawers WHERE wing = 'dry-wing'",
+            (),
+        )
+        .await
+        .expect("query for drawers must succeed");
+        assert!(rows.is_empty(), "dry run must not insert any drawers");
+    }
+
+    // --- walk_dir: symlink skipped ---
+
+    #[test]
+    fn walk_dir_skips_symlinks() {
+        // walk_dir must skip symlinks — covers the `if path.is_symlink()` branch (L171-173).
+        // Symlinks are skipped to prevent following links to /dev/urandom or other
+        // dangerous targets.
+        let dir = tempfile::tempdir().expect("tempdir must succeed");
+        let real_file = dir.path().join("real.rs");
+        std::fs::write(&real_file, "fn main() {}").expect("write real.rs must succeed");
+        // Create a symlink to the real file.
+        let link_file = dir.path().join("link.rs");
+        std::os::unix::fs::symlink(&real_file, &link_file)
+            .expect("failed to create symlink link.rs -> real.rs");
+
+        let mut files = Vec::new();
+        walk_dir(dir.path(), &mut files);
+
+        let names: Vec<String> = files
+            .iter()
+            .map(|p| {
+                p.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+
+        assert!(
+            names.contains(&"real.rs".to_string()),
+            "real file must be collected"
+        );
+        assert!(
+            !names.contains(&"link.rs".to_string()),
+            "symlink must be skipped by walk_dir"
+        );
+    }
+
+    // --- mine_read_file: binary fallback path ---
+
+    #[test]
+    fn mine_read_file_returns_content_for_non_utf8_binary_file() {
+        // A file with non-UTF-8 bytes fails read_to_string but succeeds with read()
+        // and from_utf8_lossy. This exercises lines 344-345 (the binary fallback).
+        let dir = tempfile::tempdir().expect("tempdir must succeed");
+        let filepath = dir.path().join("binary.rs");
+        // Write a mix of valid ASCII and non-UTF-8 bytes to produce a binary-like file
+        // that is long enough to pass the 50-char threshold after lossy conversion.
+        // 0xFF bytes are invalid UTF-8 but from_utf8_lossy replaces them with U+FFFD.
+        let mut content = b"fn main() { // binary content follows: ".to_vec();
+        // Pad with valid ASCII so the result is well above 50 chars even after replacement.
+        content.extend(b"a".repeat(80));
+        // One invalid byte to force the read_to_string failure path.
+        content.push(0xFF);
+        std::fs::write(&filepath, &content).expect("write binary file must succeed");
+
+        let result = mine_read_file(&filepath);
+        // The binary fallback must produce Some — lossy conversion never panics.
+        assert!(
+            result.is_some(),
+            "binary file must be returned via lossy fallback"
+        );
+        // Pair assertion: returned content must be non-empty and above the 50-char threshold.
+        assert!(
+            result.expect("result must be Some for binary file").len() >= 50,
+            "returned content must be at least 50 chars"
+        );
+    }
+
+    // --- MineGuard::drop: eprintln when remove_file fails ---
+
+    #[test]
+    fn mine_guard_drop_does_not_panic_when_lock_already_removed() {
+        // MineGuard::drop must not panic even when the lockfile has already been
+        // deleted before the guard is dropped. This covers the `if let Err(error)`
+        // eprintln branch at lines 686-691.
+        let dir = tempfile::tempdir().expect("tempdir must succeed");
+        let guard = acquire_mine_lock(dir.path()).expect("acquire_mine_lock must succeed");
+        let lock_path = dir.path().join("mine.lock");
+        // Pre-remove the lockfile so drop() encounters an IO error.
+        std::fs::remove_file(&lock_path).expect("manual remove of mine.lock must succeed");
+        // drop() must not panic even though remove_file will fail inside Drop.
+        drop(guard);
+        // Pair assertion: the lockfile is still gone (drop did not re-create it).
+        assert!(
+            !lock_path.exists(),
+            "lockfile must not be re-created by a failing drop"
+        );
+    }
+
+    // --- acquire_mine_lock: assert precondition on nonexistent dir ---
+
+    #[test]
+    fn acquire_mine_lock_panics_on_nonexistent_lock_dir() {
+        // acquire_mine_lock fires assert! when lock_dir does not exist. This test
+        // catches the panic to confirm the precondition is enforced without crashing
+        // the test harness.
+        let nonexistent = std::path::Path::new("/nonexistent/lock/dir/that/does/not/exist");
+        let result = std::panic::catch_unwind(|| acquire_mine_lock(nonexistent));
+        assert!(
+            result.is_err(),
+            "acquire_mine_lock on a nonexistent dir must panic via assert!"
+        );
+        // Pair assertion: the lock_dir itself must not exist on disk.
+        assert!(
+            !nonexistent.exists(),
+            "the nonexistent dir must remain nonexistent"
+        );
+    }
 }

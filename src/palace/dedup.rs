@@ -566,4 +566,212 @@ mod tests {
         .expect("query after dry_run must succeed");
         assert_eq!(rows.len(), 2, "dry_run must not delete any drawers");
     }
+
+    #[tokio::test]
+    async fn dedup_live_run_deletes_duplicate_drawer() {
+        // A live run (dry_run=false) must delete the shorter duplicate and update stats.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+
+        connection
+            .execute(
+                "INSERT INTO drawers (id, wing, room, content, source_file, added_by) \
+                 VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    "drawer_live_long",
+                    "test",
+                    "notes",
+                    "Rust memory palace project notes long version indeed",
+                    "live_notes.md",
+                    "test",
+                ),
+            )
+            .await
+            .expect("seed long drawer");
+        connection
+            .execute(
+                "INSERT INTO drawers (id, wing, room, content, source_file, added_by) \
+                 VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    "drawer_live_short",
+                    "test",
+                    "notes",
+                    "Rust memory palace project notes",
+                    "live_notes.md",
+                    "test",
+                ),
+            )
+            .await
+            .expect("seed short drawer");
+
+        // Seed identical word sets so Jaccard=1.0 exceeds any threshold.
+        for word in &["rust", "memory", "palace", "project", "notes"] {
+            for drawer_id in &["drawer_live_long", "drawer_live_short"] {
+                connection
+                    .execute(
+                        "INSERT INTO drawer_words (word, drawer_id) VALUES (?, ?)",
+                        (*word, *drawer_id),
+                    )
+                    .await
+                    .expect("seed words");
+            }
+        }
+
+        let stats = dedup_drawers(&connection, None, 0.9, false)
+            .await
+            .expect("live dedup must succeed");
+
+        assert_eq!(stats.groups_scanned, 1, "one group must be scanned");
+        assert_eq!(
+            stats.duplicates_found, 1,
+            "one duplicate must be identified"
+        );
+        assert_eq!(stats.deleted, 1, "live run must delete the duplicate");
+
+        // Pair assertion: only the longer drawer must remain.
+        let remaining = query_all(
+            &connection,
+            "SELECT id FROM drawers WHERE source_file = 'live_notes.md'",
+            (),
+        )
+        .await
+        .expect("query must succeed after live dedup");
+        assert_eq!(remaining.len(), 1, "only the longer drawer must remain");
+        let remaining_id: String = remaining[0].get(0).unwrap_or_default();
+        assert_eq!(
+            remaining_id, "drawer_live_long",
+            "the longer drawer must be the one kept"
+        );
+    }
+
+    #[tokio::test]
+    async fn dedup_empty_palace_returns_zero_stats() {
+        // An empty palace has no groups — all stats must be zero.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+
+        let stats = dedup_drawers(&connection, None, DEFAULT_THRESHOLD, false)
+            .await
+            .expect("dedup on empty palace must succeed");
+
+        assert_eq!(
+            stats.groups_scanned, 0,
+            "empty palace must have zero groups scanned"
+        );
+        assert_eq!(
+            stats.duplicates_found, 0,
+            "empty palace must have zero duplicates"
+        );
+        assert_eq!(stats.deleted, 0, "empty palace must have zero deleted");
+    }
+
+    #[tokio::test]
+    async fn dedup_below_threshold_scans_group_but_finds_no_duplicates() {
+        // When similarity is below threshold, groups_scanned > 0 but duplicates_found = 0.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+
+        for (id, content) in [
+            (
+                "drawer_low_sim_a",
+                "Rust memory palace long description alpha content",
+            ),
+            (
+                "drawer_low_sim_b",
+                "Python data science notebook jupyter kernel",
+            ),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO drawers (id, wing, room, content, source_file, added_by) \
+                     VALUES (?, ?, ?, ?, ?, ?)",
+                    (id, "test", "notes", content, "mixed.md", "test"),
+                )
+                .await
+                .expect("seed drawer");
+        }
+
+        // Seed completely disjoint word sets so Jaccard = 0.0.
+        for word in &["rust", "memory", "palace"] {
+            connection
+                .execute(
+                    "INSERT INTO drawer_words (word, drawer_id) VALUES (?, ?)",
+                    (*word, "drawer_low_sim_a"),
+                )
+                .await
+                .expect("seed words for a");
+        }
+        for word in &["python", "data", "science"] {
+            connection
+                .execute(
+                    "INSERT INTO drawer_words (word, drawer_id) VALUES (?, ?)",
+                    (*word, "drawer_low_sim_b"),
+                )
+                .await
+                .expect("seed words for b");
+        }
+
+        let stats = dedup_drawers(&connection, None, 0.9, false)
+            .await
+            .expect("dedup must succeed with disjoint drawers");
+
+        assert_eq!(stats.groups_scanned, 1, "one group must be scanned");
+        assert_eq!(
+            stats.duplicates_found, 0,
+            "disjoint drawers must not be duplicates"
+        );
+        assert_eq!(stats.deleted, 0, "no deletion when no duplicates found");
+    }
+
+    // ── dedup_find_duplicates — equal content_len ─────────────────────
+
+    #[test]
+    fn find_duplicates_equal_content_len_picks_drawer_i() {
+        // When both drawers have equal content_len, drawer_i (index 0) is deleted.
+        let drawers = vec![
+            DrawerInfo {
+                id: "drawer_equal_a".to_string(),
+                content_len: 100,
+            },
+            DrawerInfo {
+                id: "drawer_equal_b".to_string(),
+                content_len: 100,
+            },
+        ];
+        let mut word_sets: HashMap<String, HashSet<String>> = HashMap::new();
+        let shared_words: HashSet<String> = ["alpha", "beta", "gamma"]
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        word_sets.insert("drawer_equal_a".to_string(), shared_words.clone());
+        word_sets.insert("drawer_equal_b".to_string(), shared_words);
+
+        let to_delete = dedup_find_duplicates(&drawers, &word_sets, 0.5);
+        assert_eq!(
+            to_delete.len(),
+            1,
+            "one of the equal-length drawers must be marked"
+        );
+        // When content_len values are equal, the condition `drawer_i.content_len <=
+        // drawer_j.content_len` is true, so drawer_i (index 0) is selected for deletion.
+        assert_eq!(
+            to_delete[0], "drawer_equal_a",
+            "drawer_i must be deleted when content lengths are equal"
+        );
+    }
+
+    // ── dedup_jaccard — one empty set ────────────────────────────────
+
+    #[test]
+    fn jaccard_one_empty_set_returns_zero() {
+        // One non-empty set and one empty set → intersection = 0, so Jaccard = 0.0.
+        let set_a: HashSet<String> = ["rust", "memory"].iter().map(ToString::to_string).collect();
+        let set_b: HashSet<String> = HashSet::new();
+        let similarity = dedup_jaccard(&set_a, &set_b);
+        assert!(
+            similarity < f64::EPSILON,
+            "one empty set must produce Jaccard = 0.0"
+        );
+        assert!(
+            (similarity - 0.0).abs() < 1e-9,
+            "similarity must be exactly 0.0 when one set is empty"
+        );
+    }
 }

@@ -415,4 +415,183 @@ mod tests {
         );
         assert_eq!(adapter.default_privacy_class(), "internal");
     }
+
+    #[test]
+    fn is_current_default_returns_false() {
+        // Default is_current must always return false so adapters without
+        // incremental support re-extract on every run.
+        let adapter = MinimalAdapter;
+        let item = SourceItemMetadata {
+            source_file: "test.rs".to_string(),
+            version: "abc123".to_string(),
+            size_hint: None,
+            route_hint: None,
+        };
+        assert!(
+            !adapter.is_current(&item, None),
+            "default must be false with no existing version"
+        );
+        assert!(
+            !adapter.is_current(&item, Some("abc123")),
+            "default must be false even when versions match"
+        );
+    }
+
+    #[test]
+    fn source_summary_default_with_local_path_returns_zero_count() {
+        // source_summary default implementation must return item_count=Some(0)
+        // when a local_path is set, and None when local_path is absent.
+        let adapter = MinimalAdapter;
+        let source_with_path = SourceRef {
+            local_path: Some("/tmp/notes".to_string()),
+            uri: None,
+            options: HashMap::new(),
+        };
+        let summary = adapter.source_summary(&source_with_path);
+        assert_eq!(
+            summary.item_count,
+            Some(0),
+            "local_path present must yield Some(0)"
+        );
+        assert!(
+            !summary.description.is_empty(),
+            "description must not be empty"
+        );
+    }
+
+    #[test]
+    fn source_summary_default_without_local_path_returns_none_count() {
+        // source_summary default must return item_count=None when local_path is absent.
+        let adapter = MinimalAdapter;
+        let source_without_path = SourceRef {
+            local_path: None,
+            uri: Some("https://example.com".to_string()),
+            options: HashMap::new(),
+        };
+        let summary = adapter.source_summary(&source_without_path);
+        assert!(
+            summary.item_count.is_none(),
+            "absent local_path must yield None item_count"
+        );
+        assert_eq!(
+            summary.description, "minimal_test",
+            "description must match adapter name"
+        );
+    }
+
+    #[test]
+    fn validate_schema_conformance_optional_field_absent_passes() {
+        // An absent optional field must not cause a validation failure —
+        // only required fields are enforced.
+        let mut schema_fields = HashMap::new();
+        schema_fields.insert(
+            "tags".to_string(),
+            FieldSpec {
+                field_type: FieldType::JsonString,
+                required: false,
+                description: "optional tags".to_string(),
+                indexed: false,
+            },
+        );
+        let schema = AdapterSchema {
+            fields: schema_fields,
+            version: "1.0".to_string(),
+        };
+        let record = DrawerRecord {
+            content: "test".to_string(),
+            source_file: "doc.md".to_string(),
+            chunk_index: 0,
+            metadata: HashMap::new(),
+            route_hint: None,
+        };
+        let result = validate_schema_conformance(&record, &schema);
+        assert!(result.is_ok(), "absent optional field must pass validation");
+        // Pair: empty schema must also pass.
+        let empty_schema = AdapterSchema {
+            fields: HashMap::new(),
+            version: "1.0".to_string(),
+        };
+        assert!(
+            validate_schema_conformance(&record, &empty_schema).is_ok(),
+            "empty schema must always pass"
+        );
+    }
+
+    #[test]
+    fn validate_schema_conformance_all_field_types_pass_when_present() {
+        // All FieldType variants must be accepted when the field key is present
+        // in record metadata — validate_schema_conformance only checks presence.
+        let field_types = [
+            ("str_field", FieldType::String),
+            ("int_field", FieldType::Int),
+            ("float_field", FieldType::Float),
+            ("bool_field", FieldType::Bool),
+            ("json_field", FieldType::JsonString),
+        ];
+        let mut schema_fields = HashMap::new();
+        let mut metadata = HashMap::new();
+        for (name, field_type) in field_types {
+            schema_fields.insert(
+                name.to_string(),
+                FieldSpec {
+                    field_type,
+                    required: true,
+                    description: "test field".to_string(),
+                    indexed: false,
+                },
+            );
+            metadata.insert(name.to_string(), "value".to_string());
+        }
+        let schema = AdapterSchema {
+            fields: schema_fields,
+            version: "2.0".to_string(),
+        };
+        let record = DrawerRecord {
+            content: "test".to_string(),
+            source_file: "multi.md".to_string(),
+            chunk_index: 0,
+            metadata,
+            route_hint: None,
+        };
+        let result = validate_schema_conformance(&record, &schema);
+        assert!(result.is_ok(), "all required field types present must pass");
+        // Pair: removing one field must cause failure.
+        let mut partial_record = record.clone();
+        partial_record.metadata.remove("bool_field");
+        assert!(
+            validate_schema_conformance(&partial_record, &schema).is_err(),
+            "removing a required field must cause failure"
+        );
+    }
+
+    #[test]
+    fn field_type_equality_covers_all_variants() {
+        // Each FieldType variant must compare equal only to itself.
+        assert_eq!(FieldType::String, FieldType::String);
+        assert_eq!(FieldType::Int, FieldType::Int);
+        assert_eq!(FieldType::Float, FieldType::Float);
+        assert_eq!(FieldType::Bool, FieldType::Bool);
+        assert_eq!(FieldType::JsonString, FieldType::JsonString);
+        assert_ne!(FieldType::String, FieldType::Int);
+        assert_ne!(FieldType::Float, FieldType::Bool);
+    }
+
+    #[test]
+    fn source_item_metadata_stores_all_fields() {
+        // SourceItemMetadata must retain all provided field values.
+        let hint = RouteHint {
+            wing: Some("projects".to_string()),
+            room: Some("backend".to_string()),
+        };
+        let item = SourceItemMetadata {
+            source_file: "src/main.rs".to_string(),
+            version: "v1.2.3".to_string(),
+            size_hint: Some(4096),
+            route_hint: Some(hint),
+        };
+        assert_eq!(item.source_file, "src/main.rs");
+        assert_eq!(item.version, "v1.2.3");
+        assert_eq!(item.size_hint, Some(4096));
+        assert!(item.route_hint.is_some(), "route_hint must be stored");
+    }
 }

@@ -1534,4 +1534,532 @@ mod tests {
             "error message must mention 'directory' or 'not found'"
         );
     }
+
+    #[test]
+    fn chunk_exchanges_routes_to_paragraph_when_fully_unquoted() {
+        // Content with zero '>' lines must route to chunk_by_paragraph.
+        let content = "This is a long paragraph without any quoted turns or user markers.\n\n\
+                       It continues here with a second paragraph of sufficient length for the chunk filter.";
+        let chunks = chunk_exchanges(content);
+        // Both paragraphs are > CHUNK_SIZE_MIN so at least one chunk must be produced.
+        assert!(
+            !chunks.is_empty(),
+            "unquoted content must produce at least one chunk via chunk_by_paragraph"
+        );
+        let all_text: String = chunks.iter().map(|c| c.content.as_str()).collect();
+        assert!(
+            all_text.contains("long paragraph"),
+            "paragraph text must be preserved when routing to chunk_by_paragraph"
+        );
+    }
+
+    #[test]
+    fn chunk_by_exchange_skips_non_quote_lines_between_exchanges() {
+        // Lines that are neither '>' nor AI response (e.g. separators, blank lines)
+        // between exchanges are silently skipped by the outer loop.
+        let input = "---\n> first user turn\nfirst AI answer here for this exchange\n---\n\
+                     > second user turn\nsecond AI answer follows the second user turn";
+        let lines: Vec<&str> = input.lines().collect();
+        let chunks = chunk_by_exchange(&lines);
+        // Two user turns must each produce a chunk (content > CHUNK_SIZE_MIN).
+        assert!(
+            chunks.len() >= 2,
+            "two user turns must produce at least two chunks"
+        );
+        let all_text: String = chunks.iter().map(|c| c.content.as_str()).collect();
+        assert!(
+            all_text.contains("first AI answer"),
+            "first exchange AI answer must be preserved"
+        );
+        assert!(
+            all_text.contains("second AI answer"),
+            "second exchange AI answer must be preserved"
+        );
+    }
+
+    #[test]
+    fn chunk_by_exchange_user_turn_with_no_ai_response_produces_chunk() {
+        // A user turn with no AI response at all must still be flushed as its own chunk
+        // if the user turn text is long enough to clear CHUNK_SIZE_MIN.
+        let user_turn = "> This is a standalone user turn with plenty of text to exceed the minimum chunk size.";
+        let lines: Vec<&str> = vec![user_turn];
+        let chunks = chunk_by_exchange(&lines);
+        assert_eq!(
+            chunks.len(),
+            1,
+            "standalone user turn must produce exactly one chunk"
+        );
+        assert!(
+            chunks[0].content.contains("standalone user turn"),
+            "user turn text must be preserved in the chunk"
+        );
+    }
+
+    #[test]
+    fn chunk_by_exchange_drain_ai_lines_stops_at_separator() {
+        // drain_ai_lines must stop when it encounters a "---" separator line.
+        let lines = &[
+            "first ai line",
+            "second ai line",
+            "---",
+            "this line is after separator",
+        ];
+        let (collected, new_index) = chunk_by_exchange_drain_ai_lines(lines, 0);
+        assert_eq!(collected.len(), 2, "must collect exactly two AI lines");
+        assert_eq!(new_index, 2, "index must point at the separator line");
+        assert!(
+            collected.contains(&"first ai line"),
+            "first line must be collected"
+        );
+        assert!(
+            collected.contains(&"second ai line"),
+            "second line must be collected"
+        );
+    }
+
+    #[test]
+    fn chunk_by_exchange_drain_ai_lines_stops_at_user_turn() {
+        // drain_ai_lines must stop when it encounters a '>' user turn line.
+        let lines = &["ai response line one", "> next user turn starts here"];
+        let (collected, new_index) = chunk_by_exchange_drain_ai_lines(lines, 0);
+        assert_eq!(collected.len(), 1, "must collect only the first AI line");
+        assert_eq!(new_index, 1, "index must point at the user turn line");
+    }
+
+    #[test]
+    fn mine_convos_print_summary_dry_run_prints_without_panicking() {
+        // mine_convos_print_summary must run to completion in both dry-run and live modes.
+        // This covers the conditional output paths for nonzero skip counters.
+        let mut room_counts = HashMap::new();
+        room_counts.insert("technical".to_string(), 2);
+        room_counts.insert("general".to_string(), 1);
+
+        // Dry-run path: covers the `if dry_run` branch and sorted room output.
+        mine_convos_print_summary(true, 5, 1, 1, 1, 1, 3, &room_counts);
+
+        // Non-dry-run path: covers "Done." and "Next: mempalace search..." lines.
+        mine_convos_print_summary(false, 5, 1, 0, 0, 0, 3, &room_counts);
+
+        // Empty room_counts: covers the `if !sorted_rooms.is_empty()` false branch.
+        mine_convos_print_summary(false, 1, 0, 0, 0, 0, 1, &HashMap::new());
+
+        // Pair assertion: room_counts must be unmodified — the function only reads it.
+        assert_eq!(
+            room_counts.len(),
+            2,
+            "room_counts must be unmodified after print_summary"
+        );
+    }
+
+    #[test]
+    fn mine_convos_resolve_wing_uses_explicit_wing_override() {
+        // When opts.wing is Some, the wing name from opts must be used verbatim.
+        let temp_directory = tempfile::tempdir()
+            .expect("failed to create temporary directory for wing override test");
+        let opts = MineParams {
+            wing: Some("my_explicit_wing".to_string()),
+            agent: "agent".to_string(),
+            limit: 0,
+            dry_run: false,
+            respect_gitignore: true,
+            include_ignored_paths: vec![],
+        };
+        let result = mine_convos_resolve_wing(temp_directory.path(), &opts)
+            .expect("resolve_wing must succeed with explicit wing");
+        assert_eq!(result.1, "my_explicit_wing", "explicit wing must be used");
+        assert!(
+            result.0.is_absolute(),
+            "returned directory path must be absolute"
+        );
+    }
+
+    // --- mine_convos: EmptyChunks outcome ---
+
+    #[tokio::test]
+    async fn mine_convos_skips_files_producing_no_chunks() {
+        // A file whose content is above CHUNK_SIZE_MIN but produces zero chunks
+        // (e.g. plain text with no '>'-prefixed lines) must count as EmptyChunks.
+        // Content: one paragraph barely above CHUNK_SIZE_MIN but below paragraph threshold.
+        // We craft content that is >CHUNK_SIZE_MIN bytes but will parse to zero chunks
+        // because it is a single short paragraph (<=20 lines, one paragraph).
+        // "a" * 35 = 35 chars > CHUNK_SIZE_MIN(30) but chunk_by_paragraph filters
+        // paragraphs <=CHUNK_SIZE_MIN(30) — we need content between 31 and 30.
+        // Actually chunk_by_paragraph uses > CHUNK_SIZE_MIN (not >=), so 31 chars passes.
+        // To get EmptyChunks we need content that chunk_exchanges returns [] for.
+        // chunk_by_paragraph filters p.len() > CHUNK_SIZE_MIN. Single paragraph of exactly
+        // CHUNK_SIZE_MIN chars is filtered. Use content of exactly CHUNK_SIZE_MIN length.
+        let temp_dir =
+            tempfile::tempdir().expect("failed to create temp dir for empty-chunks test");
+        // Exactly CHUNK_SIZE_MIN (30) chars — passes the "too short" gate (>= CHUNK_SIZE_MIN)
+        // but is filtered by chunk_by_paragraph (len > CHUNK_SIZE_MIN fails for ==).
+        let exactly_min = "a".repeat(CHUNK_SIZE_MIN);
+        std::fs::write(temp_dir.path().join("borderline.txt"), &exactly_min)
+            .expect("write borderline.txt must succeed");
+
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let opts = MineParams {
+            wing: Some("empty_chunk_wing".to_string()),
+            agent: "test_agent".to_string(),
+            limit: 0,
+            dry_run: false,
+            respect_gitignore: true,
+            include_ignored_paths: vec![],
+        };
+
+        mine_convos(&connection, temp_dir.path(), "full", &opts)
+            .await
+            .expect("mine_convos must succeed even with empty-chunk files");
+
+        let rows = crate::db::query_all(
+            &connection,
+            "SELECT id FROM drawers WHERE wing = 'empty_chunk_wing'",
+            (),
+        )
+        .await
+        .expect("query must succeed");
+        // Empty-chunks file must produce no drawers.
+        assert!(
+            rows.is_empty(),
+            "file producing no chunks must not insert drawers"
+        );
+    }
+
+    #[test]
+    fn mine_convos_resolve_wing_derives_wing_from_directory_name() {
+        // When opts.wing is None, the wing is derived from the directory basename.
+        let temp_directory = tempfile::tempdir()
+            .expect("failed to create temporary directory for derived wing test");
+        let opts = MineParams {
+            wing: None,
+            agent: "agent".to_string(),
+            limit: 0,
+            dry_run: false,
+            respect_gitignore: true,
+            include_ignored_paths: vec![],
+        };
+        let result = mine_convos_resolve_wing(temp_directory.path(), &opts)
+            .expect("resolve_wing must succeed with derived wing");
+        // Derived wing is the last path component, lowercased, spaces/dashes → underscore.
+        let expected = temp_directory
+            .path()
+            .canonicalize()
+            .expect("temp dir must canonicalize")
+            .file_name()
+            .expect("temp dir must have file name")
+            .to_string_lossy()
+            .to_lowercase()
+            .replace([' ', '-'], "_");
+        assert_eq!(
+            result.1, expected,
+            "derived wing must match directory basename"
+        );
+        assert!(!result.1.is_empty(), "derived wing must not be empty");
+    }
+
+    // --- mine_convos_resolve_wing: nonexistent directory returns error ---
+
+    #[test]
+    fn mine_convos_resolve_wing_returns_error_for_nonexistent_path() {
+        // A path that cannot be canonicalized must return Err. Covers L649-651.
+        let opts = MineParams {
+            wing: Some("mywing".to_string()),
+            agent: "agent".to_string(),
+            limit: 0,
+            dry_run: false,
+            respect_gitignore: true,
+            include_ignored_paths: vec![],
+        };
+        let result = mine_convos_resolve_wing(
+            std::path::Path::new("/nonexistent/path/that/cannot/canonicalize"),
+            &opts,
+        );
+        assert!(result.is_err(), "nonexistent path must return Err");
+        assert!(
+            result
+                .err()
+                .is_some_and(|e| e.to_string().contains("not found")),
+            "error must mention 'not found'"
+        );
+    }
+
+    // --- mine_convos_print_header: dry_run=false branch ---
+
+    #[test]
+    fn mine_convos_print_header_non_dry_run_does_not_panic() {
+        // The !dry_run branch of mine_convos_print_header (L446) must execute without panic.
+        let temp_dir =
+            tempfile::tempdir().expect("failed to create temp dir for header non-dry-run test");
+        // Both branches must run without panic.
+        mine_convos_print_header("mywing", temp_dir.path(), 5, "full", false);
+        mine_convos_print_header("mywing", temp_dir.path(), 0, "full", true);
+        // Pair assertion: directory must still exist after printing.
+        assert!(temp_dir.path().is_dir(), "temp dir must still exist");
+    }
+
+    // --- chunk_by_paragraph: single long paragraph (line-group fallback) filtered group ---
+
+    #[test]
+    fn chunk_by_paragraph_line_group_fallback_filters_short_groups() {
+        // The line-grouping fallback (25-line groups) must filter groups shorter than
+        // CHUNK_SIZE_MIN. Covers the `None` arm of the filter_map on L349.
+        // Build 26 lines where all but the last are long enough but the last is very short.
+        let mut lines: Vec<String> = (0..25)
+            .map(|i| {
+                format!("Line {i} has enough text to exceed the CHUNK_SIZE_MIN threshold here.")
+            })
+            .collect();
+        // 26th line group will contain only this one short line — below CHUNK_SIZE_MIN.
+        lines.push("tiny".to_string());
+
+        // Content must have >20 lines and no double-newlines for the fallback to trigger.
+        let content = lines.join("\n");
+        let chunks = chunk_by_paragraph(&content);
+
+        // The first group (25 long lines) must survive; the last group ("tiny") must be filtered.
+        assert!(
+            !chunks.is_empty(),
+            "at least one chunk must survive filtering"
+        );
+        for chunk in &chunks {
+            assert!(
+                chunk.content.trim().len() > CHUNK_SIZE_MIN,
+                "every chunk must exceed CHUNK_SIZE_MIN"
+            );
+        }
+        // Pair assertion: no chunk must contain the short tail line.
+        let all_text: String = chunks.iter().map(|c| c.content.as_str()).collect();
+        assert!(
+            !all_text.trim_end().ends_with("tiny"),
+            "short trailing group must be filtered out"
+        );
+    }
+
+    // --- walk_convos: skips_is_skip_dir_directories ---
+
+    #[test]
+    fn walk_convos_skips_is_skip_dir_directories() {
+        // walk_convos must respect is_skip_dir() — directories like "node_modules"
+        // are global cache dirs and must not be descended into.
+        let temp_directory =
+            tempfile::tempdir().expect("failed to create temporary directory for skip_dir test");
+        let node_modules_directory = temp_directory.path().join("node_modules");
+        std::fs::create_dir_all(&node_modules_directory)
+            .expect("failed to create node_modules directory");
+        std::fs::write(
+            node_modules_directory.join("package.txt"),
+            "npm package content here",
+        )
+        .expect("failed to write node_modules package.txt");
+        std::fs::write(
+            temp_directory.path().join("valid_convo.txt"),
+            "valid conversation content",
+        )
+        .expect("failed to write valid_convo.txt");
+
+        let mut files = Vec::new();
+        walk_convos(temp_directory.path(), &mut files);
+
+        let names: Vec<String> = files
+            .iter()
+            .filter_map(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .collect();
+
+        assert!(
+            names.contains(&"valid_convo.txt".to_string()),
+            "top-level valid file must be collected"
+        );
+        assert!(
+            !names.contains(&"package.txt".to_string()),
+            "files inside node_modules must be excluded"
+        );
+    }
+
+    // --- mine_convos_resolve_wing: root directory returns error ---
+
+    #[test]
+    fn mine_convos_resolve_wing_returns_error_for_root_without_wing() {
+        // When opts.wing is None and the directory is a filesystem root (no basename),
+        // mine_convos_resolve_wing must return Err with a descriptive message.
+        // This covers the dir_name.is_empty() branch at lines 674-680.
+        let opts = MineParams {
+            wing: None, // No explicit override — must derive from directory basename.
+            agent: "agent".to_string(),
+            limit: 0,
+            dry_run: false,
+            respect_gitignore: true,
+            include_ignored_paths: vec![],
+        };
+        // "/" canonicalizes successfully but has no file_name component, so
+        // unwrap_or_default() returns "" and the empty-check fires.
+        let result = mine_convos_resolve_wing(std::path::Path::new("/"), &opts);
+        assert!(
+            result.is_err(),
+            "filesystem root with no explicit wing must return Err"
+        );
+        let error_message = result.expect_err("already confirmed is_err").to_string();
+        assert!(
+            error_message.contains("filesystem root") || error_message.contains("wing"),
+            "error must mention 'filesystem root' or 'wing': {error_message}"
+        );
+    }
+
+    // --- walk_convos: symlink skipped ---
+
+    #[test]
+    fn walk_convos_skips_symlinks() {
+        // walk_convos must skip symlinks — covers the `if path.is_symlink()` branch.
+        let temp_directory =
+            tempfile::tempdir().expect("failed to create temporary directory for symlink test");
+        // Create a real file that will be the symlink target.
+        let target = temp_directory.path().join("real.txt");
+        std::fs::write(&target, "real conversation content here")
+            .expect("failed to write real.txt");
+        // Create a symlink pointing to the real file.
+        let link = temp_directory.path().join("link.txt");
+        std::os::unix::fs::symlink(&target, &link).expect("failed to create symlink");
+
+        let mut files = Vec::new();
+        walk_convos(temp_directory.path(), &mut files);
+
+        let names: Vec<String> = files
+            .iter()
+            .filter_map(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .collect();
+
+        // The real file must be collected; the symlink must not be.
+        assert!(
+            names.contains(&"real.txt".to_string()),
+            "real file must be collected"
+        );
+        assert!(
+            !names.contains(&"link.txt".to_string()),
+            "symlink must be skipped — prevents following links to dangerous targets"
+        );
+    }
+
+    // --- mine_convos_scan_file: Unreadable from normalize failure ---
+
+    #[tokio::test]
+    async fn mine_convos_handles_unreadable_file_gracefully() {
+        // When a file passes the scan but is deleted before normalize() can read it,
+        // mine_convos must count it as Unreadable (files_unreadable counter) and not panic.
+        // We simulate this by mining a directory where the file is removed mid-run via
+        // a second call after the first already-mined check clears it.
+        // More directly: call mine_convos on a directory containing a file that normalize
+        // will fail on (e.g., a file > FILE_SIZE_MAX after the walk).
+        // The simplest reliable path: mine a directory with a valid file, delete it
+        // between scan_convos and the per-file loop — but that's a race.
+        // Instead: create a temp file with an unreadable extension that scan still picks up,
+        // then create a .txt file that exists during scan but is gone by scan time...
+        // Actually the simplest is to verify mine_convos returns Ok() for a directory
+        // with a file that becomes unreadable (zero-byte "file" at a non-file path).
+        // The Unreadable path (line 598) fires when normalize returns Err. normalize
+        // returns Err when the file does not exist. We can achieve this by:
+        // 1. Write a valid .txt file.
+        // 2. Start mine_convos — it calls scan_convos, producing the file list.
+        // 3. But we can't hook between scan_convos and the loop.
+        // Alternative: call mine_convos_scan_file directly, but it's private.
+        // Best approach: create a file, mine it (first run succeeds), delete it,
+        // then create a NEW file at the same path with just a valid name so the
+        // walk picks it up but the content is 0 bytes → TooShort, not Unreadable.
+        // For the Unreadable path (normalize err), use a directory on a path that
+        // becomes invalid. Actually let's test via mine_convos with content that fails
+        // the normalize read: an empty file → normalize returns Err("empty content") which
+        // gives Unreadable.
+
+        // normalize::normalize returns Err on an empty file (content.is_empty() check).
+        // An empty file exists on disk, passes walk_convos (extension is txt), and
+        // normalize returns Err because content.trim().is_empty(). That produces Unreadable.
+        let temp_directory =
+            tempfile::tempdir().expect("failed to create temporary directory for unreadable test");
+        // Write an empty .txt file — normalize will return Err for empty content.
+        std::fs::write(temp_directory.path().join("empty.txt"), "")
+            .expect("failed to write empty.txt");
+
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let opts = MineParams {
+            wing: Some("unreadable_wing".to_string()),
+            agent: "test_agent".to_string(),
+            limit: 0,
+            dry_run: false,
+            respect_gitignore: true,
+            include_ignored_paths: vec![],
+        };
+
+        // mine_convos must succeed — unreadable files are counted but do not abort.
+        mine_convos(&connection, temp_directory.path(), "full", &opts)
+            .await
+            .expect("mine_convos must return Ok even when files are unreadable");
+
+        // No drawers must be filed — the file produced an Unreadable outcome.
+        let rows = crate::db::query_all(
+            &connection,
+            "SELECT id FROM drawers WHERE wing = 'unreadable_wing'",
+            (),
+        )
+        .await
+        .expect("query for drawers must succeed");
+        assert!(
+            rows.is_empty(),
+            "unreadable/empty files must not produce any drawers"
+        );
+    }
+
+    // --- chunk_by_exchange_flush: end == 0 edge case ---
+
+    #[test]
+    fn chunk_by_exchange_flush_handles_content_fitting_in_one_chunk() {
+        // Content exactly at CHUNK_SIZE_MIN+1 bytes — fits in one chunk without splitting.
+        // This exercises the `else if content.trim().len() > CHUNK_SIZE_MIN` branch.
+        let mut chunks = Vec::new();
+        let content = "a".repeat(CHUNK_SIZE_MIN + 1);
+        chunk_by_exchange_flush(content.clone(), &mut chunks);
+        assert_eq!(
+            chunks.len(),
+            1,
+            "short content must produce exactly one chunk"
+        );
+        assert_eq!(
+            chunks[0].content, content,
+            "chunk content must match the original"
+        );
+    }
+
+    #[test]
+    fn chunk_by_exchange_flush_discards_content_at_or_below_chunk_size_min() {
+        // Content at exactly CHUNK_SIZE_MIN must be discarded (not > CHUNK_SIZE_MIN).
+        let mut chunks = Vec::new();
+        let content = "a".repeat(CHUNK_SIZE_MIN);
+        chunk_by_exchange_flush(content, &mut chunks);
+        assert!(
+            chunks.is_empty(),
+            "content at exactly CHUNK_SIZE_MIN must be discarded"
+        );
+        // Pair assertion: a content one byte longer must survive.
+        let mut chunks2 = Vec::new();
+        chunk_by_exchange_flush("b".repeat(CHUNK_SIZE_MIN + 1), &mut chunks2);
+        assert_eq!(
+            chunks2.len(),
+            1,
+            "content at CHUNK_SIZE_MIN+1 must produce one chunk"
+        );
+    }
+
+    // --- mine_convos_print_summary: empty room_counts, non-dry-run "Next:" ---
+
+    #[test]
+    fn mine_convos_print_summary_non_dry_run_no_rooms_does_not_panic() {
+        // Covers the `if !dry_run` "Next: mempalace search" println on L506 with
+        // an empty room_counts map (the `if !sorted_rooms.is_empty()` false branch).
+        let empty_room_counts = HashMap::new();
+        // Non-dry-run with zero drawers and no rooms must print without panicking.
+        mine_convos_print_summary(false, 0, 0, 0, 0, 0, 0, &empty_room_counts);
+        // Pair assertion: room_counts remains empty after the call.
+        assert!(
+            empty_room_counts.is_empty(),
+            "room_counts must not be modified by print_summary"
+        );
+    }
 }

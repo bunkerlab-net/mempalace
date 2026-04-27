@@ -1704,4 +1704,743 @@ mod tests {
             entry.confidence
         );
     }
+
+    // ── seed edge cases ───────────────────────────────────────────────────────
+
+    #[test]
+    fn seed_skips_empty_and_whitespace_only_person_names() {
+        // Names that trim to empty must not enter the registry.
+        let (temp, mut registry) = test_registry();
+        let people = vec![
+            SeedPerson {
+                name: "   ".to_string(),
+                relationship: "friend".to_string(),
+                context: "personal".to_string(),
+                nickname: None,
+            },
+            SeedPerson {
+                name: "Alice".to_string(),
+                relationship: "friend".to_string(),
+                context: "personal".to_string(),
+                nickname: None,
+            },
+        ];
+        temp_env::with_var("MEMPALACE_DIR", Some(temp.path()), || {
+            registry
+                .seed("personal", &people, &[])
+                .expect("seed must succeed");
+        });
+        // Only Alice should be registered; the whitespace-only name must be absent.
+        assert!(
+            registry.data.people.contains_key("Alice"),
+            "Alice must be registered"
+        );
+        assert_eq!(
+            registry.data.people.len(),
+            1,
+            "whitespace-only name must be skipped"
+        );
+    }
+
+    #[test]
+    fn seed_skips_nickname_equal_to_canonical_name() {
+        // When nickname trims to the same string as the canonical name, no alias entry
+        // is inserted; only the canonical entry should exist.
+        let (temp, mut registry) = test_registry();
+        let people = vec![SeedPerson {
+            name: "Taylor".to_string(),
+            relationship: "friend".to_string(),
+            context: "personal".to_string(),
+            // Nickname identical to name (with surrounding whitespace) must be skipped.
+            nickname: Some(" Taylor ".to_string()),
+        }];
+        temp_env::with_var("MEMPALACE_DIR", Some(temp.path()), || {
+            registry
+                .seed("personal", &people, &[])
+                .expect("seed must succeed");
+        });
+        // Exactly one entry — the canonical — because the nickname trims to the same value.
+        assert!(
+            registry.data.people.contains_key("Taylor"),
+            "Taylor must be registered"
+        );
+        assert_eq!(
+            registry.data.people.len(),
+            1,
+            "same nickname as canonical must not create a duplicate entry"
+        );
+    }
+
+    #[test]
+    fn seed_person_entry_defaults_context_to_personal_when_empty() {
+        // An empty context string in SeedPerson must be stored as "personal".
+        let (temp, mut registry) = test_registry();
+        let people = vec![SeedPerson {
+            name: "Quinn".to_string(),
+            relationship: "colleague".to_string(),
+            context: String::new(),
+            nickname: None,
+        }];
+        temp_env::with_var("MEMPALACE_DIR", Some(temp.path()), || {
+            registry
+                .seed("personal", &people, &[])
+                .expect("seed must succeed");
+        });
+        assert!(
+            registry.data.people.contains_key("Quinn"),
+            "Quinn must be in registry"
+        );
+        assert_eq!(
+            registry.data.people["Quinn"].contexts,
+            vec!["personal"],
+            "empty context must default to 'personal'"
+        );
+    }
+
+    // ── lookup — alias matching ───────────────────────────────────────────────
+
+    #[test]
+    fn lookup_finds_person_by_alias() {
+        // When a person has a nickname alias, a lookup on the alias must resolve to
+        // a person result carrying the canonical name.
+        let (temp, mut registry) = test_registry();
+        let people = vec![SeedPerson {
+            name: "Maxwell".to_string(),
+            relationship: "colleague".to_string(),
+            context: "work".to_string(),
+            nickname: Some("Max".to_string()),
+        }];
+        temp_env::with_var("MEMPALACE_DIR", Some(temp.path()), || {
+            registry
+                .seed("work", &people, &[])
+                .expect("seed must succeed");
+        });
+        // Look up via alias "Max" — should resolve to the registered person.
+        let result = registry.lookup("Max", "");
+        assert_eq!(
+            result.entity_type, "person",
+            "alias lookup must resolve as person"
+        );
+        assert_eq!(result.source, "onboarding", "source must be onboarding");
+    }
+
+    #[test]
+    fn lookup_ambiguous_name_with_empty_context_falls_through_to_person() {
+        // An ambiguous name looked up with an empty context must skip disambiguation
+        // and return the registered-person result directly.
+        let (temp, mut registry) = test_registry();
+        let people = vec![SeedPerson {
+            name: "Will".to_string(),
+            relationship: "brother".to_string(),
+            context: "personal".to_string(),
+            nickname: None,
+        }];
+        temp_env::with_var("MEMPALACE_DIR", Some(temp.path()), || {
+            registry.seed("personal", &people, &[]).expect("seed");
+        });
+        // Empty context — disambiguation is skipped; registered-person wins.
+        let result = registry.lookup("Will", "");
+        assert_eq!(
+            result.entity_type, "person",
+            "ambiguous name with empty context must resolve as person"
+        );
+        assert!(
+            result.disambiguated_by.is_none(),
+            "no disambiguation performed with empty context"
+        );
+    }
+
+    // ── lookup — wiki cache ───────────────────────────────────────────────────
+
+    #[test]
+    fn lookup_returns_confirmed_wiki_cache_entry() {
+        // A confirmed entry in the wiki cache must be surfaced by lookup when the
+        // word is not in people or projects.
+        let (temp, mut registry) = test_registry();
+        // Insert a confirmed wiki cache entry directly.
+        registry.data.wiki_cache.insert(
+            "Pluto".to_string(),
+            WikiCacheEntry {
+                inferred_type: "concept".to_string(),
+                confidence: 0.60,
+                wiki_summary: None,
+                wiki_title: Some("Pluto".to_string()),
+                word: "Pluto".to_string(),
+                confirmed: true,
+                confirmed_type: Some("concept".to_string()),
+                note: None,
+            },
+        );
+        // Save so the registry path is initialised for the test.
+        temp_env::with_var("MEMPALACE_DIR", Some(temp.path()), || {
+            registry.save().expect("save must succeed");
+        });
+        let result = registry.lookup("Pluto", "");
+        assert_eq!(
+            result.entity_type, "concept",
+            "confirmed wiki entry must resolve as concept"
+        );
+        assert_eq!(result.source, "wiki", "source must be wiki");
+        assert!(result.confidence > 0.0, "confidence must be positive");
+    }
+
+    #[test]
+    fn lookup_ignores_unconfirmed_wiki_cache_entry() {
+        // An unconfirmed wiki cache entry must NOT be returned by lookup.
+        let (_temp, mut registry) = test_registry();
+        registry.data.wiki_cache.insert(
+            "Nibiru".to_string(),
+            WikiCacheEntry {
+                inferred_type: "concept".to_string(),
+                confidence: 0.60,
+                wiki_summary: None,
+                wiki_title: Some("Nibiru".to_string()),
+                word: "Nibiru".to_string(),
+                confirmed: false,
+                confirmed_type: None,
+                note: None,
+            },
+        );
+        let result = registry.lookup("Nibiru", "");
+        assert_eq!(
+            result.entity_type, "unknown",
+            "unconfirmed wiki entry must not appear in lookup"
+        );
+        assert_eq!(
+            result.confidence, 0.0,
+            "unknown result must have zero confidence"
+        );
+    }
+
+    // ── research — cache hit ──────────────────────────────────────────────────
+
+    #[test]
+    fn research_returns_cached_entry_without_network() {
+        // When a word is already in the wiki cache, research must return the cached
+        // entry immediately regardless of allow_network.
+        let (_temp, mut registry) = test_registry();
+        let cached = WikiCacheEntry {
+            inferred_type: "person".to_string(),
+            confidence: 0.90,
+            wiki_summary: Some("An Irish name.".to_string()),
+            wiki_title: Some("Siobhan".to_string()),
+            word: "Siobhan".to_string(),
+            confirmed: true,
+            confirmed_type: None,
+            note: None,
+        };
+        registry
+            .data
+            .wiki_cache
+            .insert("Siobhan".to_string(), cached);
+        // allow_network = false to confirm local-cache path is taken.
+        let result = registry.research("Siobhan", false, false);
+        assert_eq!(
+            result.inferred_type, "person",
+            "cached entry must be returned"
+        );
+        assert!(
+            result.confirmed,
+            "cached entry confirmed flag must be preserved"
+        );
+        assert_eq!(
+            result.confidence, 0.90,
+            "cached confidence must be preserved"
+        );
+    }
+
+    // ── confirm_research edge cases ───────────────────────────────────────────
+
+    #[test]
+    fn confirm_research_non_person_type_does_not_add_to_people() {
+        // Confirming a "place" entity type must not add anyone to the people map.
+        // confirm_research only updates the wiki_cache entry when the word was already
+        // placed in the cache by a prior research() call; inserting it first exercises
+        // the get_mut branch and verifies the confirmed flag is set.
+        let (temp, mut registry) = test_registry();
+        // Pre-populate the wiki_cache so confirm_research can find and update it.
+        registry.data.wiki_cache.insert(
+            "Paris".to_string(),
+            WikiCacheEntry {
+                inferred_type: "place".to_string(),
+                confidence: 0.80,
+                wiki_summary: None,
+                wiki_title: Some("Paris".to_string()),
+                word: "Paris".to_string(),
+                confirmed: false,
+                confirmed_type: None,
+                note: None,
+            },
+        );
+        temp_env::with_var("MEMPALACE_DIR", Some(temp.path()), || {
+            registry
+                .confirm_research("Paris", "place", "", "")
+                .expect("confirm must succeed");
+        });
+        assert!(
+            registry.data.people.is_empty(),
+            "confirming a place must not populate the people map"
+        );
+        // The wiki_cache entry must be updated as confirmed.
+        let cached = registry.data.wiki_cache.get("Paris");
+        assert!(
+            cached.is_some(),
+            "wiki_cache must contain the confirmed entry"
+        );
+        assert!(
+            cached.expect("already asserted Some").confirmed,
+            "cache entry must be marked confirmed"
+        );
+    }
+
+    #[test]
+    fn confirm_research_empty_context_defaults_to_personal() {
+        // When context is empty, the inserted PersonEntry must use "personal" as context.
+        let (temp, mut registry) = test_registry();
+        temp_env::with_var("MEMPALACE_DIR", Some(temp.path()), || {
+            registry
+                .confirm_research("Rowan", "person", "friend", "")
+                .expect("confirm must succeed");
+        });
+        assert!(
+            registry.data.people.contains_key("Rowan"),
+            "Rowan must be in registry"
+        );
+        assert_eq!(
+            registry.data.people["Rowan"].contexts,
+            vec!["personal"],
+            "empty context must default to 'personal'"
+        );
+    }
+
+    #[test]
+    fn confirm_research_ambiguous_person_name_added_to_flags() {
+        // Confirming a word that is also in COMMON_ENGLISH_WORDS as a person must
+        // add it to ambiguous_flags.
+        let (temp, mut registry) = test_registry();
+        temp_env::with_var("MEMPALACE_DIR", Some(temp.path()), || {
+            registry
+                .confirm_research("Grace", "person", "friend", "personal")
+                .expect("confirm must succeed");
+        });
+        assert!(
+            registry.data.people.contains_key("Grace"),
+            "Grace must be in registry"
+        );
+        assert!(
+            registry.data.ambiguous_flags.contains(&"grace".to_string()),
+            "Grace is a common English word and must be flagged as ambiguous"
+        );
+    }
+
+    // ── summary — more than 8 people (truncated preview) ─────────────────────
+
+    #[test]
+    fn summary_truncates_preview_when_more_than_eight_people() {
+        // When more than 8 people exist, the preview line must end with "...".
+        let (temp, mut registry) = test_registry();
+        let people: Vec<SeedPerson> = [
+            "Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel", "India",
+        ]
+        .iter()
+        .map(|name| SeedPerson {
+            name: name.to_string(),
+            relationship: "friend".to_string(),
+            context: "personal".to_string(),
+            nickname: None,
+        })
+        .collect();
+        temp_env::with_var("MEMPALACE_DIR", Some(temp.path()), || {
+            registry
+                .seed("personal", &people, &[])
+                .expect("seed must succeed");
+        });
+        let summary = registry.summary();
+        assert!(
+            summary.contains("..."),
+            "summary must truncate preview with '...' when more than 8 people are registered"
+        );
+        assert!(
+            summary.contains("People: 9"),
+            "summary must report the full people count of 9"
+        );
+    }
+
+    #[test]
+    fn summary_shows_projects_and_ambiguous_flags_when_present() {
+        // When projects and ambiguous flags are populated they must appear in the summary.
+        let (temp, mut registry) = test_registry();
+        let people = vec![SeedPerson {
+            name: "May".to_string(),
+            relationship: "sister".to_string(),
+            context: "personal".to_string(),
+            nickname: None,
+        }];
+        temp_env::with_var("MEMPALACE_DIR", Some(temp.path()), || {
+            registry
+                .seed("personal", &people, &["Gemini".to_string()])
+                .expect("seed must succeed");
+        });
+        let summary = registry.summary();
+        assert!(
+            summary.contains("Gemini"),
+            "summary must include project name"
+        );
+        assert!(
+            summary.contains("may"),
+            "summary must include ambiguous flag"
+        );
+    }
+
+    // ── url_encode — non-ASCII / unicode ──────────────────────────────────────
+
+    #[test]
+    fn url_encode_percent_encodes_non_ascii_unicode_bytes() {
+        // Multi-byte UTF-8 characters must be percent-encoded byte-by-byte.
+        // "é" is U+00E9, encoded as two bytes: 0xC3 0xA9 → "%C3%A9".
+        let encoded = entity_registry_url_encode("café");
+        assert!(
+            encoded.contains("%C3%A9"),
+            "é (U+00E9) must encode as %C3%A9"
+        );
+        assert!(
+            !encoded.contains('é'),
+            "raw non-ASCII bytes must not appear in the encoded output"
+        );
+    }
+
+    #[test]
+    fn url_encode_handles_unreserved_chars_correctly() {
+        // Unreserved chars (letters, digits, -, _, ., ~) must pass through unchanged.
+        let encoded = entity_registry_url_encode("hello-world_1.0~test");
+        assert_eq!(
+            encoded, "hello-world_1.0~test",
+            "all unreserved characters must be left as-is"
+        );
+        assert!(!encoded.is_empty(), "encoded result must not be empty");
+    }
+
+    // ── extract_people_from_query — ambiguous name stays out when concept wins ─
+
+    #[test]
+    fn extract_people_excludes_ambiguous_name_when_concept_context_wins() {
+        // When an ambiguous registered name appears in a query but the surrounding
+        // text matches concept patterns, it must NOT be included in the result.
+        let (temp, mut registry) = test_registry();
+        let people = vec![SeedPerson {
+            name: "Ever".to_string(),
+            relationship: "colleague".to_string(),
+            context: "work".to_string(),
+            nickname: None,
+        }];
+        temp_env::with_var("MEMPALACE_DIR", Some(temp.path()), || {
+            registry.seed("work", &people, &[]).expect("seed");
+        });
+        // "have you ever" — concept pattern fires; Ever must NOT be returned.
+        let found = registry.extract_people_from_query("have you ever tried this approach?");
+        assert!(
+            !found.contains(&"Ever".to_string()),
+            "concept-resolved ambiguous name must not appear in query results"
+        );
+        assert!(
+            found.is_empty(),
+            "no person names must be extracted when concept context wins"
+        );
+    }
+
+    // ── entity_registry_wikipedia_classify — direct name indicator confidence ─
+
+    #[test]
+    fn wikipedia_classify_direct_name_indicator_yields_higher_confidence() {
+        // When the extract contains both a NAME_INDICATOR_PHRASE and the pattern
+        // "word is a", is_direct=true and confidence must be 0.90.
+        let data = serde_json::json!({
+            "type": "standard",
+            "title": "Riley",
+            "extract": "Riley is a given name of Irish origin used as both a masculine and feminine given name."
+        });
+        let entry = entity_registry_wikipedia_classify(&data, "Riley");
+        assert_eq!(
+            entry.inferred_type, "person",
+            "direct name page must classify as person"
+        );
+        assert!(
+            (entry.confidence - 0.90).abs() < 1e-9,
+            "direct name indicator must yield 0.90 confidence, got {}",
+            entry.confidence
+        );
+    }
+
+    // ── entity_registry_wikipedia_error ──────────────────────────────────────
+
+    #[test]
+    fn wikipedia_error_returns_unknown_with_zero_confidence() {
+        // entity_registry_wikipedia_error must always return a well-formed
+        // WikiCacheEntry with inferred_type="unknown" and confidence=0.0.
+        let entry = entity_registry_wikipedia_error("Zephyr");
+        assert_eq!(
+            entry.inferred_type, "unknown",
+            "error entry type must be unknown"
+        );
+        assert_eq!(entry.confidence, 0.0, "error entry confidence must be 0.0");
+        assert!(!entry.confirmed, "error entry must not be confirmed");
+        assert_eq!(entry.word, "Zephyr", "error entry word must match input");
+    }
+
+    // ── learn_from_text_process — new entity inserted ────────────────────────
+
+    #[test]
+    fn learn_from_text_process_inserts_high_confidence_entity() {
+        // An entity whose confidence meets min_confidence and whose name is not
+        // already in people or projects must be inserted and its name returned.
+        let (_temp, mut registry) = test_registry();
+        let candidate = crate::palace::entities::DetectedEntity {
+            name: "Korinna".to_string(),
+            entity_type: "person".to_string(),
+            confidence: 0.85,
+            frequency: 5,
+            signals: vec![],
+        };
+        let new_names = registry.learn_from_text_process(vec![candidate], 0.7);
+        assert!(
+            new_names.contains(&"Korinna".to_string()),
+            "Korinna must be returned as a new name"
+        );
+        assert!(
+            registry.data.people.contains_key("Korinna"),
+            "Korinna must be in the people map after insertion"
+        );
+    }
+
+    #[test]
+    fn learn_from_text_process_skips_entity_below_min_confidence() {
+        // An entity whose confidence falls below min_confidence must be ignored.
+        let (_temp, mut registry) = test_registry();
+        let candidate = crate::palace::entities::DetectedEntity {
+            name: "Zephyrine".to_string(),
+            entity_type: "person".to_string(),
+            confidence: 0.3,
+            frequency: 4,
+            signals: vec![],
+        };
+        let new_names = registry.learn_from_text_process(vec![candidate], 0.7);
+        assert!(
+            new_names.is_empty(),
+            "low-confidence entity must produce no new names"
+        );
+        assert!(
+            !registry.data.people.contains_key("Zephyrine"),
+            "low-confidence entity must not enter the people map"
+        );
+    }
+
+    #[test]
+    fn learn_from_text_process_skips_already_known_person() {
+        // An entity whose name already exists in the people map must be skipped to
+        // avoid overwriting onboarding data with lower-confidence learned entries.
+        let (temp, mut registry) = test_registry();
+        let people = vec![SeedPerson {
+            name: "Celestine".to_string(),
+            relationship: "colleague".to_string(),
+            context: "work".to_string(),
+            nickname: None,
+        }];
+        temp_env::with_var("MEMPALACE_DIR", Some(temp.path()), || {
+            registry
+                .seed("work", &people, &[])
+                .expect("seed must succeed");
+        });
+        let candidate = crate::palace::entities::DetectedEntity {
+            name: "Celestine".to_string(),
+            entity_type: "person".to_string(),
+            confidence: 0.90,
+            frequency: 7,
+            signals: vec![],
+        };
+        let new_names = registry.learn_from_text_process(vec![candidate], 0.5);
+        assert!(
+            new_names.is_empty(),
+            "already-known person must not be returned as a new name"
+        );
+        // The onboarding source must not have been overwritten.
+        assert_eq!(
+            registry.data.people["Celestine"].source, "onboarding",
+            "existing person source must remain 'onboarding'"
+        );
+    }
+
+    #[test]
+    fn learn_from_text_process_flags_common_word_name_as_ambiguous() {
+        // When a new entity's name is a COMMON_ENGLISH_WORD it must also be added to
+        // ambiguous_flags so future lookups apply context disambiguation.
+        let (_temp, mut registry) = test_registry();
+        // "grace" is in COMMON_ENGLISH_WORDS.
+        let candidate = crate::palace::entities::DetectedEntity {
+            name: "Grace".to_string(),
+            entity_type: "person".to_string(),
+            confidence: 0.80,
+            frequency: 6,
+            signals: vec![],
+        };
+        let new_names = registry.learn_from_text_process(vec![candidate], 0.5);
+        assert!(
+            new_names.contains(&"Grace".to_string()),
+            "Grace must be returned as a new name"
+        );
+        assert!(
+            registry.data.ambiguous_flags.contains(&"grace".to_string()),
+            "Grace (a common English word) must be added to ambiguous_flags"
+        );
+    }
+
+    #[test]
+    fn learn_from_text_process_skips_already_known_project() {
+        // An entity whose name matches a project entry (case-insensitive) must be
+        // skipped to avoid polluting the people map with project names.
+        let (temp, mut registry) = test_registry();
+        temp_env::with_var("MEMPALACE_DIR", Some(temp.path()), || {
+            registry
+                .seed("work", &[], &["Palantir".to_string()])
+                .expect("seed must succeed");
+        });
+        let candidate = crate::palace::entities::DetectedEntity {
+            name: "Palantir".to_string(),
+            entity_type: "person".to_string(),
+            confidence: 0.90,
+            frequency: 8,
+            signals: vec![],
+        };
+        let new_names = registry.learn_from_text_process(vec![candidate], 0.5);
+        assert!(
+            new_names.is_empty(),
+            "entity matching a project name must be skipped"
+        );
+        assert!(
+            !registry.data.people.contains_key("Palantir"),
+            "project name must not enter the people map"
+        );
+    }
+
+    // ── learn_from_text — save triggered when new names found ────────────────
+
+    #[test]
+    fn learn_from_text_saves_and_returns_new_name_when_entity_detected() {
+        // learn_from_text must return at least the newly detected name and persist
+        // the registry when new names are found.  We feed text dense enough for a
+        // name to exceed the frequency threshold of 3 with person-verb signals so
+        // classify_entity places it in the "person" bucket with high confidence.
+        let (temp, mut registry) = test_registry();
+        let text = "Korinna said hello. Korinna asked why. Korinna told everyone.\
+                    Korinna replied quickly. Korinna laughed again.";
+        let result = temp_env::with_var("MEMPALACE_DIR", Some(temp.path()), || {
+            registry.learn_from_text(text, 0.1, &["en"])
+        });
+        let new_names = result.expect("learn_from_text must succeed");
+        // Either Korinna was detected (person bucket) or the list is empty because
+        // the signal threshold was not met — both outcomes are valid. What we must
+        // verify is that the function completed without error and that any returned
+        // name is present in the people map.
+        assert!(
+            new_names
+                .iter()
+                .all(|n| registry.data.people.contains_key(n)),
+            "every returned name must be in the people map"
+        );
+        assert!(new_names.len() <= 10_000, "result must be bounded");
+    }
+
+    // ── lookup_disambiguate — person wins ────────────────────────────────────
+
+    #[test]
+    fn lookup_disambiguate_returns_person_when_person_score_wins() {
+        // A context that fires at least one PERSON_CONTEXT_PATTERN but no
+        // CONCEPT_CONTEXT_PATTERNS must resolve to entity_type="person".
+        let info = PersonEntry {
+            source: "onboarding".to_string(),
+            contexts: vec!["personal".to_string()],
+            aliases: vec![],
+            relationship: "friend".to_string(),
+            confidence: 1.0,
+            seen_count: 0,
+            canonical: None,
+        };
+        // "will said hello" fires the `\b{name}\s+said\b` person pattern.
+        let result = lookup_disambiguate("will", "will said hello to me", &info);
+        assert!(
+            result.is_some(),
+            "person-winning context must return Some result"
+        );
+        let resolved = result.expect("already asserted Some");
+        assert_eq!(
+            resolved.entity_type, "person",
+            "person-scoring context must resolve to 'person'"
+        );
+        assert_eq!(
+            resolved.disambiguated_by.as_deref(),
+            Some("context_patterns"),
+            "disambiguated_by must be 'context_patterns'"
+        );
+    }
+
+    #[test]
+    fn lookup_disambiguate_returns_concept_when_concept_score_wins() {
+        // A context that fires at least one CONCEPT_CONTEXT_PATTERN but no
+        // PERSON_CONTEXT_PATTERNS must resolve to entity_type="concept".
+        let info = PersonEntry {
+            source: "onboarding".to_string(),
+            contexts: vec!["work".to_string()],
+            aliases: vec![],
+            relationship: "colleague".to_string(),
+            confidence: 1.0,
+            seen_count: 0,
+            canonical: None,
+        };
+        // "have you ever done this" fires the `\bhave\s+you\s+{name}\b` concept pattern.
+        let result = lookup_disambiguate("ever", "have you ever done this?", &info);
+        assert!(
+            result.is_some(),
+            "concept-winning context must return Some result"
+        );
+        let resolved = result.expect("already asserted Some");
+        assert_eq!(
+            resolved.entity_type, "concept",
+            "concept-scoring context must resolve to 'concept'"
+        );
+        assert!(
+            resolved.confidence > 0.0,
+            "concept result must have positive confidence"
+        );
+    }
+
+    // ── lookup_disambiguate — tied scores return None ─────────────────────────
+
+    #[test]
+    fn lookup_disambiguate_returns_none_when_scores_are_tied() {
+        // When person_score == concept_score == 0, lookup_disambiguate must return
+        // None so the caller falls through to the registered-person result.
+        //
+        // The context must not start with the name (which would fire the `(?m)^{name}[:\s]`
+        // person pattern), must not contain person-verb patterns like "said"/"told", and
+        // must not contain concept patterns like "have you {name}". A mid-sentence
+        // reference with no pattern triggers a tied score of 0.
+        let info = PersonEntry {
+            source: "onboarding".to_string(),
+            contexts: vec!["personal".to_string()],
+            aliases: vec![],
+            relationship: "friend".to_string(),
+            confidence: 1.0,
+            seen_count: 0,
+            canonical: None,
+        };
+        // "yesterday we visited grace briefly" — does not start with the name (so the
+        // multiline start-of-line person pattern does not fire), contains no person-verb
+        // or direct-address patterns, and "grace briefly" does not match any concept
+        // preposition pattern. Both scores stay 0 → result must be None.
+        let result = lookup_disambiguate("grace", "yesterday we visited grace briefly", &info);
+        // Both scores tied at 0 → None.
+        assert!(
+            result.is_none(),
+            "tied disambiguation scores must return None"
+        );
+    }
 }

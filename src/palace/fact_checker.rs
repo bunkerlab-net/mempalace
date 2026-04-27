@@ -616,4 +616,342 @@ mod tests {
         let issues = check_text_check_claim(&claim, &[fact]);
         assert!(issues.is_empty(), "no issue when claim matches KG fact");
     }
+
+    #[test]
+    fn flatten_names_top_level_array_format() {
+        // A top-level JSON array (not nested under an object key) must be supported.
+        let json = r#"["Alice", "Bob", "Charlie"]"#;
+        let names = check_text_flatten_names(json);
+        assert!(
+            names.contains("Alice"),
+            "Alice must be collected from top-level array"
+        );
+        assert!(
+            names.contains("Bob"),
+            "Bob must be collected from top-level array"
+        );
+        assert!(
+            names.contains("Charlie"),
+            "Charlie must be collected from top-level array"
+        );
+        assert_eq!(names.len(), 3, "all three names must be collected");
+    }
+
+    #[test]
+    fn flatten_names_top_level_array_skips_empty_strings() {
+        // Empty string items in a top-level array must be silently ignored.
+        let json = r#"["Alice", "", "Bob"]"#;
+        let names = check_text_flatten_names(json);
+        assert!(names.contains("Alice"), "Alice must be collected");
+        assert!(names.contains("Bob"), "Bob must be collected");
+        assert_eq!(names.len(), 2, "empty string must not be collected");
+    }
+
+    #[test]
+    fn flatten_names_non_object_non_array_root_returns_empty() {
+        // A root JSON value that is neither an array nor an object must return empty.
+        let json = r#""just a string""#;
+        let names = check_text_flatten_names(json);
+        assert!(names.is_empty(), "scalar root JSON must yield empty set");
+    }
+
+    #[test]
+    fn edit_distance_unicode_characters_count_as_one_unit() {
+        // Multi-byte characters (accented, CJK) must count as a single edit unit.
+        // "café" vs "cafe": one substitution of 'é' → 'e'.
+        assert_eq!(
+            edit_distance("café", "cafe"),
+            1,
+            "accented char is one edit"
+        );
+        // "日本" vs "日本語": one insertion.
+        assert_eq!(
+            edit_distance("日本", "日本語"),
+            1,
+            "one CJK char is one edit"
+        );
+    }
+
+    #[test]
+    fn check_claim_no_issue_when_object_does_not_match() {
+        // When the KG fact's object does not match the claim's object, the fact is
+        // skipped entirely — no issue should be raised.
+        let claim = Claim {
+            subject: "Bob".to_string(),
+            predicate: "brother".to_string(),
+            object: "Alice".to_string(),
+            span: "Bob is Alice's brother".to_string(),
+        };
+        // Fact is about a different object ("Carol"), so none of the inner checks apply.
+        let fact = query::Fact {
+            direction: "outgoing".to_string(),
+            subject: "Bob".to_string(),
+            predicate: "brother".to_string(),
+            object: "Carol".to_string(),
+            valid_from: None,
+            valid_to: None,
+            confidence: 1.0,
+            current: true,
+        };
+        let issues = check_text_check_claim(&claim, &[fact]);
+        assert!(
+            issues.is_empty(),
+            "no issue when KG object does not match claim object"
+        );
+    }
+
+    #[test]
+    fn check_claim_stale_fact_does_not_fire_for_future_valid_to() {
+        // A stale_fact issue must NOT fire when valid_to is in the future —
+        // the fact is still technically valid at the time of checking.
+        let claim = Claim {
+            subject: "Bob".to_string(),
+            predicate: "brother".to_string(),
+            object: "Alice".to_string(),
+            span: "Bob is Alice's brother".to_string(),
+        };
+        let fact = query::Fact {
+            direction: "outgoing".to_string(),
+            subject: "Bob".to_string(),
+            predicate: "brother".to_string(),
+            object: "Alice".to_string(),
+            valid_from: None,
+            // Far future date — fact is still valid today.
+            valid_to: Some("2099-12-31".to_string()),
+            confidence: 1.0,
+            current: false,
+        };
+        let issues = check_text_check_claim(&claim, &[fact]);
+        assert!(
+            issues.is_empty(),
+            "stale_fact must not fire when valid_to is in the future"
+        );
+    }
+
+    #[test]
+    fn check_claim_stale_fact_does_not_fire_when_valid_to_is_none() {
+        // A closed (current=false) fact with no valid_to must not raise stale_fact.
+        let claim = Claim {
+            subject: "Bob".to_string(),
+            predicate: "sister".to_string(),
+            object: "Alice".to_string(),
+            span: "Bob is Alice's sister".to_string(),
+        };
+        let fact = query::Fact {
+            direction: "outgoing".to_string(),
+            subject: "Bob".to_string(),
+            predicate: "sister".to_string(),
+            object: "Alice".to_string(),
+            valid_from: None,
+            valid_to: None, // No closing date despite current=false.
+            confidence: 1.0,
+            current: false,
+        };
+        let issues = check_text_check_claim(&claim, &[fact]);
+        assert!(
+            issues.is_empty(),
+            "stale_fact must not fire when valid_to is None"
+        );
+    }
+
+    #[test]
+    fn extract_claims_both_patterns_in_same_text() {
+        // When both surface forms appear in the same text, both claims are extracted.
+        let text = "Bob is Alice's brother. Carol's manager is Dave.";
+        let claims = check_text_extract_claims(text);
+        assert_eq!(claims.len(), 2, "both claim patterns must be extracted");
+        // First claim (subject-first): Bob is brother of Alice.
+        assert_eq!(claims[0].subject, "Bob");
+        assert_eq!(claims[0].predicate, "brother");
+        assert_eq!(claims[0].object, "Alice");
+        // Second claim (possessor-first): Dave is Carol's manager.
+        assert_eq!(claims[1].subject, "Dave");
+        assert_eq!(claims[1].predicate, "manager");
+        assert_eq!(claims[1].object, "Carol");
+    }
+
+    #[test]
+    fn entity_confusion_no_issue_when_no_registry_names_appear_in_text() {
+        // If none of the registry names appear in the text, no issues can be raised.
+        let mut all_names = HashSet::new();
+        all_names.insert("Alice".to_string());
+        all_names.insert("Alyce".to_string());
+        // Neither name appears in the text.
+        let issues = check_text_entity_confusion("Nothing relevant here at all.", &all_names);
+        assert!(
+            issues.is_empty(),
+            "no issue when no registry names appear in text"
+        );
+    }
+
+    #[test]
+    fn check_claim_relationship_mismatch_uses_case_insensitive_object_match() {
+        // Object comparison must be case-insensitive so "alice" matches "Alice".
+        let claim = Claim {
+            subject: "Bob".to_string(),
+            predicate: "brother".to_string(),
+            object: "Alice".to_string(),
+            span: "Bob is Alice's brother".to_string(),
+        };
+        let fact = query::Fact {
+            direction: "outgoing".to_string(),
+            subject: "Bob".to_string(),
+            // Different predicate — should trigger relationship_mismatch.
+            predicate: "husband".to_string(),
+            // Object stored with different case.
+            object: "alice".to_string(),
+            valid_from: None,
+            valid_to: None,
+            confidence: 1.0,
+            current: true,
+        };
+        let issues = check_text_check_claim(&claim, &[fact]);
+        assert_eq!(
+            issues.len(),
+            1,
+            "relationship_mismatch must fire even when object case differs"
+        );
+        assert_eq!(issues[0].issue_type, "relationship_mismatch");
+        assert!(
+            issues[0].entity.is_some(),
+            "entity must be set on relationship_mismatch issue"
+        );
+    }
+
+    #[test]
+    fn flatten_names_scalar_value_in_object_hits_wildcard_arm() {
+        // A top-level object whose values are scalars (strings, not arrays or objects)
+        // must hit the `_ => {}` wildcard arm at line 143 and contribute no names.
+        let json = r#"{"people": "Alice", "count": 5}"#;
+        let names = check_text_flatten_names(json);
+        // Scalar values are silently ignored — the set must stay empty.
+        assert!(
+            names.is_empty(),
+            "scalar values in registry object must be ignored by the wildcard arm"
+        );
+        // Negative space: neither the key nor the scalar value must appear as a name.
+        assert!(
+            !names.contains("people"),
+            "object key must not become a name"
+        );
+        assert!(
+            !names.contains("Alice"),
+            "scalar string value must not become a name"
+        );
+    }
+
+    #[test]
+    fn entity_confusion_large_edit_distance_inserts_into_seen_pairs_else_branch() {
+        // When edit distance exceeds the threshold the pair is inserted into `seen_pairs`
+        // via the `else` branch (lines 203-204), preventing future re-scans of the same pair
+        // from the opposite direction. No similar_name issue is raised for distant pairs.
+        let mut all_names = HashSet::new();
+        all_names.insert("Alice".to_string());
+        // "Zephyr" is many edits away from "Alice" — well above the threshold of 2.
+        all_names.insert("Zephyr".to_string());
+        // Text mentions "Alice" only; "Zephyr" is unmentioned.
+        let issues = check_text_entity_confusion("I met Alice yesterday.", &all_names);
+        // No similar_name issue: distance > threshold, so nothing is pushed.
+        assert!(
+            issues.is_empty(),
+            "names far apart in edit distance must not raise a similar_name issue"
+        );
+        // The function must have returned cleanly (no panic), confirming the else branch ran.
+        assert!(
+            issues.is_empty(),
+            "issue vec must be empty for distant name pairs"
+        );
+    }
+
+    // ── check_text (async — exercises registry + kg-contradictions paths) ────
+
+    // temp_env::async_with_vars uses block_in_place internally, which requires a
+    // multi-threaded runtime — the default single-threaded tokio test runtime panics.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn check_text_reads_registry_file_and_detects_entity_confusion() {
+        // Lines 87-90: the `if let Ok(raw_json)` block inside `check_text` reads the
+        // known-entities registry and passes names to `check_text_entity_confusion`.
+        // We create a temp dir, write a registry there, point MEMPALACE_DIR at it, and
+        // call `check_text` with text that mentions a name near a registry name.
+        let temp_dir = tempfile::tempdir().expect("tempdir must be creatable");
+        let registry_path = temp_dir.path().join("known_entities.json");
+        // Registry contains "Alice" and "Alyce" — one edit apart.
+        std::fs::write(&registry_path, r#"["Alice", "Alyce"]"#)
+            .expect("registry write must succeed");
+
+        let (_database, connection) = crate::test_helpers::test_db().await;
+
+        // Use temp_env::async_with_vars so MEMPALACE_DIR is live during the async call.
+        // known_entities::registry_path() reads MEMPALACE_DIR at call time via config_dir().
+        let temp_dir_path_str = temp_dir
+            .path()
+            .to_str()
+            .expect("temp dir path must be valid UTF-8")
+            .to_string();
+        let issues = temp_env::async_with_vars(
+            [("MEMPALACE_DIR", Some(temp_dir_path_str.as_str()))],
+            check_text("I saw Alice at the store yesterday.", &connection),
+        )
+        .await
+        .expect("check_text must succeed");
+
+        // The registry has "Alice" and "Alyce" (1 edit apart); text mentions "Alice".
+        // At least one similar_name issue must be raised.
+        assert!(
+            !issues.is_empty(),
+            "check_text must detect entity confusion when registry names differ by 1 edit"
+        );
+        assert_eq!(
+            issues[0].issue_type, "similar_name",
+            "detected issue must be similar_name"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_text_kg_contradictions_detects_relationship_mismatch() {
+        // Lines 247-260: the inner loop of `check_text_kg_contradictions` executes
+        // only when the subject of a claim has KG facts. We insert a fact with a
+        // different predicate for the same (subject, object) pair and verify that a
+        // relationship_mismatch issue is returned through the full `check_text` call.
+        let (_database, connection) = crate::test_helpers::test_db().await;
+
+        // Insert a KG fact: Bob --husband--> Alice (current = true, no valid_to).
+        crate::kg::add_triple(
+            &connection,
+            &crate::kg::TripleParams {
+                subject: "Bob",
+                predicate: "husband",
+                object: "Alice",
+                valid_from: None,
+                valid_to: None,
+                confidence: 1.0,
+                source_closet: None,
+                source_file: None,
+                source_drawer_id: None,
+                adapter_name: None,
+            },
+        )
+        .await
+        .expect("add_triple must succeed for Bob/husband/Alice");
+
+        // Text claims "Bob is Alice's brother" — KG says "husband", so mismatch.
+        let issues = check_text(
+            "Bob is Alice's brother and they get along well.",
+            &connection,
+        )
+        .await
+        .expect("check_text must succeed");
+
+        // At least one relationship_mismatch issue must be raised.
+        assert!(
+            !issues.is_empty(),
+            "check_text must detect relationship_mismatch from KG contradiction"
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.issue_type == "relationship_mismatch"),
+            "at least one issue must be relationship_mismatch"
+        );
+    }
 }

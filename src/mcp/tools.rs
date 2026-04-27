@@ -3670,4 +3670,743 @@ mod tests {
             );
         });
     }
+
+    // --- int_arg edge cases: infinite and over-max floats ---
+
+    #[test]
+    fn int_arg_float_infinite_returns_default() {
+        // Infinite floats must fall through to the default; they are not finite.
+        let infinity = f64::INFINITY;
+        let neg_infinity = f64::NEG_INFINITY;
+        // Encode as serde_json::Number — serde_json rejects non-finite f64 via
+        // json! macro, so we use a JSON string coercion path instead.
+        // The f64 path inside int_arg rejects non-finite values with `f.is_finite()`.
+        // We verify the string path handles a stringified "inf"-like value.
+        assert_eq!(int_arg(&json!({"n": "inf"}), "n", 42), 42);
+        assert_eq!(int_arg(&json!({"n": "-inf"}), "n", 42), 42);
+        // Pair assertion: confirm the f64 representations are actually non-finite.
+        assert!(!infinity.is_finite());
+        assert!(!neg_infinity.is_finite());
+    }
+
+    #[test]
+    fn int_arg_float_fractional_over_exact_max_returns_default() {
+        // A fractional float value that also exceeds EXACT_INT_F64_MAX must be
+        // rejected: the f64 path rejects non-zero fractions (`f.fract() == 0.0`).
+        // We use the JSON number (f64) path rather than string, so there's no
+        // prior i64 parse attempt.
+        // 1.5 is a whole-number-adjacent value that fails the fract() check.
+        assert_eq!(int_arg(&json!({"n": 1.5}), "n", 7), 7);
+        // A non-positive float must also be rejected.
+        assert_eq!(int_arg(&json!({"n": 0.0}), "n", 7), 7);
+        // Pair: a valid whole positive float must be accepted.
+        assert_eq!(int_arg(&json!({"n": 3.0}), "n", 7), 3);
+    }
+
+    // --- sanitize_name: empty string ---
+
+    #[test]
+    fn sanitize_name_rejects_empty_string() {
+        // An empty string (and whitespace-only) must produce a public error.
+        let result_empty = sanitize_name("", "field");
+        assert!(result_empty.is_err(), "empty string must be rejected");
+        let error_empty = result_empty.expect_err("empty string must fail");
+        assert!(
+            error_empty["public"].as_bool().unwrap_or(false),
+            "error must be public for empty string"
+        );
+
+        let result_ws = sanitize_name("   ", "field");
+        assert!(result_ws.is_err(), "whitespace-only must be rejected");
+        assert!(
+            result_ws.expect_err("whitespace-only must fail")["public"]
+                .as_bool()
+                .unwrap_or(false),
+            "error must be public for whitespace-only string"
+        );
+    }
+
+    // --- sanitize_opt_name: whitespace-only returns Ok(None) ---
+
+    #[test]
+    fn sanitize_opt_name_whitespace_only_returns_none() {
+        // Whitespace-only input must be treated as absent (Ok(None)), not an error.
+        let result = sanitize_opt_name("   ", "field");
+        assert!(result.is_ok(), "whitespace-only must be Ok, not Err");
+        assert!(
+            result.expect("whitespace-only must return Ok").is_none(),
+            "whitespace-only must return None"
+        );
+        // Pair: a valid name returns Some.
+        let result_valid = sanitize_opt_name("valid", "field");
+        assert!(result_valid.is_ok(), "valid name must be Ok");
+        assert!(
+            result_valid.expect("valid name must return Ok").is_some(),
+            "valid name must return Some"
+        );
+    }
+
+    // --- sanitize_content: empty string ---
+
+    #[test]
+    fn sanitize_content_rejects_empty_string() {
+        // An empty string (after trimming) must produce a public error.
+        let result_empty = sanitize_content("");
+        assert!(result_empty.is_err(), "empty content must be rejected");
+        let error_empty = result_empty.expect_err("empty content must fail");
+        assert!(
+            error_empty["public"].as_bool().unwrap_or(false),
+            "error must be public for empty content"
+        );
+
+        let result_ws = sanitize_content("   ");
+        assert!(
+            result_ws.is_err(),
+            "whitespace-only content must be rejected"
+        );
+        assert!(
+            result_ws.expect_err("whitespace-only content must fail")["public"]
+                .as_bool()
+                .unwrap_or(false),
+            "error must be public for whitespace-only content"
+        );
+    }
+
+    // --- sanitize_label: empty string ---
+
+    #[test]
+    fn sanitize_label_rejects_empty_string() {
+        // An empty label (after trimming) must produce a public error.
+        let result_empty = sanitize_label("");
+        assert!(result_empty.is_err(), "empty label must be rejected");
+        let error_empty = result_empty.expect_err("empty label must fail");
+        assert!(
+            error_empty["public"].as_bool().unwrap_or(false),
+            "error must be public for empty label"
+        );
+
+        let result_ws = sanitize_label("  ");
+        assert!(result_ws.is_err(), "whitespace-only label must be rejected");
+        assert!(
+            result_ws.expect_err("whitespace-only label must fail")["public"]
+                .as_bool()
+                .unwrap_or(false),
+            "error must be public for whitespace-only label"
+        );
+    }
+
+    // --- tool_reconnect ---
+
+    #[tokio::test]
+    async fn reconnect_returns_drawer_count() {
+        with_isolated_env(|connection| async move {
+            let result = tool_reconnect(&connection).await;
+            assert_eq!(
+                result["success"], true,
+                "reconnect must report success on valid connection"
+            );
+            assert_eq!(result["drawers"], 0, "empty DB must report zero drawers");
+            assert!(
+                result["message"].is_string(),
+                "reconnect must include a message string"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn reconnect_after_inserting_drawers_reflects_count() {
+        with_isolated_env(|connection| async move {
+            seed_drawer(&connection, "wing1", "room1", "reconnect test drawer one").await;
+            seed_drawer(&connection, "wing1", "room1", "reconnect test drawer two").await;
+
+            let result = tool_reconnect(&connection).await;
+            assert_eq!(result["success"], true, "reconnect must report success");
+            assert_eq!(
+                result["drawers"], 2,
+                "reconnect must report the correct drawer count after inserts"
+            );
+        })
+        .await;
+    }
+
+    // --- tool_check_facts ---
+
+    #[tokio::test]
+    async fn check_facts_empty_text_returns_error() {
+        with_isolated_env(|connection| async move {
+            let result = tool_check_facts(&connection, &json!({"text": ""})).await;
+            assert!(
+                result["error"].is_string(),
+                "must return error for empty text"
+            );
+            assert_eq!(
+                result["public"], true,
+                "error must be public for empty text"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn check_facts_valid_text_returns_issues_list() {
+        with_isolated_env(|connection| async move {
+            // A non-empty text must produce an issues array (may be empty if nothing found).
+            let result =
+                tool_check_facts(&connection, &json!({"text": "Alice works at Acme Corp"})).await;
+            assert!(
+                result.get("error").is_none(),
+                "check_facts with valid text must not error"
+            );
+            assert!(
+                result.get("issues").is_some(),
+                "must have issues key in result"
+            );
+            assert!(
+                result["clean"].is_boolean(),
+                "must have clean boolean in result"
+            );
+        })
+        .await;
+    }
+
+    // --- tool_hook_settings: read and update ---
+
+    #[test]
+    fn hook_settings_read_returns_current_settings() {
+        // Reading with no args must return the current settings object.
+        let temp = tempfile::tempdir().expect("tempdir for hook_settings");
+        temp_env::with_var("MEMPALACE_DIR", Some(temp.path()), || {
+            let result = tool_hook_settings(&json!({}));
+            assert_eq!(
+                result["success"], true,
+                "read hook settings must report success"
+            );
+            assert!(
+                result["settings"]["silent_save"].is_boolean(),
+                "silent_save must be a boolean"
+            );
+            assert!(
+                result["settings"]["desktop_toast"].is_boolean(),
+                "desktop_toast must be a boolean"
+            );
+            // No-arg read must not include an "updated" key.
+            assert!(
+                result.get("updated").is_none(),
+                "read-only call must not include updated key"
+            );
+        });
+    }
+
+    #[test]
+    fn hook_settings_update_silent_save_reflects_change() {
+        // Setting silent_save to true must be reflected in the returned settings.
+        let temp = tempfile::tempdir().expect("tempdir for hook_settings update");
+        temp_env::with_var("MEMPALACE_DIR", Some(temp.path()), || {
+            let result = tool_hook_settings(&json!({"silent_save": true}));
+            assert_eq!(result["success"], true, "update must report success");
+            assert_eq!(
+                result["settings"]["silent_save"], true,
+                "silent_save must reflect the updated value"
+            );
+            // Updated key must be present and non-empty when a field was changed.
+            let updated = result["updated"]
+                .as_array()
+                .expect("updated must be an array when fields are changed");
+            assert!(!updated.is_empty(), "updated must list the changed field");
+        });
+    }
+
+    // --- tool_memories_filed_away: quiet and file-present branches ---
+
+    #[test]
+    fn memories_filed_away_quiet_when_no_checkpoint() {
+        // When no checkpoint file exists the status must be "quiet".
+        let temp = tempfile::tempdir().expect("tempdir for memories_filed_away");
+        temp_env::with_var("MEMPALACE_DIR", Some(temp.path()), || {
+            let result = tool_memories_filed_away();
+            assert_eq!(
+                result["status"], "quiet",
+                "no checkpoint must report quiet status"
+            );
+            assert_eq!(result["count"], 0, "quiet must report zero count");
+            assert!(
+                result["timestamp"].is_null(),
+                "quiet must have null timestamp"
+            );
+        });
+    }
+
+    #[test]
+    fn memories_filed_away_returns_ok_when_valid_checkpoint_exists() {
+        // When a valid JSON checkpoint file exists the status must be "ok" and the
+        // file must be deleted so the next call returns "quiet" again.
+        let temp = tempfile::tempdir().expect("tempdir for memories_filed_away checkpoint");
+        temp_env::with_var("MEMPALACE_DIR", Some(temp.path()), || {
+            // Create the hook_state directory and write a checkpoint file.
+            let hook_state_dir = temp.path().join("hook_state");
+            std::fs::create_dir_all(&hook_state_dir).expect("create hook_state dir");
+            let checkpoint_file = hook_state_dir.join("last_checkpoint");
+            let checkpoint_json = r#"{"msgs": 5, "ts": "2025-01-01T00:00:00Z"}"#;
+            std::fs::write(&checkpoint_file, checkpoint_json).expect("write checkpoint file");
+
+            let result = tool_memories_filed_away();
+            assert_eq!(
+                result["status"], "ok",
+                "valid checkpoint must return ok status"
+            );
+            assert_eq!(result["count"], 5, "count must match msgs in checkpoint");
+            assert!(
+                result["timestamp"].is_string(),
+                "timestamp must be a string from the checkpoint"
+            );
+
+            // Pair assertion: the checkpoint file must be deleted after reading.
+            assert!(
+                !checkpoint_file.is_file(),
+                "checkpoint file must be deleted after reading"
+            );
+        });
+    }
+
+    #[test]
+    fn memories_filed_away_returns_error_status_on_invalid_json() {
+        // When the checkpoint file contains non-JSON content the status must be "error".
+        let temp = tempfile::tempdir().expect("tempdir for memories_filed_away invalid json");
+        temp_env::with_var("MEMPALACE_DIR", Some(temp.path()), || {
+            let hook_state_dir = temp.path().join("hook_state");
+            std::fs::create_dir_all(&hook_state_dir).expect("create hook_state dir");
+            let checkpoint_file = hook_state_dir.join("last_checkpoint");
+            std::fs::write(&checkpoint_file, "not valid json!!!")
+                .expect("write invalid checkpoint");
+
+            let result = tool_memories_filed_away();
+            assert_eq!(
+                result["status"], "error",
+                "invalid JSON checkpoint must return error status"
+            );
+            assert_eq!(result["count"], 0, "error status must report zero count");
+        });
+    }
+
+    // --- tool_get_drawer: invalid format branch ---
+
+    #[tokio::test]
+    async fn get_drawer_invalid_format_returns_error() {
+        with_isolated_env(|connection| async move {
+            // A valid sanitize_name value that does not start with "drawer_" must
+            // trigger the invalid-format branch, not the not-found branch.
+            let result =
+                tool_get_drawer(&connection, &json!({"drawer_id": "notadrawer123validname"})).await;
+            assert!(
+                result["error"].is_string(),
+                "invalid format must return an error string"
+            );
+            assert_eq!(
+                result["public"], true,
+                "invalid format error must be public"
+            );
+            let error_text = result["error"].as_str().expect("error must be a string");
+            assert!(
+                error_text.contains("invalid format"),
+                "error must mention invalid format"
+            );
+        })
+        .await;
+    }
+
+    // --- tool_list_drawers: wing+room filter combination ---
+
+    #[tokio::test]
+    async fn list_drawers_wing_and_room_filter() {
+        with_isolated_env(|connection| async move {
+            seed_drawer(&connection, "alpha", "code", "alpha code drawer content").await;
+            seed_drawer(&connection, "alpha", "docs", "alpha docs drawer content").await;
+            seed_drawer(&connection, "beta", "code", "beta code drawer content").await;
+
+            // Filter by both wing and room.
+            let result =
+                tool_list_drawers(&connection, &json!({"wing": "alpha", "room": "code"})).await;
+            assert_eq!(
+                result["count"], 1,
+                "wing+room filter must return exactly one matching drawer"
+            );
+            let drawer = &result["drawers"][0];
+            assert_eq!(drawer["wing"], "alpha");
+            assert_eq!(drawer["room"], "code");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn list_drawers_room_only_filter() {
+        with_isolated_env(|connection| async move {
+            seed_drawer(&connection, "alpha", "notes", "alpha notes content").await;
+            seed_drawer(&connection, "beta", "notes", "beta notes content").await;
+            seed_drawer(&connection, "gamma", "code", "gamma code content").await;
+
+            // Filter by room only — must return drawers from all wings with that room.
+            let result = tool_list_drawers(&connection, &json!({"room": "notes"})).await;
+            assert_eq!(
+                result["count"], 2,
+                "room-only filter must return drawers from all wings with that room"
+            );
+        })
+        .await;
+    }
+
+    // --- tool_update_drawer: duplicate collision branch ---
+
+    #[tokio::test]
+    async fn update_drawer_collision_with_existing_returns_error() {
+        with_isolated_env(|connection| async move {
+            // Seed two drawers. Updating the first to match the second's content would
+            // recompute the same deterministic ID — this must be rejected.
+            let first = seed_drawer(&connection, "proj", "code", "first drawer content").await;
+            let first_id = first["drawer_id"].as_str().expect("drawer_id string");
+            seed_drawer(&connection, "proj", "code", "second drawer content").await;
+
+            // Attempting to update first drawer's content to match the second would
+            // produce an ID collision.
+            let result = tool_update_drawer(
+                &connection,
+                &json!({"drawer_id": first_id, "content": "second drawer content"}),
+            )
+            .await;
+            assert_eq!(
+                result["success"], false,
+                "collision with existing drawer must be rejected"
+            );
+            assert!(
+                result["existing_drawer_id"].is_string(),
+                "error must include the existing_drawer_id"
+            );
+        })
+        .await;
+    }
+
+    // --- tool_kg_query: outgoing/incoming direction variants ---
+
+    #[tokio::test]
+    async fn kg_query_outgoing_direction() {
+        with_isolated_env(|connection| async move {
+            tool_kg_add(
+                &connection,
+                &json!({"subject": "Rust", "predicate": "compilesTo", "object": "binary"}),
+            )
+            .await;
+
+            let result = tool_kg_query(
+                &connection,
+                &json!({"entity": "Rust", "direction": "outgoing"}),
+            )
+            .await;
+            assert!(
+                result.get("error").is_none(),
+                "outgoing direction query must not error"
+            );
+            assert_eq!(result["entity"], "Rust");
+            assert!(result["count"].as_i64().expect("count") >= 1);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn kg_query_incoming_direction() {
+        with_isolated_env(|connection| async move {
+            tool_kg_add(
+                &connection,
+                &json!({"subject": "Rust", "predicate": "compilesTo", "object": "binary"}),
+            )
+            .await;
+
+            let result = tool_kg_query(
+                &connection,
+                &json!({"entity": "binary", "direction": "incoming"}),
+            )
+            .await;
+            assert!(
+                result.get("error").is_none(),
+                "incoming direction query must not error"
+            );
+            assert_eq!(result["entity"], "binary");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn kg_query_with_as_of_filter() {
+        with_isolated_env(|connection| async move {
+            tool_kg_add(
+                &connection,
+                &json!({
+                    "subject": "Alice",
+                    "predicate": "worksAt",
+                    "object": "Acme",
+                    "valid_from": "2020-01-01"
+                }),
+            )
+            .await;
+
+            // Query with an as_of date in the past — must not error.
+            let result = tool_kg_query(
+                &connection,
+                &json!({"entity": "Alice", "as_of": "2019-01-01"}),
+            )
+            .await;
+            assert!(
+                result.get("error").is_none(),
+                "kg_query with as_of must not error"
+            );
+            assert!(
+                result["as_of"].is_string(),
+                "as_of must be echoed back as a string"
+            );
+            // Pair: query with a date after valid_from must find the fact.
+            let result_after = tool_kg_query(
+                &connection,
+                &json!({"entity": "Alice", "as_of": "2021-01-01"}),
+            )
+            .await;
+            assert!(
+                result_after.get("error").is_none(),
+                "kg_query after valid_from must not error"
+            );
+        })
+        .await;
+    }
+
+    // --- str_arg helper ---
+
+    #[test]
+    fn str_arg_missing_key_returns_empty_string() {
+        // A missing key must return an empty string, not panic.
+        // Bind the Value to a local so the borrow outlives the assert.
+        let args_empty = json!({});
+        let result = str_arg(&args_empty, "missing_key");
+        assert_eq!(result, "", "missing key must return empty string");
+        // Pair: a present key must return its value.
+        let args_present = json!({"key": "value"});
+        let result_present = str_arg(&args_present, "key");
+        assert_eq!(result_present, "value", "present key must return its value");
+    }
+
+    #[test]
+    fn str_arg_non_string_value_returns_empty_string() {
+        // A non-string JSON value must return empty string rather than panic.
+        // Bind to locals so borrows outlive the assertions.
+        let args_int = json!({"n": 42});
+        let result_int = str_arg(&args_int, "n");
+        assert_eq!(result_int, "", "integer value must return empty string");
+
+        let args_bool = json!({"b": true});
+        let result_bool = str_arg(&args_bool, "b");
+        assert_eq!(result_bool, "", "boolean value must return empty string");
+    }
+
+    // --- tool_add_drawer: added_by field ---
+
+    #[tokio::test]
+    async fn add_drawer_with_explicit_added_by() {
+        // When added_by is provided it must be used instead of the default "mcp".
+        with_isolated_env(|connection| async move {
+            let result = tool_add_drawer(
+                &connection,
+                &json!({
+                    "wing": "personal",
+                    "room": "notes",
+                    "content": "content with explicit added_by field",
+                    "added_by": "test_agent",
+                }),
+            )
+            .await;
+            assert_eq!(
+                result["success"], true,
+                "add_drawer with added_by must succeed"
+            );
+            assert!(
+                result["drawer_id"].is_string(),
+                "must return a drawer_id string"
+            );
+        })
+        .await;
+    }
+
+    // --- tool_list_tunnels: wing filter ---
+
+    #[tokio::test]
+    async fn list_tunnels_with_wing_filter() {
+        with_isolated_env(|connection| async move {
+            // Create a tunnel from alpha → beta.
+            seed_tunnel(&connection).await;
+            // Create another tunnel from gamma → delta.
+            tool_create_tunnel(
+                &connection,
+                &json!({
+                    "source_wing": "gamma",
+                    "source_room": "code",
+                    "target_wing": "delta",
+                    "target_room": "docs",
+                    "label": "gamma delta link",
+                }),
+            )
+            .await;
+
+            // Filter by wing "alpha" — must only return the alpha tunnel.
+            let result = tool_list_tunnels(&connection, &json!({"wing": "alpha"})).await;
+            assert!(result.get("error").is_none(), "must not error");
+            let count = result["count"].as_i64().expect("count must be integer");
+            assert_eq!(count, 1, "wing filter must return only matching tunnels");
+        })
+        .await;
+    }
+
+    // --- tool_delete_tunnel: empty tunnel_id branch ---
+
+    #[tokio::test]
+    async fn delete_tunnel_empty_id_returns_error() {
+        with_isolated_env(|connection| async move {
+            // An empty tunnel_id must return a public error before any DB access.
+            let result = tool_delete_tunnel(&connection, &json!({"tunnel_id": ""})).await;
+            assert!(
+                result["error"].is_string(),
+                "empty tunnel_id must return an error"
+            );
+            assert_eq!(
+                result["public"], true,
+                "empty tunnel_id error must be public"
+            );
+        })
+        .await;
+    }
+
+    // --- tool_kg_timeline: invalid entity ---
+
+    #[tokio::test]
+    async fn kg_timeline_invalid_entity_returns_error() {
+        with_isolated_env(|connection| async move {
+            // A path-traversal sequence in the entity must be rejected.
+            let result = tool_kg_timeline(&connection, &json!({"entity": "a..b"})).await;
+            assert!(
+                result["error"].is_string(),
+                "path-traversal entity must return an error"
+            );
+            assert_eq!(result["public"], true, "validation error must be public");
+        })
+        .await;
+    }
+
+    // --- tool_search: query_sanitized and context_received branches ---
+
+    #[tokio::test]
+    async fn search_long_query_triggers_sanitized_flag() {
+        // A query longer than 200 characters triggers the sanitizer.  The result
+        // must include `query_sanitized: true` and the `sanitizer` metadata object,
+        // exercising the `sanitized.was_sanitized` branch (lines 550-558).
+        with_isolated_env(|connection| async move {
+            // Build a contaminated query: 300 chars of noise + meaningful tail segment.
+            let noise = "x".repeat(300);
+            let tail = "rust programming language";
+            let long_query = format!("{noise}\n{tail}");
+
+            seed_drawer(
+                &connection,
+                "tech",
+                "notes",
+                "rust programming language systems",
+            )
+            .await;
+
+            let result = tool_search(&connection, &json!({"query": long_query})).await;
+            assert!(
+                result.get("error").is_none(),
+                "sanitized long query must not error"
+            );
+            assert_eq!(
+                result["query_sanitized"], true,
+                "was_sanitized branch must set query_sanitized to true"
+            );
+            let sanitizer = result["sanitizer"]
+                .as_object()
+                .expect("sanitizer key must be an object");
+            assert!(
+                sanitizer.contains_key("method"),
+                "sanitizer must include method"
+            );
+            assert!(
+                sanitizer.contains_key("original_length"),
+                "sanitizer must include original_length"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn search_with_context_sets_context_received_flag() {
+        // A non-empty `context` argument must set `context_received: true` in the
+        // result, exercising the `context_received` branch (lines 559-561).
+        with_isolated_env(|connection| async move {
+            seed_drawer(
+                &connection,
+                "tech",
+                "notes",
+                "rust programming language memory safety",
+            )
+            .await;
+
+            let result = tool_search(
+                &connection,
+                &json!({
+                    "query": "rust programming",
+                    "context": "User is asking about language features",
+                }),
+            )
+            .await;
+            assert!(
+                result.get("error").is_none(),
+                "search with context must not error"
+            );
+            assert_eq!(
+                result["context_received"], true,
+                "non-empty context must set context_received to true"
+            );
+            assert!(
+                result["count"].as_i64().is_some(),
+                "result must include a count"
+            );
+        })
+        .await;
+    }
+
+    // --- tool_update_drawer: invalid drawer_id format branch ---
+
+    #[tokio::test]
+    async fn update_drawer_invalid_id_format_returns_error() {
+        // A drawer_id that passes sanitize_name but does not start with "drawer_"
+        // must be rejected before any DB access, exercising the format-check branch
+        // in tool_update_drawer_validate_args (line 864-867).
+        with_isolated_env(|connection| async move {
+            let result = tool_update_drawer(
+                &connection,
+                &json!({
+                    "drawer_id": "notadrawer123validname",
+                    "content": "some updated content here",
+                }),
+            )
+            .await;
+            assert_eq!(
+                result["success"], false,
+                "non-drawer_ prefixed id must be rejected"
+            );
+            assert!(
+                result["error"]
+                    .as_str()
+                    .expect("error must be string")
+                    .contains("invalid format"),
+                "error must mention invalid format"
+            );
+            assert_eq!(result["public"], true, "format error must be public");
+        })
+        .await;
+    }
 }

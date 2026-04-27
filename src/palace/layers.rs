@@ -456,6 +456,44 @@ mod tests {
         );
     }
 
+    // ── layer0 empty identity file (lines 40-41) ─────────────────────────
+
+    #[test]
+    fn layer0_returns_missing_message_when_identity_file_is_empty() {
+        // When identity.txt exists but contains only whitespace, layer0 must
+        // return the "missing" placeholder rather than the empty trimmed text.
+        // MEMPALACE_DIR redirects config_dir() to our temp directory so the test
+        // is hermetic and does not touch the real user config directory.
+        //
+        // We also write known_entities.json (empty array) into the same temp dir
+        // so that if this test races with the fact_checker test (which also sets
+        // MEMPALACE_DIR via temp_env), the registry lookup still returns a valid
+        // (empty) list rather than a parse error — preventing a spurious failure.
+        let temp_directory =
+            tempfile::tempdir().expect("failed to create temp dir for layer0 empty-file test");
+        let identity_path = temp_directory.path().join("identity.txt");
+        std::fs::write(&identity_path, "   \n  ")
+            .expect("failed to write empty identity.txt for layer0 test");
+        std::fs::write(temp_directory.path().join("known_entities.json"), "[]")
+            .expect("failed to write empty known_entities.json for layer0 test");
+
+        temp_env::with_var(
+            "MEMPALACE_DIR",
+            Some(temp_directory.path().to_str().expect("valid UTF-8 path")),
+            || {
+                let result = layer0();
+                assert!(
+                    result.contains("No identity configured"),
+                    "empty identity.txt must produce the missing placeholder"
+                );
+                assert!(
+                    result.contains("L0"),
+                    "missing identity output must still include the L0 section header"
+                );
+            },
+        );
+    }
+
     #[tokio::test]
     async fn layer1_empty_palace() {
         let (_db, connection) = crate::test_helpers::test_db().await;
@@ -722,6 +760,388 @@ mod tests {
         assert!(
             result.contains("research"),
             "output must include the wing name"
+        );
+    }
+
+    // ── layer1 CHARS_MAX budget overflow (lines 102-105) ────────────────
+
+    #[tokio::test]
+    async fn layer1_truncates_when_content_exceeds_char_budget() {
+        // When accumulated drawer content exceeds CHARS_MAX the function must
+        // return early with a truncation notice rather than continuing the loop.
+        // CHARS_MAX is 3200; inserting many 300-char drawers will exceed it.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+
+        // Each drawer contributes ~300 chars. 15 drawers = ~4500 chars > CHARS_MAX.
+        // We insert up to DRAWERS_MAX (15) which layer1 slices to top_drawers.
+        let long_chunk: String = "Xylophone trumpet synthesizer percussion ".repeat(8);
+        assert!(
+            long_chunk.len() > 200,
+            "fixture chunk must exceed the 200-char per-drawer snippet limit"
+        );
+
+        for index in 0..15_usize {
+            drawer::add_drawer(
+                &connection,
+                &DrawerParams {
+                    id: &format!("d_overflow_{index}"),
+                    wing: "overflow_wing",
+                    room: "general",
+                    content: &long_chunk,
+                    source_file: &format!("file_{index}.md"),
+                    chunk_index: 0,
+                    added_by: "test",
+                    ingest_mode: "projects",
+                    source_mtime: None,
+                },
+            )
+            .await
+            .expect("add_drawer must succeed for CHARS_MAX overflow test fixture");
+        }
+
+        let result = layer1(&connection, None)
+            .await
+            .expect("layer1 must succeed even when content exceeds the char budget");
+
+        assert!(
+            result.contains("more in L3 search"),
+            "overflow must emit the truncation notice"
+        );
+        assert!(
+            result.contains("L1"),
+            "truncated output must still include the L1 header"
+        );
+    }
+
+    // ── layer3 neighbor context expansion (lines 373-436) ────────────────
+
+    #[tokio::test]
+    async fn layer3_appends_neighbor_context_for_multi_chunk_source() {
+        // When the top search hit belongs to a multi-chunk source, layer3 must
+        // call layer3_add_neighbor_context and append a "nearby context" block.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+
+        // Insert three consecutive chunks from the same source file.
+        // The middle chunk (index 1) is the likely top hit; neighbors 0 and 2
+        // should be fetched and appended as nearby context.
+        for index in 0..3_usize {
+            let content = if index == 1 {
+                // Make index 1 a unique strong match for the query.
+                "nebula astrophysics photometry spectroscopy".to_string()
+            } else {
+                format!("supporting context chunk number {index} of the astrophysics series")
+            };
+            drawer::add_drawer(
+                &connection,
+                &DrawerParams {
+                    id: &format!("neighbor_chunk_{index}"),
+                    wing: "science",
+                    room: "astronomy",
+                    content: &content,
+                    source_file: "astrophysics.md",
+                    chunk_index: index,
+                    added_by: "test",
+                    ingest_mode: "projects",
+                    source_mtime: None,
+                },
+            )
+            .await
+            .expect("add_drawer must succeed for neighbor context expansion test");
+        }
+
+        let result = layer3(&connection, "nebula astrophysics", None, None, 5)
+            .await
+            .expect("layer3 must succeed for multi-chunk source search");
+
+        assert!(
+            result.contains("L3"),
+            "layer3 output must contain the L3 header"
+        );
+        assert!(
+            result.contains("astrophysics"),
+            "layer3 output must include the matching content"
+        );
+        // The nearby context block is appended only when neighbors exist.
+        assert!(
+            result.contains("nearby context"),
+            "layer3 output must include the nearby context block for multi-chunk source"
+        );
+    }
+
+    // ── layer2_empty_label ────────────────────────────────────────────
+
+    #[test]
+    fn layer2_empty_label_all_arms() {
+        // Verify all four match arms of layer2_empty_label produce the expected text.
+        let both = layer2_empty_label(Some("mywing"), Some("myroom"));
+        assert!(
+            both.contains("mywing"),
+            "both-filter label must include wing"
+        );
+        assert!(
+            both.contains("myroom"),
+            "both-filter label must include room"
+        );
+
+        let wing_only = layer2_empty_label(Some("mywing"), None);
+        assert!(
+            wing_only.contains("mywing"),
+            "wing-only label must include wing"
+        );
+        assert!(
+            !wing_only.contains("room"),
+            "wing-only label must not mention room"
+        );
+
+        let room_only = layer2_empty_label(None, Some("myroom"));
+        assert!(
+            room_only.contains("myroom"),
+            "room-only label must include room"
+        );
+        assert!(
+            !room_only.contains("wing"),
+            "room-only label must not mention wing"
+        );
+
+        let none_label = layer2_empty_label(None, None);
+        assert!(
+            none_label.is_empty(),
+            "no-filter label must be empty string"
+        );
+    }
+
+    // ── layer2 with room filter ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn layer2_with_room_filter_returns_matching_drawers() {
+        // layer2 with room=Some must surface drawers from that room only.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        drawer::add_drawer(
+            &connection,
+            &DrawerParams {
+                id: "d_l2_room_1",
+                wing: "research",
+                room: "notes",
+                content: "Room-filtered drawer about biochemistry research notes",
+                source_file: "bio.md",
+                chunk_index: 0,
+                added_by: "test",
+                ingest_mode: "projects",
+                source_mtime: None,
+            },
+        )
+        .await
+        .expect("add_drawer must succeed for room-filter test");
+
+        let result = layer2(&connection, None, Some("notes"), 10)
+            .await
+            .expect("layer2 must succeed with room filter");
+
+        assert!(result.contains("L2"), "output must contain L2 header");
+        assert!(
+            result.contains("biochemistry"),
+            "output must contain the seeded drawer content"
+        );
+
+        // Pair assertion: a different room returns nothing.
+        let empty = layer2(&connection, None, Some("nonexistent_room"), 10)
+            .await
+            .expect("layer2 must succeed for non-matching room");
+        assert!(
+            empty.contains("No drawers found"),
+            "non-matching room must return empty result"
+        );
+    }
+
+    #[tokio::test]
+    async fn layer2_with_wing_and_room_filter_returns_matching_drawers() {
+        // Both wing and room filters applied together must narrow results correctly.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        drawer::add_drawer(
+            &connection,
+            &DrawerParams {
+                id: "d_l2_both_1",
+                wing: "science",
+                room: "physics",
+                content: "Quantum entanglement and superposition principles in modern physics",
+                source_file: "phys.md",
+                chunk_index: 0,
+                added_by: "test",
+                ingest_mode: "projects",
+                source_mtime: None,
+            },
+        )
+        .await
+        .expect("add_drawer must succeed for wing+room filter test");
+
+        let result = layer2(&connection, Some("science"), Some("physics"), 10)
+            .await
+            .expect("layer2 must succeed with wing+room filter");
+
+        assert!(result.contains("L2"), "output must contain L2 header");
+        assert!(
+            result.contains("superposition"),
+            "output must contain the seeded drawer content"
+        );
+
+        // Pair assertion: correct wing but wrong room returns nothing.
+        let empty = layer2(&connection, Some("science"), Some("chemistry"), 10)
+            .await
+            .expect("layer2 must succeed for non-matching room");
+        assert!(
+            empty.contains("No drawers found"),
+            "wrong room must return empty result even with correct wing"
+        );
+    }
+
+    // ── layer2_empty_label in context — wing+room empty ──────────────
+
+    #[tokio::test]
+    async fn layer2_empty_message_includes_filter_context() {
+        // The empty message must include wing and room when both are specified.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+
+        let result = layer2(&connection, Some("alpha"), Some("beta"), 10)
+            .await
+            .expect("layer2 must succeed on empty DB");
+
+        assert!(
+            result.contains("No drawers found"),
+            "empty result must say no drawers found"
+        );
+        assert!(
+            result.contains("alpha"),
+            "empty result label must include the wing name"
+        );
+        assert!(
+            result.contains("beta"),
+            "empty result label must include the room name"
+        );
+    }
+
+    // ── layer1 snippet truncation ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn layer1_long_content_is_truncated_with_ellipsis() {
+        // Content longer than 200 chars must be truncated and suffixed with '...'.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+
+        // Build content longer than the 200-char snippet limit.
+        let long_content = "The quick brown fox jumps over the lazy dog. "
+            .repeat(6)
+            .trim()
+            .to_string();
+        assert!(
+            long_content.len() > 200,
+            "fixture must exceed the 200-char snippet limit"
+        );
+
+        drawer::add_drawer(
+            &connection,
+            &DrawerParams {
+                id: "d_long_snip",
+                wing: "research",
+                room: "notes",
+                content: &long_content,
+                source_file: "long.md",
+                chunk_index: 0,
+                added_by: "test",
+                ingest_mode: "projects",
+                source_mtime: None,
+            },
+        )
+        .await
+        .expect("add_drawer must succeed for snippet truncation test");
+
+        let result = layer1(&connection, None)
+            .await
+            .expect("layer1 must succeed with long drawer content");
+
+        assert!(
+            result.contains("ESSENTIAL STORY"),
+            "layer1 output must contain the essential story header"
+        );
+        assert!(
+            result.contains("..."),
+            "truncated snippet must end with ellipsis"
+        );
+    }
+
+    // ── wake_up without wing filter ───────────────────────────────────
+
+    #[tokio::test]
+    async fn wake_up_without_wing_filter_includes_all_wings() {
+        // wake_up with wing=None must include drawers from all wings.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+
+        drawer::add_drawer(
+            &connection,
+            &DrawerParams {
+                id: "d_wake_global",
+                wing: "general",
+                room: "inbox",
+                content: "Global wake_up context about distributed systems design",
+                source_file: "dist.md",
+                chunk_index: 0,
+                added_by: "test",
+                ingest_mode: "projects",
+                source_mtime: None,
+            },
+        )
+        .await
+        .expect("add_drawer must succeed for global wake_up test");
+
+        let result = wake_up(&connection, None)
+            .await
+            .expect("wake_up must succeed without wing filter");
+
+        assert!(result.contains("L0"), "result must include L0 section");
+        assert!(result.contains("L1"), "result must include L1 section");
+        assert!(
+            result.contains("distributed systems"),
+            "result must include drawer content from global call"
+        );
+    }
+
+    // ── layer2_format_row long content truncation ─────────────────────
+
+    #[tokio::test]
+    async fn layer2_long_drawer_content_is_truncated() {
+        // Drawer content longer than SNIPPET_LEN_MAX must be truncated with '...'.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+
+        // Build content longer than the 300-char L2 snippet limit.
+        let long_content = "Abcdefghijklmnopqrstuvwxyz ".repeat(15).trim().to_string();
+        assert!(
+            long_content.len() > SNIPPET_LEN_MAX,
+            "fixture must exceed SNIPPET_LEN_MAX"
+        );
+
+        drawer::add_drawer(
+            &connection,
+            &DrawerParams {
+                id: "d_l2_long",
+                wing: "data",
+                room: "archive",
+                content: &long_content,
+                source_file: "archive.md",
+                chunk_index: 0,
+                added_by: "test",
+                ingest_mode: "projects",
+                source_mtime: None,
+            },
+        )
+        .await
+        .expect("add_drawer must succeed for L2 truncation test");
+
+        let result = layer2(&connection, None, None, 10)
+            .await
+            .expect("layer2 must succeed with long drawer content");
+
+        assert!(result.contains("L2"), "output must contain L2 header");
+        assert!(
+            result.contains("..."),
+            "long drawer content must be truncated with ellipsis in L2"
         );
     }
 }

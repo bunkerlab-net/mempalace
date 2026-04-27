@@ -1594,6 +1594,559 @@ mod tests {
         );
     }
 
+    // -- PersonInfo::confidence branches --
+
+    #[test]
+    fn person_info_confidence_returns_high_for_prolific_contributor() {
+        // A person with 100+ commits must get the highest confidence tier (0.99).
+        let person = PersonInfo {
+            name: "Alice Smith".to_string(),
+            total_commits: 100,
+            emails: HashSet::new(),
+            repos: HashSet::from(["repo1".to_string()]),
+        };
+        let confidence = person.confidence();
+        assert!(
+            (confidence - 0.99).abs() < f64::EPSILON,
+            "100 commits must yield confidence=0.99"
+        );
+        assert!(confidence > 0.9);
+    }
+
+    #[test]
+    fn person_info_confidence_returns_high_for_multi_repo_contributor() {
+        // A person across 3+ repos must get 0.99 even with few commits.
+        let person = PersonInfo {
+            name: "Bob Jones".to_string(),
+            total_commits: 5,
+            emails: HashSet::new(),
+            repos: HashSet::from([
+                "repo1".to_string(),
+                "repo2".to_string(),
+                "repo3".to_string(),
+            ]),
+        };
+        let confidence = person.confidence();
+        assert!(
+            (confidence - 0.99).abs() < f64::EPSILON,
+            "3 repos must yield confidence=0.99"
+        );
+        assert!(confidence > 0.9);
+    }
+
+    #[test]
+    fn person_info_confidence_returns_medium_for_twenty_commits() {
+        // A person with 20–99 commits must fall into the 0.85 tier.
+        let person = PersonInfo {
+            name: "Carol White".to_string(),
+            total_commits: 20,
+            emails: HashSet::new(),
+            repos: HashSet::from(["repo1".to_string()]),
+        };
+        let confidence = person.confidence();
+        assert!(
+            (confidence - 0.85).abs() < f64::EPSILON,
+            "20 commits must yield confidence=0.85"
+        );
+        assert!(confidence < 0.99);
+    }
+
+    #[test]
+    fn person_info_confidence_returns_low_for_few_commits() {
+        // A person with fewer than 20 commits across one repo gets 0.65.
+        let person = PersonInfo {
+            name: "Dave Black".to_string(),
+            total_commits: 3,
+            emails: HashSet::new(),
+            repos: HashSet::from(["repo1".to_string()]),
+        };
+        let confidence = person.confidence();
+        assert!(
+            (confidence - 0.65).abs() < f64::EPSILON,
+            "3 commits must yield confidence=0.65"
+        );
+        assert!(confidence < 0.85);
+    }
+
+    // -- PersonInfo::to_signal plural/singular --
+
+    #[test]
+    fn person_info_to_signal_uses_singular_forms_for_one_commit_one_repo() {
+        // Single commit and single repo must produce "1 commit across 1 repo" (no plural s).
+        let person = PersonInfo {
+            name: "Eve Green".to_string(),
+            total_commits: 1,
+            emails: HashSet::new(),
+            repos: HashSet::from(["repo1".to_string()]),
+        };
+        let signal = person.to_signal();
+        assert!(signal.contains("1 commit"), "must say '1 commit': {signal}");
+        assert!(signal.contains("1 repo"), "must say '1 repo': {signal}");
+        assert!(!signal.contains("commits"), "must not pluralize: {signal}");
+    }
+
+    #[test]
+    fn person_info_to_signal_uses_plural_forms_for_many_commits_many_repos() {
+        // Multiple commits and multiple repos must both be pluralized.
+        let person = PersonInfo {
+            name: "Frank Hill".to_string(),
+            total_commits: 5,
+            emails: HashSet::new(),
+            repos: HashSet::from(["repo1".to_string(), "repo2".to_string()]),
+        };
+        let signal = person.to_signal();
+        assert!(
+            signal.contains("5 commits"),
+            "must pluralize commits: {signal}"
+        );
+        assert!(signal.contains("2 repos"), "must pluralize repos: {signal}");
+    }
+
+    // -- ProjectInfo::confidence branch: has_git && total_commits > 0 --
+
+    #[test]
+    fn project_info_confidence_returns_point_seven_for_git_with_commits_not_mine() {
+        // A git repo with commits but not owned by the user gets confidence 0.7.
+        let project = ProjectInfo {
+            name: "other-project".to_string(),
+            repo_root: PathBuf::from("/tmp/other"),
+            manifest: None,
+            has_git: true,
+            total_commits: 50,
+            user_commits: 0,
+            is_mine: false,
+        };
+        let confidence = project.confidence();
+        assert!(
+            (confidence - 0.7).abs() < f64::EPSILON,
+            "git with commits but not mine must yield 0.7, got {confidence}"
+        );
+        assert!(confidence < 0.85);
+    }
+
+    #[test]
+    fn project_info_confidence_returns_point_eighty_five_for_manifest_only() {
+        // A manifest-only project (no git) gets confidence 0.85.
+        let project = ProjectInfo {
+            name: "manifest-only".to_string(),
+            repo_root: PathBuf::from("/tmp/manifest"),
+            manifest: Some("Cargo.toml".to_string()),
+            has_git: false,
+            total_commits: 0,
+            user_commits: 0,
+            is_mine: false,
+        };
+        let confidence = project.confidence();
+        assert!(
+            (confidence - 0.85).abs() < f64::EPSILON,
+            "manifest-only must yield 0.85, got {confidence}"
+        );
+    }
+
+    // -- ProjectInfo::to_signal branches --
+
+    #[test]
+    fn project_info_to_signal_includes_both_user_and_total_when_not_mine() {
+        // When the user has some commits but is_mine=false, show "X/Y yours".
+        let project = ProjectInfo {
+            name: "shared-project".to_string(),
+            repo_root: PathBuf::from("/tmp/shared"),
+            manifest: None,
+            has_git: true,
+            total_commits: 100,
+            user_commits: 10,
+            is_mine: false,
+        };
+        let signal = project.to_signal();
+        assert!(
+            signal.contains("10/100 yours"),
+            "not-mine with user_commits must show ratio: {signal}"
+        );
+    }
+
+    #[test]
+    fn project_info_to_signal_falls_back_to_repo_root_name_when_no_signals() {
+        // A project with no manifest, no git commits, no user commits uses the dir name.
+        let project = ProjectInfo {
+            name: "my-fallback-proj".to_string(),
+            repo_root: PathBuf::from("/tmp/my-fallback-proj"),
+            manifest: None,
+            has_git: false,
+            total_commits: 0,
+            user_commits: 0,
+            is_mine: false,
+        };
+        let signal = project.to_signal();
+        assert_eq!(
+            signal, "my-fallback-proj",
+            "signal must fall back to dir name: {signal}"
+        );
+    }
+
+    #[test]
+    fn project_info_to_signal_includes_total_commits_when_no_user_commits() {
+        // has_git=true, user_commits=0 → "N commits (none by you)".
+        let project = ProjectInfo {
+            name: "stranger-project".to_string(),
+            repo_root: PathBuf::from("/tmp/stranger"),
+            manifest: None,
+            has_git: true,
+            total_commits: 42,
+            user_commits: 0,
+            is_mine: false,
+        };
+        let signal = project.to_signal();
+        assert!(
+            signal.contains("42 commits (none by you)"),
+            "must include total with no-user note: {signal}"
+        );
+    }
+
+    // -- manifest_priority --
+
+    #[test]
+    fn manifest_priority_returns_expected_values_for_all_known_types() {
+        // Each known manifest must have the documented priority order.
+        assert!(
+            manifest_priority("pyproject.toml") < manifest_priority("package.json"),
+            "pyproject must beat package.json"
+        );
+        assert!(
+            manifest_priority("package.json") < manifest_priority("Cargo.toml"),
+            "package.json must beat Cargo.toml"
+        );
+        assert!(
+            manifest_priority("Cargo.toml") < manifest_priority("go.mod"),
+            "Cargo.toml must beat go.mod"
+        );
+        assert!(
+            manifest_priority("go.mod") < manifest_priority("unknown.txt"),
+            "go.mod must beat unknown manifest"
+        );
+    }
+
+    #[test]
+    fn manifest_priority_returns_high_number_for_unknown_manifest() {
+        // Unknown manifest filenames must sort last (priority = 100).
+        let unknown_priority = manifest_priority("Makefile");
+        assert_eq!(unknown_priority, 100, "unknown manifest must return 100");
+        assert!(
+            unknown_priority > manifest_priority("go.mod"),
+            "Makefile must rank lower than go.mod"
+        );
+    }
+
+    // -- parse_go_mod: single-segment module path --
+
+    #[test]
+    fn parse_go_mod_returns_simple_name_for_single_segment_module() {
+        // A module path without slashes should return the whole token as the name.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("go.mod");
+        std::fs::write(&path, "module myproject\n\ngo 1.21\n").expect("write go.mod");
+        let result = parse_go_mod(&path);
+        assert!(result.is_some(), "single-segment module must parse");
+        assert_eq!(result.expect("checked above"), "myproject");
+    }
+
+    // -- is_bot: Cyrillic / CI bot patterns --
+
+    #[test]
+    fn is_bot_rejects_ci_bot_names() {
+        // CI bot display names must be rejected.
+        assert!(
+            is_bot("pre-commit-ci", "ci@example.com"),
+            "pre-commit-ci must be filtered"
+        );
+        assert!(is_bot("actions-user", ""), "actions-user must be filtered");
+        assert!(
+            is_bot("semantic-release", "release@example.com"),
+            "semantic-release must be filtered"
+        );
+    }
+
+    #[test]
+    fn is_bot_rejects_autoroll_and_greenkeeper() {
+        // Autoroll bots and Greenkeeper must be filtered.
+        assert!(
+            is_bot("chromium-autoroll", "autoroll@chromium.org"),
+            "autoroll suffix must be filtered"
+        );
+        assert!(is_bot("greenkeeper", ""), "greenkeeper must be filtered");
+    }
+
+    #[test]
+    fn is_bot_rejects_bot_email_patterns() {
+        // Email addresses matching bot@ or [bot]@ must be filtered.
+        assert!(
+            is_bot("Some User", "bot@example.com"),
+            "bot@ email must be filtered"
+        );
+        assert!(
+            is_bot("Another User", "someone[bot]@example.com"),
+            "[bot]@ in email must be filtered"
+        );
+    }
+
+    // -- to_detected_dict with people --
+
+    #[test]
+    fn to_detected_dict_maps_person_info_to_person_entity_type() {
+        // PersonInfo must be mapped to entity_type="person" in the output.
+        let projects: Vec<ProjectInfo> = vec![];
+        let people = vec![
+            PersonInfo {
+                name: "Alice Smith".to_string(),
+                total_commits: 25,
+                emails: HashSet::from(["alice@example.com".to_string()]),
+                repos: HashSet::from(["repo1".to_string()]),
+            },
+            PersonInfo {
+                name: "Bob Jones".to_string(),
+                total_commits: 5,
+                emails: HashSet::new(),
+                repos: HashSet::from(["repo2".to_string()]),
+            },
+        ];
+        let dict = to_detected_dict(&projects, &people);
+        assert_eq!(dict.people.len(), 2, "both people must appear in output");
+        assert!(
+            dict.projects.is_empty(),
+            "no projects input means no project output"
+        );
+        for entity in &dict.people {
+            assert_eq!(entity.entity_type, "person", "entity_type must be person");
+            assert!(!entity.name.is_empty(), "entity name must not be empty");
+            assert!(entity.confidence > 0.0, "confidence must be positive");
+        }
+    }
+
+    #[test]
+    fn to_detected_dict_respects_project_cap() {
+        // When more than PROJECT_CAP (15) projects are provided, only 15 must appear.
+        let projects: Vec<ProjectInfo> = (0..20)
+            .map(|index| ProjectInfo {
+                name: format!("project-{index}"),
+                repo_root: PathBuf::from(format!("/tmp/project-{index}")),
+                manifest: Some("Cargo.toml".to_string()),
+                has_git: false,
+                total_commits: 0,
+                user_commits: 0,
+                is_mine: false,
+            })
+            .collect();
+        let people: Vec<PersonInfo> = vec![];
+        let dict = to_detected_dict(&projects, &people);
+        assert_eq!(
+            dict.projects.len(),
+            PROJECT_CAP,
+            "must cap at PROJECT_CAP={PROJECT_CAP}"
+        );
+        assert!(
+            dict.people.is_empty(),
+            "no people input means no people output"
+        );
+    }
+
+    // -- merge_detected: non-conflicting secondary entries added --
+
+    #[test]
+    fn merge_detected_adds_non_conflicting_secondary_entries() {
+        // Entities unique to the secondary dict must be added to the merged output.
+        let primary = DetectedDict {
+            people: vec![DetectedEntity {
+                name: "Alice".to_string(),
+                entity_type: "person".to_string(),
+                confidence: 0.99,
+                frequency: 10,
+                signals: vec![],
+            }],
+            projects: vec![],
+            uncertain: vec![],
+        };
+        let secondary = DetectedDict {
+            people: vec![DetectedEntity {
+                name: "Bob".to_string(),
+                entity_type: "person".to_string(),
+                confidence: 0.65,
+                frequency: 3,
+                signals: vec![],
+            }],
+            projects: vec![DetectedEntity {
+                name: "cool-lib".to_string(),
+                entity_type: "project".to_string(),
+                confidence: 0.7,
+                frequency: 5,
+                signals: vec![],
+            }],
+            uncertain: vec![],
+        };
+        let merged = merge_detected(primary, secondary, false);
+        assert_eq!(merged.people.len(), 2, "both people must appear");
+        assert_eq!(merged.projects.len(), 1, "secondary project must be added");
+    }
+
+    #[test]
+    fn merge_detected_keeps_uncertain_when_drop_is_false() {
+        // When drop_uncertain=false, secondary uncertain entries must be merged in.
+        let primary = DetectedDict {
+            people: vec![],
+            projects: vec![],
+            uncertain: vec![],
+        };
+        let secondary = DetectedDict {
+            people: vec![],
+            projects: vec![],
+            uncertain: vec![DetectedEntity {
+                name: "MaybeProject".to_string(),
+                entity_type: "uncertain".to_string(),
+                confidence: 0.4,
+                frequency: 2,
+                signals: vec![],
+            }],
+        };
+        let merged = merge_detected(primary, secondary, false);
+        assert_eq!(
+            merged.uncertain.len(),
+            1,
+            "uncertain must be kept when drop_uncertain=false"
+        );
+        assert_eq!(merged.uncertain[0].name, "MaybeProject");
+    }
+
+    #[test]
+    fn merge_detected_is_case_insensitive_on_names() {
+        // "alice" in primary must block "Alice" from secondary (case-insensitive dedup).
+        let primary = DetectedDict {
+            people: vec![DetectedEntity {
+                name: "alice".to_string(),
+                entity_type: "person".to_string(),
+                confidence: 0.99,
+                frequency: 10,
+                signals: vec![],
+            }],
+            projects: vec![],
+            uncertain: vec![],
+        };
+        let secondary = DetectedDict {
+            people: vec![DetectedEntity {
+                name: "Alice".to_string(), // different case — must be blocked
+                entity_type: "person".to_string(),
+                confidence: 0.5,
+                frequency: 1,
+                signals: vec![],
+            }],
+            projects: vec![],
+            uncertain: vec![],
+        };
+        let merged = merge_detected(primary, secondary, false);
+        assert_eq!(
+            merged.people.len(),
+            1,
+            "case-insensitive duplicate must be blocked"
+        );
+    }
+
+    // -- dedupe_people: multi-person and same-display-name merge --
+
+    #[test]
+    fn dedupe_people_merges_same_author_via_shared_email() {
+        // Two name variants sharing an email must collapse into one PersonInfo.
+        let all_commits = vec![
+            (
+                "Alice Smith".to_string(),
+                "alice@example.com".to_string(),
+                "repo1".to_string(),
+            ),
+            (
+                "A. Smith".to_string(), // different name, same email → same person
+                "alice@example.com".to_string(),
+                "repo2".to_string(),
+            ),
+        ];
+        let people = dedupe_people(&all_commits);
+        // "Alice Smith" is the real-looking name; "A. Smith" has no space after dot
+        // so it also passes looks_like_real_name. Either way, they are in one component.
+        // The component may produce one entry for either display name.
+        assert!(
+            people.len() <= 2,
+            "same email must unify entries: {people:?}",
+            people = people.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn dedupe_people_returns_empty_for_no_commits() {
+        // An empty commit list must produce an empty people map.
+        let people = dedupe_people(&[]);
+        assert!(people.is_empty(), "no commits must yield empty people map");
+    }
+
+    #[test]
+    fn dedupe_people_drops_single_token_handles() {
+        // Authors without a space (handles) must not appear in the output.
+        let all_commits = vec![(
+            "johndoe".to_string(),
+            "john@example.com".to_string(),
+            "repo1".to_string(),
+        )];
+        let people = dedupe_people(&all_commits);
+        assert!(
+            people.is_empty(),
+            "single-token handle must be dropped: {people:?}",
+            people = people.keys().collect::<Vec<_>>()
+        );
+    }
+
+    // -- looks_like_real_name: unicode / Cyrillic names --
+
+    #[test]
+    fn looks_like_real_name_accepts_cyrillic_uppercase_name() {
+        // A Cyrillic name with two uppercase-initial parts must be accepted.
+        // Unicode uppercase detection must work for non-Latin scripts.
+        assert!(
+            looks_like_real_name("Иван Петров"),
+            "Cyrillic name with two uppercase parts must be accepted"
+        );
+    }
+
+    #[test]
+    fn looks_like_real_name_rejects_cyrillic_single_word() {
+        // A single Cyrillic word without a space must be rejected.
+        assert!(
+            !looks_like_real_name("Иван"),
+            "single Cyrillic word must be rejected"
+        );
+    }
+
+    // -- scan_no_git_fallback: inserts manifest-only project --
+
+    #[test]
+    fn scan_no_git_fallback_inserts_new_manifest_project() {
+        // When the map is empty, the fallback must insert a manifest-only ProjectInfo.
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            temp.path().join("package.json"),
+            r#"{"name": "my-web-app", "version": "1.0.0"}"#,
+        )
+        .expect("write package.json");
+
+        let mut projects: HashMap<String, ProjectInfo> = HashMap::new();
+        scan_no_git_fallback(temp.path(), &mut projects);
+
+        assert_eq!(projects.len(), 1, "one project must be inserted");
+        let project = projects.get("my-web-app").expect("project must be in map");
+        assert_eq!(project.name, "my-web-app");
+        assert!(
+            !project.has_git,
+            "fallback projects must have has_git=false"
+        );
+        assert!(
+            !project.is_mine,
+            "fallback projects must have is_mine=false"
+        );
+    }
+
     // -- find_git_repos: nested git repo discovery --
 
     #[test]

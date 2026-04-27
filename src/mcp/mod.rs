@@ -921,4 +921,186 @@ mod tests {
             .expect("text field must be a string");
         assert!(!text.is_empty(), "error text must not be empty");
     }
+
+    // -- handle_request_tools_call_respond: public vs private error sanitization --
+
+    #[test]
+    fn tools_call_respond_public_error_is_exposed() {
+        // When the tool result carries `"public": true` the full error must be
+        // forwarded to the client (e.g. "Unknown tool: foo").
+        let result = json!({"error": "Unknown tool: foo", "public": true});
+        let req_id = json!(42);
+        let response = handle_request_tools_call_respond("foo", result, &req_id);
+
+        let text = response["result"]["content"][0]["text"]
+            .as_str()
+            .expect("text must be a string");
+        assert!(
+            text.contains("Unknown tool"),
+            "public error text must contain the original error"
+        );
+        // The response must be a proper JSON-RPC result, not a top-level error.
+        assert!(
+            response.get("error").is_none(),
+            "public tool error must not produce a top-level JSON-RPC error"
+        );
+        assert_eq!(response["id"], 42);
+    }
+
+    #[test]
+    fn tools_call_respond_private_error_is_masked() {
+        // When the tool result does NOT carry `"public": true` the error must be
+        // replaced with a generic "Internal tool error" message so internals are
+        // never exposed over the protocol.
+        let result = json!({"error": "database path /secret/db leaked", "public": false});
+        let req_id = json!(99);
+        let response = handle_request_tools_call_respond("some_tool", result, &req_id);
+
+        let text = response["result"]["content"][0]["text"]
+            .as_str()
+            .expect("text must be a string");
+        assert!(
+            text.contains("Internal tool error"),
+            "private error must be replaced with 'Internal tool error'"
+        );
+        assert!(
+            !text.contains("secret"),
+            "internal path must not be leaked in the response"
+        );
+        assert_eq!(response["id"], 99);
+    }
+
+    #[test]
+    fn tools_call_respond_no_error_field_passes_through() {
+        // When the tool result has no "error" key the full result must be forwarded.
+        let result = json!({"total_drawers": 7, "wings": {}});
+        let req_id = json!(5);
+        let response = handle_request_tools_call_respond("mempalace_status", result, &req_id);
+
+        let text = response["result"]["content"][0]["text"]
+            .as_str()
+            .expect("text must be a string");
+        assert!(
+            text.contains("total_drawers"),
+            "successful result must contain the tool output"
+        );
+        assert_eq!(response["id"], 5);
+    }
+
+    // -- handle_request_tools_call_validate edge cases --
+
+    #[test]
+    fn tools_call_validate_null_name_returns_error() {
+        // A null "name" field must return Invalid Params (-32602).
+        let params = json!({"name": null, "arguments": {}});
+        let req_id = json!(11);
+        let result = handle_request_tools_call_validate(&params, &req_id);
+        assert!(result.is_err(), "null name must return Err");
+        let error_response = result.expect_err("null name must be invalid");
+        assert_eq!(
+            error_response["error"]["code"], -32602,
+            "null name must produce -32602"
+        );
+    }
+
+    #[test]
+    fn tools_call_validate_absent_arguments_defaults_to_empty_object() {
+        // When "arguments" is absent from params it must default to an empty JSON object.
+        let params = json!({"name": "mempalace_status"});
+        let req_id = json!(12);
+        let result = handle_request_tools_call_validate(&params, &req_id);
+        assert!(result.is_ok(), "absent arguments must be Ok");
+        let (name, args) = result.expect("absent arguments must produce Ok");
+        assert_eq!(name, "mempalace_status");
+        assert_eq!(
+            args,
+            json!({}),
+            "absent arguments must default to empty object"
+        );
+    }
+
+    // -- run_read_line: edge cases --
+
+    #[tokio::test]
+    async fn read_line_empty_line_before_valid_line() {
+        // An empty line (lone newline) must return LineRead::Line("") — the server
+        // loop then skips it via the `trimmed.is_empty()` check, but the reader
+        // itself must return Line, not Eof.
+        let cursor = Cursor::new(b"\nhello\n".to_vec());
+        let mut reader = BufReader::new(cursor);
+        let mut buffer = Vec::new();
+        let result = run_read_line_impl(&mut reader, &mut buffer, 1024)
+            .await
+            .expect("read should succeed");
+        let LineRead::Line(line) = result else {
+            panic!("expected LineRead::Line for empty line, got Eof or Overflow");
+        };
+        assert_eq!(line, "", "lone newline must produce empty string");
+        // Pair: next read must return the following line.
+        buffer.clear();
+        let next = run_read_line_impl(&mut reader, &mut buffer, 1024)
+            .await
+            .expect("second read must succeed");
+        let LineRead::Line(next_line) = next else {
+            panic!("expected LineRead::Line for 'hello'");
+        };
+        assert_eq!(next_line, "hello");
+    }
+
+    #[tokio::test]
+    async fn read_line_eof_with_partial_invalid_utf8_no_newline() {
+        // A stream that ends mid-line with invalid UTF-8 and no trailing newline
+        // must return Invalid, not Eof or a silently repaired string.
+        let raw: Vec<u8> = vec![b'o', b'k', 0xFF, 0xFE]; // no newline
+        // Pair assertion: raw bytes are definitely not valid UTF-8.
+        assert!(String::from_utf8(raw.clone()).is_err());
+        let cursor = Cursor::new(raw);
+        let mut reader = BufReader::new(cursor);
+        let mut buffer = Vec::new();
+        let result = run_read_line_impl(&mut reader, &mut buffer, 1024)
+            .await
+            .expect("read should succeed");
+        assert!(
+            matches!(result, LineRead::Invalid),
+            "EOF partial line with invalid UTF-8 must return Invalid"
+        );
+    }
+
+    // -- run_parse_request: additional edge cases --
+
+    #[test]
+    fn run_parse_request_json_array_returns_ok() {
+        // A JSON array is valid JSON and must parse as Ok, even though it
+        // will later be rejected by handle_request's is_object() check.
+        let result = run_parse_request("[1,2,3]");
+        assert!(
+            result.is_ok(),
+            "JSON array must parse as Ok (validation happens later)"
+        );
+        let value = result.expect("array must parse");
+        assert!(value.is_array(), "parsed value must be a JSON array");
+    }
+
+    // -- handle_request_initialize: non-string protocolVersion falls back --
+
+    #[tokio::test]
+    async fn handle_request_initialize_numeric_version_falls_back() {
+        // A numeric protocolVersion (which fails as_str()) must fall back to the
+        // latest supported version rather than panicking.
+        let (_database, connection) = crate::test_helpers::test_db().await;
+        let request = json!({
+            "method": "initialize",
+            "params": {"protocolVersion": 20_241_105},
+            "id": 1
+        });
+        let response = handle_request(&connection, &request)
+            .await
+            .expect("should return Some");
+        let result = &response["result"];
+        assert_eq!(
+            result["protocolVersion"], SUPPORTED_PROTOCOL_VERSIONS[0],
+            "numeric protocolVersion must fall back to latest supported version"
+        );
+        assert_eq!(result["serverInfo"]["name"], "mempalace");
+    }
 }

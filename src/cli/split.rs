@@ -1103,4 +1103,182 @@ mod tests {
             "nested.txt in subdirectory must be excluded"
         );
     }
+
+    // --- split_file: chunk shorter than 10 lines is skipped ---
+
+    /// Build a mega-file where one session chunk has fewer than 10 lines.
+    ///
+    /// Session 1 has only 3 body lines (below the 10-line minimum) and session 2
+    /// has the full 12-line body, so `split_file` skips the short chunk.
+    fn make_mega_file_with_short_session() -> String {
+        // Session 1: header + 3 body lines — below the 10-line minimum.
+        let mut lines = vec![
+            "╭──── Claude Code v1.0.0".to_string(),
+            "short line 1".to_string(),
+            "short line 2".to_string(),
+            "short line 3".to_string(),
+            // Session 2: header + 12 body lines — above the 10-line minimum.
+            "╭──── Claude Code v1.1.0".to_string(),
+        ];
+        for j in 0..12 {
+            lines.push(format!("Content line {j} for session 2 is here."));
+        }
+        lines.push("> User prompt for session 2 to create subject.".to_string());
+        lines.push("Assistant answer for session 2 is here now.".to_string());
+        lines.join("\n")
+    }
+
+    #[test]
+    fn split_file_skips_chunks_shorter_than_10_lines() {
+        // When a session chunk has fewer than 10 lines, split_file skips it.
+        // This covers the `if chunk.len() < 10 { continue; }` branch at line 364.
+        let temp_directory =
+            tempfile::tempdir().expect("failed to create temp dir for short-chunk test");
+        let mega_file_path = temp_directory.path().join("mega.txt");
+        fs::write(&mega_file_path, make_mega_file_with_short_session())
+            .expect("failed to write mega file with short session");
+        let output_directory =
+            tempfile::tempdir().expect("failed to create output dir for short-chunk test");
+
+        let written = split_file(&mega_file_path, output_directory.path(), false)
+            .expect("split_file must succeed for a file with a short session");
+
+        // Only the long-enough session must be written; the short one is skipped.
+        assert_eq!(
+            written, 1,
+            "only the session with >= 10 lines must be written"
+        );
+        // Pair assertion: backup must still exist (split did produce output).
+        assert!(
+            mega_file_path.with_extension("mega_backup").exists(),
+            "backup must exist when at least one session was written"
+        );
+    }
+
+    // --- run_process_file: output_dir=None fallback to file parent ---
+
+    #[test]
+    fn run_with_no_output_dir_uses_file_parent_directory() {
+        // When output_dir is None, run_process_file falls back to the file's parent
+        // directory. This covers lines 444-453.
+        let temp_directory =
+            tempfile::tempdir().expect("failed to create temp dir for no-output-dir test");
+        let mega_file_path = temp_directory.path().join("mega.txt");
+        fs::write(&mega_file_path, make_mega_file(3))
+            .expect("failed to write three-session mega file");
+
+        // Pass output_dir=None so run_process_file uses the file's parent directory.
+        run(
+            temp_directory.path(),
+            None, // no explicit output directory — falls back to temp_directory
+            true, // dry_run=true so nothing is actually written
+            2,
+            false,
+        )
+        .expect("run with output_dir=None must succeed in dry-run mode");
+
+        // In dry-run mode the original must not be renamed.
+        assert!(
+            mega_file_path.exists(),
+            "dry run must not rename the original mega file"
+        );
+    }
+
+    #[test]
+    fn run_with_no_output_dir_writes_to_file_parent_in_non_dry_run() {
+        // Non-dry-run with output_dir=None: session files must land in the same
+        // directory as the mega file and the original must be renamed.
+        let temp_directory =
+            tempfile::tempdir().expect("failed to create temp dir for no-output-dir write test");
+        let mega_file_path = temp_directory.path().join("mega.txt");
+        fs::write(&mega_file_path, make_mega_file(2))
+            .expect("failed to write two-session mega file");
+
+        run(
+            temp_directory.path(),
+            None, // no explicit output directory
+            false,
+            2,
+            false,
+        )
+        .expect("run with output_dir=None must succeed in non-dry-run mode");
+
+        // Original must be renamed to .mega_backup.
+        assert!(
+            !mega_file_path.exists(),
+            "original must be renamed in non-dry-run mode"
+        );
+        assert!(
+            mega_file_path.with_extension("mega_backup").exists(),
+            "backup must exist after non-dry-run with no output_dir"
+        );
+    }
+
+    // --- split_file_write_session: dry_run path ---
+
+    #[test]
+    fn split_file_write_session_dry_run_prints_without_writing() {
+        // In dry-run mode, split_file_write_session must return a path without
+        // writing to disk. This covers the `if dry_run { println! }` branch.
+        let temp_directory =
+            tempfile::tempdir().expect("failed to create temp dir for write-session dry-run test");
+        let lines = vec![
+            "╭──── Claude Code v1.0.0",
+            "content line 1 here",
+            "content line 2 here",
+            "content line 3 here",
+            "content line 4 here",
+            "content line 5 here",
+            "content line 6 here",
+            "content line 7 here",
+            "content line 8 here",
+            "content line 9 here",
+            "> User prompt for this session.",
+            "Assistant response for the session.",
+        ];
+        let result = split_file_write_session(
+            temp_directory.path(),
+            "stem",
+            1,
+            &lines,
+            true, // dry_run
+            1,
+        )
+        .expect("split_file_write_session dry run must succeed");
+
+        // The returned path must point into the output directory.
+        assert_eq!(
+            result.parent().expect("returned path must have a parent"),
+            temp_directory.path(),
+            "returned path parent must be the output directory"
+        );
+        // Dry-run must not write any file to disk.
+        assert!(
+            !result.exists(),
+            "dry-run must not write the session file to disk"
+        );
+    }
+
+    // --- extract_timestamp: unknown month falls back to "00" ---
+
+    #[test]
+    fn extract_timestamp_unknown_month_uses_fallback() {
+        // An unrecognised month name must produce "00" as the month component.
+        // This exercises the `.map_or("00", ...)` path in extract_timestamp.
+        let lines = &["⏺ 10:00 AM Sunday, Octember 5, 2025"];
+        let result = extract_timestamp(lines);
+        assert!(
+            result.is_some(),
+            "timestamp line with unknown month must still parse"
+        );
+        let timestamp = result.expect("timestamp must be Some");
+        assert!(
+            timestamp.contains("00"),
+            "unknown month must produce '00' as month component: {timestamp}"
+        );
+        assert!(
+            timestamp.contains("2025"),
+            "year must be preserved even with unknown month: {timestamp}"
+        );
+    }
 }

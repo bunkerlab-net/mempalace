@@ -977,6 +977,113 @@ mod tests {
         assert!(!dir.path().join(".git").exists(), ".git must be absent");
     }
 
+    // --- run_derive_wing_name: empty candidate falls back to "project" ---
+
+    #[test]
+    fn run_derive_wing_name_all_special_chars_falls_back_to_project() {
+        // When the project name consists entirely of special characters that split
+        // to empty segments, the candidate is empty and must fall back to "project".
+        // Covers L393-394.
+        use crate::palace::project_scanner::ProjectInfo;
+        let temp_dir = tempfile::tempdir().expect("must create temp dir for empty-candidate test");
+        let projects = vec![ProjectInfo {
+            // All non-alphanumeric: splits to empty segments after filtering.
+            name: "---".to_string(),
+            repo_root: temp_dir.path().to_path_buf(),
+            manifest: None,
+            has_git: false,
+            total_commits: 0,
+            user_commits: 1,
+            is_mine: true,
+        }];
+        let result = run_derive_wing_name(&projects, temp_dir.path());
+        assert_eq!(
+            result, "project",
+            "all-special-char name must fall back to 'project'"
+        );
+        // Pair assertion: result is always non-empty.
+        assert!(!result.is_empty(), "wing name must never be empty");
+    }
+
+    // --- run_gitignore_protect: no separator needed when .gitignore ends with newline ---
+
+    #[test]
+    fn gitignore_protect_no_separator_when_existing_ends_with_newline() {
+        // When the existing .gitignore already ends with '\n', no separator is added
+        // before the new entries. Covers the separator="" branch on L471-475.
+        let dir = tempfile::tempdir().expect("tempdir must succeed");
+        std::fs::create_dir(dir.path().join(".git")).expect("must create .git dir");
+        // Content ends with '\n' — separator must be "".
+        std::fs::write(dir.path().join(".gitignore"), "*.log\n").expect("must write .gitignore");
+
+        run_gitignore_protect(dir.path());
+
+        let contents =
+            std::fs::read_to_string(dir.path().join(".gitignore")).expect("must read .gitignore");
+        // No double-newline between the original content and the added entries.
+        assert!(
+            !contents.contains("\n\nmempalace.yaml"),
+            ".gitignore must not have double-newline separator"
+        );
+        // Pair assertion: the entries are present.
+        assert!(
+            contents.contains("mempalace.yaml"),
+            "mempalace.yaml must be added"
+        );
+    }
+
+    // --- run_gitignore_protect: separator added when .gitignore does not end with newline ---
+
+    #[test]
+    fn gitignore_protect_adds_separator_when_existing_lacks_trailing_newline() {
+        // When the existing .gitignore does not end with '\n', a newline separator is
+        // added. Covers the separator="\n" branch on L473.
+        let dir = tempfile::tempdir().expect("tempdir must succeed");
+        std::fs::create_dir(dir.path().join(".git")).expect("must create .git dir");
+        // Content does NOT end with '\n'.
+        std::fs::write(dir.path().join(".gitignore"), "*.log").expect("must write .gitignore");
+
+        run_gitignore_protect(dir.path());
+
+        let contents =
+            std::fs::read_to_string(dir.path().join(".gitignore")).expect("must read .gitignore");
+        // The entries must appear after the original content with a newline between them.
+        assert!(
+            contents.starts_with("*.log\n"),
+            ".gitignore must start with original content followed by newline"
+        );
+        // Pair assertion: new entries must be present.
+        assert!(
+            contents.contains("mempalace.yaml"),
+            "mempalace.yaml must be added after separator"
+        );
+    }
+
+    // --- run_persist_lang: save error branch ---
+
+    #[test]
+    fn run_persist_lang_does_not_panic_when_save_fails() {
+        // When the config directory is read-only, config.save() returns Err.
+        // run_persist_lang must log the warning and return without panicking.
+        // Covers L426-428.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir must succeed");
+        temp_env::with_var("MEMPALACE_DIR", Some(dir.path()), || {
+            // Make the directory read-only so the write fails.
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o444))
+                .expect("set_permissions must succeed");
+
+            // Must not panic even when save() fails.
+            run_persist_lang(&["en".to_string()]);
+
+            // Restore permissions so tempdir cleanup succeeds.
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755))
+                .expect("restore permissions must succeed");
+        });
+        // Pair assertion: the directory must still exist (we only chmod'd it, not removed).
+        assert!(dir.path().is_dir(), "temp dir must still exist after test");
+    }
+
     #[test]
     fn persist_lang_updates_global_config() {
         // run_persist_lang must write the provided language codes to the global

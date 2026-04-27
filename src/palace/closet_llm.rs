@@ -413,6 +413,129 @@ mod tests {
         );
     }
 
+    // Mock provider that succeeds with a canned JSON response.
+    struct OkProvider;
+    impl LlmProvider for OkProvider {
+        fn classify(
+            &self,
+            _system: &str,
+            _user: &str,
+            _json_mode: bool,
+        ) -> crate::error::Result<crate::llm::client::LlmResponse> {
+            Ok(crate::llm::client::LlmResponse {
+                text: r#"{"topics":["Rust","memory","palace"],"quotes":["Alice said hi"],"summary":"A test summary."}"#
+                    .to_string(),
+            })
+        }
+        fn check_available(&self) -> (bool, String) {
+            (true, "ok".to_string())
+        }
+        fn name(&self) -> &'static str {
+            "mock-ok"
+        }
+    }
+
+    // Mock provider that returns an empty string — triggers the empty-response error path.
+    struct EmptyResponseProvider;
+    impl LlmProvider for EmptyResponseProvider {
+        fn classify(
+            &self,
+            _system: &str,
+            _user: &str,
+            _json_mode: bool,
+        ) -> crate::error::Result<crate::llm::client::LlmResponse> {
+            Ok(crate::llm::client::LlmResponse {
+                text: "   ".to_string(),
+            })
+        }
+        fn check_available(&self) -> (bool, String) {
+            (true, "ok".to_string())
+        }
+        fn name(&self) -> &'static str {
+            "mock-empty"
+        }
+    }
+
+    // ── regenerate_closets_parse_response — additional paths ─────────
+
+    #[test]
+    fn parse_response_strips_bare_backtick_fence() {
+        // A ``` fence without "json" label must also be stripped before parsing.
+        let json = "```\n{\"topics\": [\"Rust\"], \"quotes\": [], \"summary\": \"Bare.\"}\n```";
+        let output = regenerate_closets_parse_response(json);
+        assert_eq!(
+            output.topics,
+            vec!["Rust"],
+            "topics must parse through bare fence"
+        );
+        assert_eq!(
+            output.summary, "Bare.",
+            "summary must parse through bare fence"
+        );
+    }
+
+    // ── regenerate_closets_format_content — additional paths ─────────
+
+    #[test]
+    fn format_content_includes_quotes() {
+        // Non-empty quotes must appear as separate lines between topics and summary.
+        let output = ClosetOutput {
+            topics: vec!["Rust".to_string()],
+            quotes: vec!["[Alice] verbatim quote".to_string()],
+            summary: "About Rust.".to_string(),
+        };
+        let content = regenerate_closets_format_content(&output);
+        assert!(
+            content.contains("[Alice] verbatim quote"),
+            "non-empty quotes must appear in output"
+        );
+        assert!(
+            content.contains("About Rust."),
+            "summary must appear alongside quotes"
+        );
+    }
+
+    #[test]
+    fn format_content_truncates_topics_to_max() {
+        // When more than MAX_TOPICS topics are provided only the first MAX_TOPICS appear.
+        let topics: Vec<String> = (0..=MAX_TOPICS).map(|i| format!("topic_{i}")).collect();
+        let output = ClosetOutput {
+            topics,
+            quotes: vec![],
+            summary: String::new(),
+        };
+        let content = regenerate_closets_format_content(&output);
+        // The MAX_TOPICS+1-th topic must not appear (0-indexed: topic_15 for MAX_TOPICS=15).
+        assert!(
+            !content.contains(&format!("topic_{MAX_TOPICS}")),
+            "topics must be truncated to MAX_TOPICS"
+        );
+        assert!(
+            content.contains("topic_0"),
+            "first topic must appear in truncated output"
+        );
+    }
+
+    #[test]
+    fn format_content_skips_empty_quotes() {
+        // An empty string in the quotes Vec must not add a blank line to output.
+        let output = ClosetOutput {
+            topics: vec![],
+            quotes: vec![String::new(), "real quote".to_string()],
+            summary: String::new(),
+        };
+        let content = regenerate_closets_format_content(&output);
+        assert!(
+            content.contains("real quote"),
+            "non-empty quote must appear"
+        );
+        // The content should not start with a newline (blank line from empty quote).
+        assert!(
+            !content.starts_with('\n'),
+            "empty quotes must not add blank lines"
+        );
+    }
+
     // ── regenerate_closets (integration) ─────────────────────────────
 
     #[tokio::test]
@@ -445,5 +568,307 @@ mod tests {
             stats.skipped_dry_run, 1,
             "dry_run must count skipped drawers"
         );
+    }
+
+    #[tokio::test]
+    async fn regenerate_closets_empty_palace_returns_zero_stats() {
+        // When the palace has no drawers, all stats must be zero.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+
+        let stats = regenerate_closets(&connection, None, 0, false, &OkProvider)
+            .await
+            .expect("regenerate_closets must succeed on empty palace");
+
+        assert_eq!(stats.processed, 0, "empty palace must have zero processed");
+        assert_eq!(stats.failed, 0, "empty palace must have zero failed");
+        assert_eq!(
+            stats.skipped_dry_run, 0,
+            "empty palace must have zero skipped"
+        );
+    }
+
+    #[tokio::test]
+    async fn regenerate_closets_processes_drawer_with_ok_provider() {
+        // A successful LLM call must increment processed and write a compressed row.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+
+        connection
+            .execute(
+                "INSERT INTO drawers (id, wing, room, content, source_file, added_by) VALUES (?, ?, ?, ?, ?, ?)",
+                ("d_ok_1", "personal", "notes", "Alice said hello about Rust and memory.", "notes.md", "test"),
+            )
+            .await
+            .expect("seed drawer must succeed");
+
+        let stats = regenerate_closets(&connection, None, 0, false, &OkProvider)
+            .await
+            .expect("regenerate_closets must succeed");
+
+        assert_eq!(stats.processed, 1, "one drawer must be processed");
+        assert_eq!(stats.failed, 0, "no drawer must fail with OkProvider");
+
+        // Pair assertion: the compressed table must have an entry for this drawer.
+        let rows = crate::db::query_all(
+            &connection,
+            "SELECT id FROM compressed WHERE id = 'd_ok_1'",
+            (),
+        )
+        .await
+        .expect("select compressed must succeed");
+        assert_eq!(
+            rows.len(),
+            1,
+            "compressed entry must exist after processing"
+        );
+    }
+
+    #[tokio::test]
+    async fn regenerate_closets_counts_failed_when_provider_returns_empty() {
+        // When the provider returns whitespace, the drawer counts as failed (not processed).
+        let (_db, connection) = crate::test_helpers::test_db().await;
+
+        connection
+            .execute(
+                "INSERT INTO drawers (id, wing, room, content, source_file, added_by) VALUES (?, ?, ?, ?, ?, ?)",
+                ("d_fail_1", "personal", "notes", "Content that will get an empty LLM reply.", "fail.md", "test"),
+            )
+            .await
+            .expect("seed drawer must succeed");
+
+        let stats = regenerate_closets(&connection, None, 0, false, &EmptyResponseProvider)
+            .await
+            .expect("regenerate_closets must not propagate LLM failure");
+
+        assert_eq!(stats.failed, 1, "empty LLM response must count as failed");
+        assert_eq!(
+            stats.processed, 0,
+            "no drawer must be processed on empty response"
+        );
+    }
+
+    #[tokio::test]
+    async fn regenerate_closets_sample_limits_processing() {
+        // When sample=1, only one drawer is processed even if two exist.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+
+        for (id, content) in [
+            ("d_sample_1", "First drawer content about Rust."),
+            ("d_sample_2", "Second drawer content about memory."),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO drawers (id, wing, room, content, source_file, added_by) VALUES (?, ?, ?, ?, ?, ?)",
+                    (id, "personal", "notes", content, "multi.md", "test"),
+                )
+                .await
+                .expect("seed drawer must succeed");
+        }
+
+        let stats = regenerate_closets(&connection, None, 1, false, &OkProvider)
+            .await
+            .expect("regenerate_closets with sample=1 must succeed");
+
+        assert_eq!(
+            stats.processed + stats.failed,
+            1,
+            "sample=1 must limit to one drawer"
+        );
+        assert_eq!(
+            stats.skipped_dry_run, 0,
+            "not a dry_run so skipped must be zero"
+        );
+    }
+
+    // Mock provider that returns content that serializes to non-empty JSON but
+    // formats to an empty compressed string (empty topics, empty quotes, empty summary).
+    struct EmptyOutputProvider;
+    impl LlmProvider for EmptyOutputProvider {
+        fn classify(
+            &self,
+            _system: &str,
+            _user: &str,
+            _json_mode: bool,
+        ) -> crate::error::Result<crate::llm::client::LlmResponse> {
+            // Valid JSON with all-empty fields — format_content will return "".
+            Ok(crate::llm::client::LlmResponse {
+                text: r#"{"topics":[],"quotes":[],"summary":""}"#.to_string(),
+            })
+        }
+        fn check_available(&self) -> (bool, String) {
+            (true, "ok".to_string())
+        }
+        fn name(&self) -> &'static str {
+            "mock-empty-output"
+        }
+    }
+
+    // ── regenerate_closets_fetch_drawers: skip rows with empty id or content ───
+
+    #[tokio::test]
+    async fn regenerate_closets_skips_drawer_with_empty_content() {
+        // A database row with empty content must be skipped by the fetch function,
+        // so the drawer is not passed to the LLM. Covers the `continue` on L171.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+
+        // Insert a drawer with non-empty id but empty content (content = whitespace only
+        // normalizes to empty at the app layer; use a truly empty string via raw SQL).
+        connection
+            .execute(
+                "INSERT INTO drawers (id, wing, room, content, added_by) VALUES (?, ?, ?, ?, ?)",
+                ("d_empty_content", "test", "notes", "", "test"),
+            )
+            .await
+            .expect("seed drawer with empty content must succeed");
+
+        // Also insert a normal drawer so we can distinguish "skipped" from "none".
+        connection
+            .execute(
+                "INSERT INTO drawers (id, wing, room, content, added_by) VALUES (?, ?, ?, ?, ?)",
+                ("d_normal", "test", "notes", "Normal content here.", "test"),
+            )
+            .await
+            .expect("seed normal drawer must succeed");
+
+        // dry_run=true so the FailProvider is never called; we just count skipped_dry_run.
+        let stats = regenerate_closets(&connection, None, 0, true, &FailProvider)
+            .await
+            .expect("regenerate_closets must succeed");
+
+        // Only the one valid drawer must be counted; the empty-content one is skipped.
+        assert_eq!(
+            stats.skipped_dry_run, 1,
+            "only one drawer (non-empty content) must be counted"
+        );
+    }
+
+    // ── regenerate_closets_process_drawer: empty compressed output counts as failed ──
+
+    #[tokio::test]
+    async fn regenerate_closets_counts_failed_when_format_produces_empty_string() {
+        // When LLM returns valid JSON but all fields are empty, format_content returns ""
+        // and the drawer must count as failed. Covers L258-261.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+
+        connection
+            .execute(
+                "INSERT INTO drawers (id, wing, room, content, source_file, added_by) VALUES (?, ?, ?, ?, ?, ?)",
+                ("d_empty_fmt", "test", "notes", "Content here.", "empty.md", "test"),
+            )
+            .await
+            .expect("seed drawer must succeed");
+
+        let stats = regenerate_closets(&connection, None, 0, false, &EmptyOutputProvider)
+            .await
+            .expect("regenerate_closets must not propagate the failure");
+
+        assert_eq!(
+            stats.failed, 1,
+            "empty formatted output must count as failed"
+        );
+        assert_eq!(
+            stats.processed, 0,
+            "drawer must not be counted as processed"
+        );
+    }
+
+    // ── regenerate_closets_process_drawer: content truncation at UTF-8 boundary ──
+
+    #[tokio::test]
+    async fn regenerate_closets_truncates_multibyte_content_without_panic() {
+        // Content with multi-byte chars (emoji) that exceeds MAX_CONTENT_CHARS must be
+        // sliced at a valid UTF-8 char boundary. Covers L235-236.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+
+        // Emoji is 4 bytes each; place them so at least one spans the MAX_CONTENT_CHARS
+        // byte boundary, forcing the while loop on L235-236 to step back.
+        // Build just over MAX_CONTENT_CHARS bytes with 4-byte emoji.
+        let emoji_count = MAX_CONTENT_CHARS / 4 + 5;
+        let long_content = "🚀".repeat(emoji_count);
+        assert!(
+            long_content.len() > MAX_CONTENT_CHARS,
+            "test setup: content must exceed MAX_CONTENT_CHARS"
+        );
+
+        connection
+            .execute(
+                "INSERT INTO drawers (id, wing, room, content, source_file, added_by) VALUES (?, ?, ?, ?, ?, ?)",
+                ("d_multibyte", "test", "notes", long_content.as_str(), "emoji.md", "test"),
+            )
+            .await
+            .expect("seed multibyte drawer must succeed");
+
+        // OkProvider always returns a valid response; the drawer must be processed.
+        let stats = regenerate_closets(&connection, None, 0, false, &OkProvider)
+            .await
+            .expect("regenerate_closets must handle multibyte truncation without panic");
+
+        assert_eq!(
+            stats.processed, 1,
+            "multibyte content must be processed without panic"
+        );
+        assert_eq!(
+            stats.failed, 0,
+            "no failure must occur for multibyte content"
+        );
+    }
+
+    #[tokio::test]
+    async fn regenerate_closets_wing_filter_only_processes_matching_wing() {
+        // When wing is Some, only drawers from that wing are fetched.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+
+        connection
+            .execute(
+                "INSERT INTO drawers (id, wing, room, content, source_file, added_by) VALUES (?, ?, ?, ?, ?, ?)",
+                ("d_wing_match", "work", "projects", "Work drawer content about systems.", "work.md", "test"),
+            )
+            .await
+            .expect("seed work drawer");
+        connection
+            .execute(
+                "INSERT INTO drawers (id, wing, room, content, source_file, added_by) VALUES (?, ?, ?, ?, ?, ?)",
+                ("d_wing_other", "personal", "notes", "Personal drawer content about life.", "personal.md", "test"),
+            )
+            .await
+            .expect("seed personal drawer");
+
+        // Process only the "work" wing in dry_run to count without writing.
+        let stats = regenerate_closets(&connection, Some("work"), 0, true, &FailProvider)
+            .await
+            .expect("wing-filtered dry_run must succeed");
+
+        assert_eq!(
+            stats.skipped_dry_run, 1,
+            "only one drawer in 'work' wing must be skipped"
+        );
+        assert_eq!(stats.processed, 0, "dry_run must not process anything");
+    }
+
+    #[tokio::test]
+    async fn regenerate_closets_content_truncation_does_not_panic() {
+        // A drawer whose content exceeds MAX_CONTENT_CHARS must be processed without panic.
+        // The OkProvider always succeeds regardless of input size, so processed=1.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+
+        // Build a string slightly larger than MAX_CONTENT_CHARS using ASCII chars only
+        // so no multi-byte boundary issues arise in this test.
+        let long_content = "a".repeat(MAX_CONTENT_CHARS + 100);
+        connection
+            .execute(
+                "INSERT INTO drawers (id, wing, room, content, source_file, added_by) VALUES (?, ?, ?, ?, ?, ?)",
+                ("d_long_content", "personal", "notes", long_content.as_str(), "long.md", "test"),
+            )
+            .await
+            .expect("seed long drawer must succeed");
+
+        let stats = regenerate_closets(&connection, None, 0, false, &OkProvider)
+            .await
+            .expect("regenerate_closets must handle long content without panic");
+
+        assert_eq!(
+            stats.processed, 1,
+            "long content drawer must be processed successfully"
+        );
+        assert_eq!(stats.failed, 0, "long content must not trigger a failure");
     }
 }

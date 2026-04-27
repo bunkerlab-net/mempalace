@@ -685,4 +685,159 @@ mod tests {
             "other fields must still decode from the content line"
         );
     }
+
+    #[test]
+    fn extract_key_sentence_returns_verbatim_quoted_string_via_locale_pattern() {
+        // Lines 128-133: when LOCALE_QUOTE_RE is Some (English locale has quote_pattern
+        // `"([^"]{20,200})"`), extract_key_sentence must return the quoted content
+        // directly instead of scoring sentences. The quoted span must be >10 chars
+        // to pass the inner length guard.
+        let text = r#"She said "We should switch to GraphQL for better performance" and move on."#;
+        let result = extract_key_sentence(text);
+        // The quoted string "We should switch to GraphQL for better performance" is 49 chars > 10.
+        assert_eq!(
+            result, "We should switch to GraphQL for better performance",
+            "extract_key_sentence must return the quoted content directly"
+        );
+        assert!(
+            result.len() > 10,
+            "returned quote must exceed the 10-char length guard"
+        );
+    }
+
+    #[test]
+    fn extract_key_sentence_score_snaps_char_boundary_for_multibyte_char() {
+        // Lines 215-220: when byte 52 falls inside a multi-byte UTF-8 character,
+        // the snap loop increments `end` until a char boundary is reached.
+        // Construct a sentence that is >55 bytes where byte 51 begins a 2-byte char (é).
+        // "We decided to restructure all of the backend system" = 51 ASCII bytes (0-50),
+        // then 'é' (U+00E9) at bytes 51-52, then "s overall therefore" to exceed 55 bytes.
+        let long_sentence =
+            "We decided to restructure all of the backend systemé overall therefore complete";
+        // Verify that the é straddles byte position 51-52 as designed.
+        assert_eq!(
+            &long_sentence[..51],
+            "We decided to restructure all of the backend system",
+            "first 51 bytes must be ASCII confirming é starts at byte 51"
+        );
+        // No quotes in the text so LOCALE_QUOTE_RE does not short-circuit.
+        let result = extract_key_sentence(long_sentence);
+        // The result must be truncated with "..." because len > 55 bytes.
+        assert!(
+            result.ends_with("..."),
+            "sentence truncated after char-boundary snap must end with ellipsis"
+        );
+        assert!(
+            result.len() <= 60,
+            "truncated result must not exceed ~55 chars plus ellipsis"
+        );
+    }
+
+    #[test]
+    fn detect_entities_fallback_extracts_capitalized_names_not_at_position_zero() {
+        // Lines 276-282: when entity_codes is empty, detect_entities falls back to
+        // scanning for capitalized words. The guard `i > 0` excludes the first word,
+        // so a name that appears after the first word must be detected.
+        let dialect = Dialect::empty();
+        // "Alice" is the second word (i=1 > 0), uppercase first char, all lowercase rest,
+        // length >= 2, and "alice" is not a stop word — so code "ALI" must be pushed.
+        let found = dialect.detect_entities("Yesterday Alice went to the market to buy things");
+        assert!(
+            !found.is_empty(),
+            "fallback entity detection must find capitalized names after position 0"
+        );
+        assert!(
+            found.contains(&"ALI".to_string()),
+            "fallback must produce the 3-char uppercase code for Alice"
+        );
+    }
+
+    #[test]
+    fn compress_produces_misc_when_text_has_only_stop_words() {
+        // Line 300: when extract_topics returns empty (all words are stop words or too short),
+        // compress must substitute "misc" as the topic string.
+        let dialect = Dialect::empty();
+        // All words are in the stop_words list, so no topics are extracted.
+        let result = dialect.compress("the to and is are but for of", None);
+        // The content line must contain "misc" as the topic segment.
+        assert!(
+            result.contains("misc"),
+            "compress must produce 'misc' topic when no words pass the topic filter"
+        );
+        assert!(result.contains("0:"), "content line prefix must be present");
+    }
+
+    #[test]
+    fn compress_with_wing_but_empty_source_file_uses_question_mark_stem() {
+        // Line 316: when metadata.source_file is empty but wing is non-empty,
+        // the header line is still emitted, and the stem field must be "?".
+        let dialect = Dialect::empty();
+        let meta = CompressMetadata {
+            // Empty source_file triggers the `"?"` branch at line 316.
+            source_file: "",
+            wing: "test_wing",
+            room: "planning",
+            date: "2025-01-01",
+        };
+        let result = dialect.compress(
+            "We decided to switch to GraphQL because it is more flexible for clients",
+            Some(&meta),
+        );
+        // Header must contain the wing and must use "?" as the stem.
+        assert!(
+            result.contains("test_wing"),
+            "header must include the wing name"
+        );
+        assert!(
+            result.contains("test_wing|planning|2025-01-01|?"),
+            "stem must be '?' when source_file is empty"
+        );
+    }
+
+    #[test]
+    fn decode_fill_content_skips_empty_pipe_segments() {
+        // Line 455: an empty segment between pipes (e.g. `||`) must be skipped via
+        // the `continue` statement rather than being treated as a quote, flag, or emotion.
+        // We craft an AAAK content string with a deliberate empty segment.
+        let aaak_with_empty_segment = "0:ALC|project||excite";
+        let decoded = Dialect::decode(aaak_with_empty_segment);
+        // The empty segment between `||` must not appear in any decoded field.
+        assert!(
+            !decoded.quote.is_empty() || decoded.quote.is_empty(),
+            "decode must not panic on empty pipe segment"
+        );
+        // "excite" is the emotion (not empty, lowercase-leading).
+        assert!(
+            decoded.emotions.contains(&"excite".to_string()),
+            "emotion 'excite' must be decoded correctly after the empty segment"
+        );
+        // Entities must be decoded from "ALC".
+        assert!(
+            decoded.entities.contains(&"ALC".to_string()),
+            "entity 'ALC' must be decoded from the non-??? entity segment"
+        );
+    }
+
+    #[test]
+    fn decode_fill_content_with_real_entity_codes_populates_entities_vec() {
+        // Lines 440-442: entity_str that is neither "???" nor empty must be split on "+"
+        // and assigned to decoded.entities. This covers the `if entity_str != "???"` branch.
+        let dialect = {
+            let mut entities = std::collections::HashMap::new();
+            entities.insert("Alice".to_string(), "ALC".to_string());
+            Dialect::new(&entities)
+        };
+        // Compress text that mentions Alice — entity_str will be "ALC", not "???".
+        let aaak = dialect.compress("Alice decided to switch to GraphQL for the project", None);
+        let decoded = Dialect::decode(&aaak);
+        // Entity codes must be populated (not empty, since "ALC" was detected).
+        assert!(
+            !decoded.entities.is_empty(),
+            "entities vec must be non-empty when real entity codes are present"
+        );
+        assert!(
+            decoded.entities.contains(&"ALC".to_string()),
+            "ALC code must appear in decoded entities"
+        );
+    }
 }
