@@ -2,12 +2,12 @@ use turso::Connection;
 
 use crate::error::Result;
 use crate::palace::entity_registry::EntityRegistry;
-use crate::palace::stats::query_stats;
+use crate::palace::stack::MemoryStack;
 
 /// Print palace statistics: total drawers, per-wing and per-room counts, KG summary,
 /// and entity registry summary.
 pub async fn run(connection: &Connection) -> Result<()> {
-    let stats = query_stats(connection).await?;
+    let stats = MemoryStack::new(connection).status().await?;
 
     if stats.total_drawers == 0 {
         println!(

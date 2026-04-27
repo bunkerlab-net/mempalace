@@ -7,7 +7,7 @@
 use turso::Connection;
 
 use crate::error::Result;
-use crate::palace::layers;
+use crate::palace::stack::MemoryStack;
 
 /// Run the wake-up command, printing the requested layers to stdout.
 pub async fn run(
@@ -19,16 +19,18 @@ pub async fn run(
 ) -> Result<()> {
     assert!(results > 0, "results must be positive");
 
+    let stack = MemoryStack::new(connection);
+
     // L0 + L1 are always included — they form the core palace context.
-    let base = layers::wake_up(connection, wing).await?;
-    assert!(!base.is_empty(), "wake_up must return non-empty context");
+    let base = stack.recall(wing).await?;
+    assert!(!base.is_empty(), "recall must return non-empty context");
     print!("{base}");
 
     // L2: on-demand recall for a specific wing/room. Only triggered when the
     // caller scoped to a wing, because L2 without a filter re-reads all
     // drawers and duplicates what L1 already showed.
     if wing.is_some() || room.is_some() {
-        let recall = layers::layer2(connection, wing, room, results).await?;
+        let recall = stack.browse(wing, room, results).await?;
         if !recall.is_empty() {
             println!("\n{recall}");
         }
@@ -36,7 +38,7 @@ pub async fn run(
 
     // L3: keyword deep-search. Only triggered when the caller provides a query.
     if let Some(query_str) = query {
-        let deep = layers::layer3(connection, query_str, wing, room, results).await?;
+        let deep = stack.search(query_str, wing, room, results).await?;
         if !deep.is_empty() {
             println!("\n{deep}");
         }

@@ -27,5 +27,6 @@ pub mod repair;
 pub mod room_detect;
 pub mod search;
 pub mod session_scanner;
+pub mod stack;
 pub mod stats;
 pub mod sweeper;
