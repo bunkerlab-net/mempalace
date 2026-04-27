@@ -150,12 +150,64 @@ mod tests {
         assert!(result.is_none(), "unknown adapter must return None");
     }
 
+    // ── available_adapters / unregister ──────────────────────────────────────
+
+    #[test]
+    fn available_adapters_returns_names_in_sorted_order() {
+        // Register two adapters with keys that sort in a known order ("alpha" < "zeta").
+        // Using unique prefixes to avoid races with the round-trip test.
+        register("test_avail_zeta", fake_constructor);
+        register("test_avail_alpha", fake_constructor);
+
+        let names = available_adapters();
+        let alpha_pos = names.iter().position(|n| n == "test_avail_alpha");
+        let zeta_pos = names.iter().position(|n| n == "test_avail_zeta");
+
+        assert!(alpha_pos.is_some(), "test_avail_alpha must be listed");
+        assert!(zeta_pos.is_some(), "test_avail_zeta must be listed");
+        assert!(
+            alpha_pos.expect("alpha_pos must be Some after is_some check")
+                < zeta_pos.expect("zeta_pos must be Some after is_some check"),
+            "available_adapters must return names in ascending sorted order"
+        );
+
+        unregister("test_avail_alpha");
+        unregister("test_avail_zeta");
+    }
+
+    #[test]
+    fn unregister_makes_adapter_unavailable() {
+        // Unique key so this test doesn't race with register_and_get_adapter_round_trip.
+        register("test_avail_unregister_only", fake_constructor);
+        unregister("test_avail_unregister_only");
+        // get_adapter returns None via `?` before the name-check assertion fires.
+        let result = get_adapter("test_avail_unregister_only");
+        assert!(
+            result.is_none(),
+            "adapter must not be accessible after unregister"
+        );
+    }
+
     // ── resolve_adapter_name ───────────────────────────────────────────────
 
     #[test]
     fn resolve_adapter_explicit_wins_over_config() {
         let name = resolve_adapter_name(Some("explicit_src"), Some("config_src"));
         assert_eq!(name, "explicit_src");
+    }
+
+    #[test]
+    fn resolve_adapter_config_wins_over_default() {
+        // When explicit is None, the config value must be returned.
+        let name = resolve_adapter_name(None, Some("config_src"));
+        assert_eq!(name, "config_src");
+    }
+
+    #[test]
+    fn resolve_adapter_empty_explicit_falls_through_to_config() {
+        // An empty string explicit is skipped by the `!name.is_empty()` filter.
+        let name = resolve_adapter_name(Some(""), Some("config_src"));
+        assert_eq!(name, "config_src");
     }
 
     #[test]

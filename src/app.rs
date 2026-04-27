@@ -286,12 +286,11 @@ async fn run_repair(
     skip_confirm: bool,
 ) -> error::Result<()> {
     if !skip_confirm {
-        use std::io::{BufRead, Write};
+        use std::io::Write;
         print!("Rebuild the inverted index? This rewrites drawer_words. [y/N] ");
         std::io::stdout().flush().ok();
-        let mut answer = String::new();
-        std::io::stdin().lock().read_line(&mut answer).ok();
-        if answer.trim().to_lowercase() != "y" {
+        let stdin = std::io::stdin();
+        if !run_repair_confirm(stdin.lock()) {
             println!("Aborted.");
             return Ok(());
         }
@@ -302,6 +301,27 @@ async fn run_repair(
         "run_repair: palace_path must not be empty"
     );
     cli::repair::run(&connection, &palace_path).await
+}
+
+/// Read one line from `reader` and return `true` iff the user typed "y" (case-insensitive).
+///
+/// Extracted so tests can inject a `Cursor` instead of real stdin.
+fn run_repair_confirm(mut reader: impl std::io::BufRead) -> bool {
+    let mut answer = String::new();
+    reader.read_line(&mut answer).ok();
+    assert!(
+        answer.len() <= 1024,
+        "run_repair_confirm: answer must be bounded"
+    );
+    let confirmed = answer.trim().to_lowercase() == "y";
+    // Pair assertion: empty or whitespace-only input can never be confirmation.
+    if answer.trim().is_empty() {
+        assert!(
+            !confirmed,
+            "run_repair_confirm: empty input must not confirm"
+        );
+    }
+    confirmed
 }
 
 /// Handle the `mcp` sub-command — opens the palace and starts the MCP server.
@@ -624,5 +644,52 @@ mod tests {
             },
         )
         .await;
+    }
+
+    // ── run_repair_confirm ────────────────────────────────────────────────
+
+    #[test]
+    fn run_repair_confirm_y_returns_true() {
+        let cursor = std::io::Cursor::new(b"y\n");
+        assert!(
+            run_repair_confirm(cursor),
+            "lowercase 'y' must confirm the repair"
+        );
+    }
+
+    #[test]
+    fn run_repair_confirm_uppercase_y_returns_true() {
+        let cursor = std::io::Cursor::new(b"Y\n");
+        assert!(
+            run_repair_confirm(cursor),
+            "uppercase 'Y' must confirm the repair"
+        );
+    }
+
+    #[test]
+    fn run_repair_confirm_n_returns_false() {
+        let cursor = std::io::Cursor::new(b"n\n");
+        assert!(
+            !run_repair_confirm(cursor),
+            "'n' must not confirm the repair"
+        );
+    }
+
+    #[test]
+    fn run_repair_confirm_empty_returns_false() {
+        let cursor = std::io::Cursor::new(b"\n");
+        assert!(
+            !run_repair_confirm(cursor),
+            "empty input must not confirm the repair"
+        );
+    }
+
+    #[test]
+    fn run_repair_confirm_whitespace_returns_false() {
+        let cursor = std::io::Cursor::new(b"   \n");
+        assert!(
+            !run_repair_confirm(cursor),
+            "whitespace-only input must not confirm the repair"
+        );
     }
 }

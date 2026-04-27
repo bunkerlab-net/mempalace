@@ -399,6 +399,103 @@ mod tests {
         );
     }
 
+    // ── dedup_fetch_groups (integration) ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn dedup_fetch_groups_filters_single_drawer_sources() {
+        // A source_file with only one drawer is below MIN_GROUP_SIZE and must be excluded.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        connection
+            .execute(
+                "INSERT INTO drawers (id, wing, room, content, source_file, added_by) \
+                 VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    "drawer_solo_src",
+                    "test",
+                    "room",
+                    "single drawer in this source",
+                    "solo_source.md",
+                    "test",
+                ),
+            )
+            .await
+            .expect("insert solo drawer");
+
+        let groups = dedup_fetch_groups(&connection, None)
+            .await
+            .expect("dedup_fetch_groups must succeed");
+
+        // solo_source.md has only 1 drawer — below MIN_GROUP_SIZE=2.
+        assert!(
+            !groups.contains_key("solo_source.md"),
+            "single-drawer source_file must be filtered out by MIN_GROUP_SIZE"
+        );
+    }
+
+    #[tokio::test]
+    async fn dedup_fetch_groups_wing_filter_restricts_scope() {
+        // Only drawers in the specified wing must be considered.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+
+        // Two drawers in "wing_alpha" with the same source_file → a valid group.
+        for (id, content) in [
+            ("drawer_wa_1", "rust memory palace alpha version long"),
+            ("drawer_wa_2", "rust memory palace alpha version"),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO drawers (id, wing, room, content, source_file, added_by) \
+                     VALUES (?, ?, ?, ?, ?, ?)",
+                    (id, "wing_alpha", "room", content, "alpha.md", "test"),
+                )
+                .await
+                .expect("insert wing_alpha drawer");
+        }
+        // One drawer in "wing_beta" — cannot form a group on its own.
+        connection
+            .execute(
+                "INSERT INTO drawers (id, wing, room, content, source_file, added_by) \
+                 VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    "drawer_wb_1",
+                    "wing_beta",
+                    "room",
+                    "beta only drawer",
+                    "beta.md",
+                    "test",
+                ),
+            )
+            .await
+            .expect("insert wing_beta drawer");
+
+        // Without filter: wing_alpha's group appears.
+        let all_groups = dedup_fetch_groups(&connection, None)
+            .await
+            .expect("fetch all groups");
+        assert!(
+            all_groups.contains_key("alpha.md"),
+            "alpha.md group must appear without wing filter"
+        );
+
+        // With wing_alpha filter: alpha.md group appears.
+        let alpha_groups = dedup_fetch_groups(&connection, Some("wing_alpha"))
+            .await
+            .expect("fetch wing_alpha groups");
+        assert!(
+            alpha_groups.contains_key("alpha.md"),
+            "alpha.md must appear when filtering by wing_alpha"
+        );
+
+        // With wing_beta filter: beta.md has only 1 drawer → no groups.
+        let beta_groups = dedup_fetch_groups(&connection, Some("wing_beta"))
+            .await
+            .expect("fetch wing_beta groups");
+        assert!(
+            beta_groups.is_empty(),
+            "wing_beta has no multi-drawer source_file groups"
+        );
+    }
+
     // ── dedup_drawers (integration) ─────────────────────────────────────────
 
     #[tokio::test]

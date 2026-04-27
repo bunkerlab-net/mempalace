@@ -528,6 +528,63 @@ mod tests {
     }
 
     #[test]
+    fn check_claim_stale_fact_fires_for_past_valid_to() {
+        // When a KG fact is closed (current=false) with a valid_to in the past and
+        // the predicate matches the claim, a stale_fact issue must be raised.
+        let claim = Claim {
+            subject: "Bob".to_string(),
+            predicate: "brother".to_string(),
+            object: "Alice".to_string(),
+            span: "Bob is Alice's brother".to_string(),
+        };
+        let fact = query::Fact {
+            direction: "outgoing".to_string(),
+            subject: "Bob".to_string(),
+            predicate: "brother".to_string(),
+            object: "Alice".to_string(),
+            valid_from: None,
+            valid_to: Some("2000-01-01".to_string()),
+            confidence: 1.0,
+            current: false,
+        };
+        let issues = check_text_check_claim(&claim, &[fact]);
+        assert_eq!(issues.len(), 1, "one stale_fact issue expected");
+        assert_eq!(issues[0].issue_type, "stale_fact");
+        assert_eq!(
+            issues[0].valid_to.as_deref(),
+            Some("2000-01-01"),
+            "valid_to must be set on stale_fact"
+        );
+        assert!(
+            issues[0].entity.is_some(),
+            "entity must be set for stale_fact issue"
+        );
+    }
+
+    #[test]
+    fn flatten_names_skips_non_string_array_items() {
+        // Non-string values in arrays (numbers, null, bool) must be silently ignored.
+        let json = r#"{"people": ["Alice", 42, null, "Bob", true]}"#;
+        let names = check_text_flatten_names(json);
+        assert!(names.contains("Alice"), "Alice must be collected");
+        assert!(names.contains("Bob"), "Bob must be collected");
+        assert_eq!(names.len(), 2, "only string items must be collected");
+    }
+
+    #[test]
+    fn entity_confusion_pair_orders_alphabetically() {
+        // When a_lower > b_lower the pair must be (b, a) so the dedup set is symmetric.
+        let pair = check_text_entity_confusion_pair("zach", "alice");
+        assert_eq!(pair.0, "alice", "smaller string must be first in pair");
+        assert_eq!(pair.1, "zach", "larger string must be second in pair");
+
+        // When a_lower <= b_lower the pair is (a, b) — same result.
+        let pair2 = check_text_entity_confusion_pair("alice", "zach");
+        assert_eq!(pair2.0, "alice");
+        assert_eq!(pair2.1, "zach");
+    }
+
+    #[test]
     fn check_claim_no_issue_when_predicate_matches() {
         let claim = Claim {
             subject: "Bob".to_string(),

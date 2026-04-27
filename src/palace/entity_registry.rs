@@ -1645,4 +1645,63 @@ mod tests {
         );
         assert!(entry.confidence >= 0.80);
     }
+
+    #[test]
+    fn wikipedia_classify_disambiguation_without_name_returns_ambiguous() {
+        // A disambiguation page whose description does not mention "name" must yield
+        // inferred_type="ambiguous" with confidence 0.40.
+        let data = serde_json::json!({
+            "type": "disambiguation",
+            "title": "Mercury",
+            "description": "multiple things including planet, element, and company",
+            "extract": "Mercury may refer to several topics."
+        });
+        let entry = entity_registry_wikipedia_classify(&data, "Mercury");
+        assert_eq!(
+            entry.inferred_type, "ambiguous",
+            "disambiguation without 'name' in description must be ambiguous"
+        );
+        assert!(
+            (entry.confidence - 0.4).abs() < 1e-9,
+            "ambiguous disambiguation must have 0.40 confidence"
+        );
+    }
+
+    #[test]
+    fn wikipedia_classify_concept_fallback_when_no_indicators_match() {
+        // When the extract contains neither a NAME_INDICATOR_PHRASE nor a
+        // PLACE_INDICATOR_PHRASE, the fallback type must be "concept".
+        let data = serde_json::json!({
+            "type": "standard",
+            "title": "Photosynthesis",
+            "extract": "Photosynthesis is a process by which plants convert light into energy."
+        });
+        let entry = entity_registry_wikipedia_classify(&data, "Photosynthesis");
+        assert_eq!(
+            entry.inferred_type, "concept",
+            "page without name or place indicators must fall back to concept"
+        );
+        assert!(
+            (entry.confidence - 0.60).abs() < 1e-9,
+            "concept fallback must have 0.60 confidence"
+        );
+    }
+
+    #[test]
+    fn wikipedia_classify_indirect_name_indicator_yields_lower_confidence() {
+        // "given name" appears in extract but "morgan is a" does not → is_direct=false → 0.80.
+        let data = serde_json::json!({
+            "type": "standard",
+            "title": "Morgan",
+            "extract": "The Welsh given name derived from ancient roots."
+        });
+        let entry = entity_registry_wikipedia_classify(&data, "Morgan");
+        assert_eq!(entry.inferred_type, "person");
+        // "morgan is a" not in extract → is_direct=false → conf=0.80
+        assert!(
+            (entry.confidence - 0.80).abs() < 1e-9,
+            "indirect name indicator must yield 0.80 confidence, got {}",
+            entry.confidence
+        );
+    }
 }
