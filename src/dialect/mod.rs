@@ -50,6 +50,32 @@ pub struct CompressMetadata<'a> {
     pub date: &'a str,
 }
 
+/// Structured representation of AAAK Dialect content after decoding.
+///
+/// Returned by [`Dialect::decode`]. Fields that are absent in the input
+/// default to empty strings or empty vectors.
+#[derive(Debug, Default)]
+pub struct DecodedDialect {
+    /// Wing namespace from the optional header line.
+    pub wing: String,
+    /// Room category from the optional header line.
+    pub room: String,
+    /// Date string from the optional header line.
+    pub date: String,
+    /// File stem from the optional header line.
+    pub stem: String,
+    /// Entity codes from the `0:` prefix of the content line.
+    pub entities: Vec<String>,
+    /// Topic keywords, split on `_` from the content line.
+    pub topics: Vec<String>,
+    /// Key quoted sentence (stripped of surrounding `"`).
+    pub quote: String,
+    /// Emotion codes (lowercase) from the content line.
+    pub emotions: Vec<String>,
+    /// Importance flags (uppercase) from the content line.
+    pub flags: Vec<String>,
+}
+
 /// Detect emotions from plain text using keyword signals.
 fn detect_emotions(text: &str) -> Vec<String> {
     let text_lower = text.to_lowercase();
@@ -283,6 +309,126 @@ impl Dialect {
 
         result
     }
+
+    /// Estimate the token count of `text` using the ~1.3 tokens/word heuristic.
+    ///
+    /// Matches the Python reference `count_tokens` static method. Useful for
+    /// estimating LLM context usage before sending content to a token-budgeted
+    /// endpoint.
+    pub fn count_tokens(text: &str) -> usize {
+        assert!(!text.is_empty(), "count_tokens: text must not be empty");
+        let word_count = text.split_ascii_whitespace().count();
+        // 1.3 tokens per word: (wc * 13 + 5) / 10 gives standard rounding.
+        let tokens = (word_count * 13 + 5) / 10;
+        assert!(
+            tokens > 0,
+            "count_tokens: non-empty text must yield positive token count"
+        );
+        tokens
+    }
+
+    /// Parse AAAK-encoded text back into a [`DecodedDialect`].
+    ///
+    /// The first line is treated as a header (`WING|ROOM|DATE|STEM`) when it
+    /// does not start with `"0:"`. The content line (`0:ENTITIES|topics|...`)
+    /// must be present. Unknown or missing segments default to empty.
+    pub fn decode(aaak: &str) -> DecodedDialect {
+        assert!(!aaak.is_empty(), "decode: aaak must not be empty");
+
+        let lines: Vec<&str> = aaak.lines().filter(|l| !l.is_empty()).collect();
+        assert!(
+            !lines.is_empty(),
+            "decode: aaak must contain at least one non-empty line"
+        );
+
+        // The content line always starts with "0:"; any preceding line is the header.
+        let (header_opt, content) = if lines.len() >= 2 && !lines[0].starts_with("0:") {
+            (Some(lines[0]), lines[1])
+        } else {
+            (None, lines[0])
+        };
+
+        let mut result = DecodedDialect::default();
+        if let Some(header) = header_opt {
+            decode_fill_header(header, &mut result);
+        }
+        decode_fill_content(content, &mut result);
+
+        result
+    }
+}
+
+/// Called by [`Dialect::decode`] to populate header fields of `decoded`.
+///
+/// Expects a pipe-separated string of the form `WING|ROOM|DATE|STEM`.
+/// Missing segments leave the corresponding field as an empty string.
+fn decode_fill_header(header: &str, decoded: &mut DecodedDialect) {
+    assert!(
+        !header.is_empty(),
+        "decode_fill_header: header must not be empty"
+    );
+
+    let parts: Vec<&str> = header.split('|').collect();
+    assert!(
+        !parts.is_empty(),
+        "decode_fill_header: split must produce at least one part"
+    );
+
+    decoded.wing = parts.first().copied().unwrap_or("").to_string();
+    decoded.room = parts.get(1).copied().unwrap_or("").to_string();
+    decoded.date = parts.get(2).copied().unwrap_or("").to_string();
+    decoded.stem = parts.get(3).copied().unwrap_or("").to_string();
+}
+
+/// Called by [`Dialect::decode`] to populate content fields of `decoded`.
+///
+/// Parses a content line of the form `0:ENTITIES|topics|"quote"|emotions|FLAGS`.
+/// Segments after topics are optional; quoted strings become the key quote,
+/// uppercase-leading segments become flags, lowercase-leading ones become emotions.
+fn decode_fill_content(content: &str, decoded: &mut DecodedDialect) {
+    assert!(
+        !content.is_empty(),
+        "decode_fill_content: content must not be empty"
+    );
+
+    let parts: Vec<&str> = content.split('|').collect();
+
+    // Part 0: "0:ENTITIES" — strip the leading "0:" and split entities on "+".
+    if let Some(entity_part) = parts.first() {
+        let entity_str = entity_part.trim_start_matches("0:");
+        if entity_str != "???" && !entity_str.is_empty() {
+            decoded.entities = entity_str.split('+').map(str::to_string).collect();
+        }
+    }
+
+    // Part 1: topics joined with "_".
+    if let Some(topic_str) = parts.get(1)
+        && *topic_str != "misc"
+        && !topic_str.is_empty()
+    {
+        decoded.topics = topic_str.split('_').map(str::to_string).collect();
+    }
+
+    // Parts 2+: quoted string → quote; uppercase-leading → flags; else → emotions.
+    for part in parts.iter().skip(2) {
+        if part.is_empty() {
+            continue;
+        }
+        if part.starts_with('"') {
+            decoded.quote = part.trim_matches('"').to_string();
+        } else if part.chars().next().is_some_and(char::is_uppercase) {
+            decoded.flags.extend(part.split('+').map(str::to_string));
+        } else {
+            decoded.emotions.extend(part.split('+').map(str::to_string));
+        }
+    }
+
+    // AAAK content lines may legitimately have zero entities (??? placeholder)
+    // and zero topics (misc) for degenerate input; just assert the split worked.
+    assert!(
+        parts.len() <= 10,
+        "decode_fill_content: content line must have at most 10 pipe-separated segments"
+    );
 }
 
 #[cfg(test)]
@@ -398,6 +544,105 @@ mod tests {
         assert!(
             result.len() <= 60,
             "truncated key sentence must not exceed ~55 chars plus ellipsis"
+        );
+    }
+
+    // ── count_tokens ─────────────────────────────────────────────────
+
+    #[test]
+    fn count_tokens_basic_word_count() {
+        // 10-word sentence: 10 * 1.3 = 13.0 → 13 tokens.
+        let tokens = Dialect::count_tokens("one two three four five six seven eight nine ten");
+        assert_eq!(tokens, 13, "10 words must yield 13 estimated tokens");
+        assert!(tokens > 0, "token count must be positive");
+    }
+
+    #[test]
+    fn count_tokens_single_word() {
+        // Minimum case: one word yields at least 1 token.
+        let tokens = Dialect::count_tokens("hello");
+        assert_eq!(tokens, 1, "one word must yield at least 1 token");
+        assert!(tokens > 0);
+    }
+
+    // ── decode ───────────────────────────────────────────────────────
+
+    #[test]
+    fn decode_roundtrip_with_metadata() {
+        // A compress/decode round-trip must recover wing, room, date, stem,
+        // and produce non-empty entities and topics.
+        let dialect = Dialect::empty();
+        let meta = CompressMetadata {
+            source_file: "docs/meeting.md",
+            wing: "projects",
+            room: "planning",
+            date: "2025-01-10",
+        };
+        let aaak = dialect.compress(
+            "Alice decided to switch from REST to GraphQL for better performance",
+            Some(&meta),
+        );
+        let decoded = Dialect::decode(&aaak);
+        assert_eq!(decoded.wing, "projects", "wing must round-trip");
+        assert_eq!(decoded.room, "planning", "room must round-trip");
+        assert_eq!(decoded.date, "2025-01-10", "date must round-trip");
+        assert_eq!(decoded.stem, "meeting", "stem must be the file stem");
+        assert!(!decoded.entities.is_empty() || !decoded.topics.is_empty());
+    }
+
+    #[test]
+    fn decode_roundtrip_without_metadata() {
+        // Without metadata there is no header line; entities/topics must still decode.
+        let dialect = Dialect::empty();
+        let aaak = dialect.compress(
+            "Bob discovered that the core api needs a security fix urgently",
+            None,
+        );
+        let decoded = Dialect::decode(&aaak);
+        assert!(decoded.wing.is_empty(), "no metadata means empty wing");
+        assert!(decoded.stem.is_empty(), "no metadata means empty stem");
+        assert!(!decoded.entities.is_empty() || !decoded.topics.is_empty());
+    }
+
+    #[test]
+    fn decode_emotions_and_flags_classified_separately() {
+        // Emotion codes (lowercase) and flag codes (uppercase) must land in
+        // the right fields after decode.
+        let dialect = Dialect::empty();
+        let aaak = dialect.compress(
+            "I was excited but decided for the first time to solve the core problem",
+            None,
+        );
+        let decoded = Dialect::decode(&aaak);
+        // Verify that any detected emotions are lowercase-coded.
+        for emotion in &decoded.emotions {
+            assert!(
+                emotion.chars().next().is_some_and(char::is_lowercase),
+                "emotion codes must be lowercase-leading: {emotion}"
+            );
+        }
+        // Verify that any detected flags are uppercase-coded.
+        for flag in &decoded.flags {
+            assert!(
+                flag.chars().next().is_some_and(char::is_uppercase),
+                "flag codes must be uppercase-leading: {flag}"
+            );
+        }
+    }
+
+    #[test]
+    fn decode_unknown_entities_returns_empty_vec() {
+        // "0:???" is the placeholder compress emits when no entities are detected.
+        // decode must map it to an empty entities vec; topics and flags still parse.
+        let aaak = "0:???|project_tech|DECISION";
+        let decoded = Dialect::decode(aaak);
+        assert!(
+            decoded.entities.is_empty(),
+            "??? placeholder must decode to empty entities vec"
+        );
+        assert!(
+            !decoded.topics.is_empty() || !decoded.flags.is_empty(),
+            "other fields must still decode from the content line"
         );
     }
 }

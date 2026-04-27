@@ -27,14 +27,68 @@ fn run_load_dialect(config_path: Option<&str>) -> Result<Dialect> {
     Ok(Dialect::new(&entities))
 }
 
-/// Compress one drawer row and persist or preview it. Returns `(original_len, compressed_len)`.
+/// Called by `run_compress_row` to print the dry-run preview for one drawer.
+///
+/// Decodes the AAAK text and shows entities, topics, quote, emotions, and flags
+/// alongside byte and token statistics. Limited to the first three drawers.
+fn run_compress_row_preview(
+    id: &str,
+    compressed: &str,
+    original_len: usize,
+    compressed_len: usize,
+    original_tokens: usize,
+    compressed_tokens: usize,
+    ratio: f64,
+) {
+    assert!(
+        !id.is_empty(),
+        "run_compress_row_preview: id must not be empty"
+    );
+    assert!(
+        !compressed.is_empty(),
+        "run_compress_row_preview: compressed must not be empty"
+    );
+
+    let decoded = Dialect::decode(compressed);
+    println!("--- Drawer {} ---", &id[..8.min(id.len())]);
+    println!("{compressed}");
+    if !decoded.wing.is_empty() {
+        println!(
+            "  Source: {}/{}/{}/{}",
+            decoded.wing, decoded.room, decoded.date, decoded.stem
+        );
+    }
+    if !decoded.entities.is_empty() {
+        println!("  Entities: {}", decoded.entities.join(", "));
+    }
+    if !decoded.topics.is_empty() {
+        println!("  Topics: {}", decoded.topics.join(", "));
+    }
+    if !decoded.quote.is_empty() {
+        println!("  Quote: {}", decoded.quote);
+    }
+    if !decoded.emotions.is_empty() {
+        println!("  Emotions: {}", decoded.emotions.join(", "));
+    }
+    if !decoded.flags.is_empty() {
+        println!("  Flags: {}", decoded.flags.join(", "));
+    }
+    println!(
+        "  ({original_len}B → {compressed_len}B, {original_tokens}→{compressed_tokens} tokens, {ratio:.1}x)\n"
+    );
+}
+
+/// Compress one drawer row and persist or preview it.
+///
+/// Returns `(original_bytes, compressed_bytes, original_tokens, compressed_tokens)`.
+/// Token counts are estimated via [`Dialect::count_tokens`] (1.3 tokens/word heuristic).
 async fn run_compress_row(
     connection: &Connection,
     row: &turso::Row,
     dialect: &Dialect,
     dry_run: bool,
     count: usize,
-) -> Result<(usize, usize)> {
+) -> Result<(usize, usize, usize, usize)> {
     let id: String = row.get(0)?;
     let content: String = row.get(1)?;
     let wing_val: String = row.get(2)?;
@@ -52,6 +106,16 @@ async fn run_compress_row(
     let compressed = dialect.compress(&content, Some(&meta));
     let original_len = content.len();
     let compressed_len = compressed.len();
+    let original_tokens = if content.is_empty() {
+        0
+    } else {
+        Dialect::count_tokens(&content)
+    };
+    let compressed_tokens = if compressed.is_empty() {
+        0
+    } else {
+        Dialect::count_tokens(&compressed)
+    };
     // Byte lengths for display-only ratio; precision loss negligible for practical sizes.
     #[allow(clippy::cast_precision_loss)]
     let ratio = if compressed_len > 0 {
@@ -62,9 +126,15 @@ async fn run_compress_row(
 
     if dry_run {
         if count <= 3 {
-            println!("--- Drawer {} ---", &id[..8.min(id.len())]);
-            println!("{compressed}");
-            println!("  ({original_len} → {compressed_len} bytes, {ratio:.1}x)\n");
+            run_compress_row_preview(
+                &id,
+                &compressed,
+                original_len,
+                compressed_len,
+                original_tokens,
+                compressed_tokens,
+                ratio,
+            );
         }
     } else {
         connection
@@ -77,7 +147,12 @@ async fn run_compress_row(
             .await?;
     }
 
-    Ok((original_len, compressed_len))
+    Ok((
+        original_len,
+        compressed_len,
+        original_tokens,
+        compressed_tokens,
+    ))
 }
 
 /// Run the compress command: compress drawers into AAAK dialect format.
@@ -111,11 +186,16 @@ pub async fn run(
 
     let mut original_total = 0usize;
     let mut compressed_total = 0usize;
+    let mut original_tokens_total = 0usize;
+    let mut compressed_tokens_total = 0usize;
 
     for (count, row) in rows.iter().enumerate() {
-        let (orig, comp) = run_compress_row(connection, row, &dialect, dry_run, count + 1).await?;
+        let (orig, comp, orig_tok, comp_tok) =
+            run_compress_row(connection, row, &dialect, dry_run, count + 1).await?;
         original_total += orig;
         compressed_total += comp;
+        original_tokens_total += orig_tok;
+        compressed_tokens_total += comp_tok;
     }
 
     let count = rows.len();
@@ -132,9 +212,15 @@ pub async fn run(
     } else {
         println!("Compressed {count} drawers into AAAK dialect");
     }
-    println!(
-        "  Total: {original_total} → {compressed_total} bytes ({overall_ratio:.1}x compression)"
-    );
+    println!("  Bytes: {original_total} → {compressed_total} ({overall_ratio:.1}x)");
+    if compressed_tokens_total > 0 {
+        // Token lengths for display; precision loss is negligible for display.
+        #[allow(clippy::cast_precision_loss)]
+        let token_ratio = original_tokens_total as f64 / compressed_tokens_total as f64;
+        println!(
+            "  Tokens (est.): {original_tokens_total} → {compressed_tokens_total} ({token_ratio:.1}x)"
+        );
+    }
 
     Ok(())
 }
@@ -234,9 +320,10 @@ mod async_tests {
         let row = rows.first().expect("must have at least one row");
 
         let dialect = Dialect::empty();
-        let (orig, comp) = run_compress_row(&connection, row, &dialect, true, 1)
-            .await
-            .expect("compress row must succeed");
+        let (orig, comp, _orig_tok, _comp_tok) =
+            run_compress_row(&connection, row, &dialect, true, 1)
+                .await
+                .expect("compress row must succeed");
         assert!(orig > 0, "original size must be positive");
         assert!(comp > 0, "compressed size must be positive");
     }
@@ -257,9 +344,10 @@ mod async_tests {
         let row = rows.first().expect("at least one row must exist");
 
         let dialect = Dialect::empty();
-        let (orig, comp) = run_compress_row(&connection, row, &dialect, false, 1)
-            .await
-            .expect("non-dry-run compress row must succeed");
+        let (orig, comp, _orig_tok, _comp_tok) =
+            run_compress_row(&connection, row, &dialect, false, 1)
+                .await
+                .expect("non-dry-run compress row must succeed");
         assert!(orig > 0, "original length must be positive");
         assert!(comp > 0, "compressed length must be positive");
 
