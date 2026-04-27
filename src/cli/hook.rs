@@ -469,13 +469,12 @@ fn hook_parse_message_line(line: &str) -> Option<String> {
         let content = msg.get("content")?;
         let text = if let Some(str_val) = content.as_str() {
             str_val.to_string()
-        } else if let Some(arr) = content.as_array() {
+        } else {
+            let arr = content.as_array()?;
             arr.iter()
                 .filter_map(|block| block.get("text").and_then(Value::as_str))
                 .collect::<Vec<_>>()
                 .join(" ")
-        } else {
-            return None;
         };
         if text.contains("<command-message>") || text.contains("<system-reminder>") {
             return None;
@@ -1418,9 +1417,12 @@ mod tests {
 
     #[test]
     fn hook_pid_alive_returns_false_for_large_nonexistent_pid() {
-        // PID u32::MAX is virtually guaranteed not to be alive.
-        let alive = hook_pid_alive(u32::MAX);
-        assert!(!alive, "PID u32::MAX must not be alive");
+        // Use 4_200_001: above Linux pid_max ceiling (4_194_304 = 2^22) so the
+        // PID cannot exist, yet safely below i32::MAX so it does not overflow
+        // pid_t and trigger the kill(2) special case where negative values (e.g.
+        // -1 from u32::MAX truncation) broadcast to all processes.
+        let alive = hook_pid_alive(4_200_001u32);
+        assert!(!alive, "PID 4_200_001 must not be alive");
     }
 
     // -------- run_with_json --------
