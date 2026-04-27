@@ -2,6 +2,7 @@ use turso::Connection;
 
 use crate::db;
 use crate::error::Result;
+use crate::palace::entity_registry::EntityRegistry;
 
 async fn run_print_wings(connection: &Connection) -> Result<()> {
     let rows = db::query_all(
@@ -108,8 +109,27 @@ pub async fn run(connection: &Connection) -> Result<()> {
     run_print_wings(connection).await?;
     run_print_rooms(connection).await?;
     run_print_kg(connection).await?;
+    run_print_entity_registry();
 
     Ok(())
+}
+
+/// Print entity registry summary: people, projects, ambiguous names, wiki cache count.
+fn run_print_entity_registry() {
+    let registry = EntityRegistry::load();
+    let summary = registry.summary();
+    assert!(
+        !summary.is_empty(),
+        "run_print_entity_registry: summary must not be empty"
+    );
+    assert!(
+        summary.contains("Mode:"),
+        "run_print_entity_registry: summary must contain Mode header"
+    );
+    println!("\nEntity Registry:");
+    for line in summary.lines() {
+        println!("  {line}");
+    }
 }
 
 #[cfg(test)]

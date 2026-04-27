@@ -362,6 +362,34 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
                 },
                 "required": ["text"]
             }
+        },
+        {
+            "name": "mempalace_research_entity",
+            "description": "Look up a word in the local entity registry and optionally query Wikipedia to classify it as a person, place, or concept. Local registry is always checked first; Wikipedia is only queried when allow_network is true.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "word": {"type": "string", "description": "Name or word to research"},
+                    "context": {"type": "string", "description": "Surrounding sentence — improves disambiguation for common-word names (optional)"},
+                    "allow_network": {"type": "boolean", "description": "Query Wikipedia when word is not in local registry (default false — local only)"},
+                    "auto_confirm": {"type": "boolean", "description": "Auto-confirm the Wikipedia result without a second call to mempalace_confirm_entity (default false)"}
+                },
+                "required": ["word"]
+            }
+        },
+        {
+            "name": "mempalace_confirm_entity",
+            "description": "Confirm a previously researched word as a specific entity type and optionally promote it to the people registry. Use after mempalace_research_entity returns an unconfirmed result.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "word": {"type": "string", "description": "Name or word to confirm"},
+                    "entity_type": {"type": "string", "description": "Entity class: person, place, concept, or unknown"},
+                    "relationship": {"type": "string", "description": "Relationship label for people (e.g. colleague, friend) — optional"},
+                    "context": {"type": "string", "description": "Context tag for people (e.g. work, personal) — optional"}
+                },
+                "required": ["word", "entity_type"]
+            }
         }
     ]).as_array()
         .expect("json!([...]) is always Value::Array; as_array() cannot return None here")
@@ -377,10 +405,10 @@ mod tests {
     #[test]
     fn tool_definitions_count() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 30, "expected 30 tool definitions");
+        assert_eq!(tools.len(), 32, "expected 32 tool definitions");
         // Verify the first and last tool names as a structural sanity check.
         assert_eq!(tools[0]["name"], "mempalace_status");
-        assert_eq!(tools[29]["name"], "mempalace_check_facts");
+        assert_eq!(tools[31]["name"], "mempalace_confirm_entity");
     }
 
     #[test]

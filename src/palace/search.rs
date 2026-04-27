@@ -6,6 +6,7 @@ use turso::Connection;
 
 use crate::db;
 use crate::error::Result;
+use crate::palace::entity_registry::EntityRegistry;
 
 /// BM25 saturation parameter: controls how quickly TF saturates (k1=1.5 is standard).
 const BM25_K1: f64 = 1.5;
@@ -66,6 +67,8 @@ pub async fn search_memories(
     if words.is_empty() {
         return Ok(vec![]);
     }
+    // Extend query tokens with canonical forms of any known person names in the query.
+    let words = search_memories_enrich_with_people(words, query);
 
     let n_candidates = n_results.saturating_mul(BM25_OVERFETCH).max(n_results);
     let candidates =
@@ -535,6 +538,41 @@ fn tokenize_query(query: &str) -> Vec<String> {
         .map(str::to_lowercase)
         .filter(|token| !crate::palace::drawer::is_stop_word(token))
         .collect()
+}
+
+/// Extend `words` with tokens derived from known person names found in `query`.
+///
+/// Loads the entity registry on every call; the file is small so the overhead is
+/// negligible compared to the subsequent database round-trips. Called by
+/// [`search_memories`] after initial tokenisation to improve recall for queries
+/// that reference known people by name (e.g. "What did Alice say about Rust?").
+fn search_memories_enrich_with_people(mut words: Vec<String>, query: &str) -> Vec<String> {
+    assert!(
+        !words.is_empty(),
+        "search_memories_enrich_with_people: words must not be empty"
+    );
+    assert!(
+        !query.is_empty(),
+        "search_memories_enrich_with_people: query must not be empty"
+    );
+
+    let registry = EntityRegistry::load();
+    let people = registry.extract_people_from_query(query);
+
+    for name in people {
+        for token in tokenize_query(&name) {
+            if !words.contains(&token) {
+                words.push(token);
+            }
+        }
+    }
+
+    // Result must be at least as large as the original word list.
+    assert!(
+        !words.is_empty(),
+        "search_memories_enrich_with_people: result must not be empty"
+    );
+    words
 }
 
 #[cfg(test)]

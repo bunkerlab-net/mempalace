@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use crate::db::query_all;
 use crate::kg;
+use crate::palace::entity_registry::EntityRegistry;
 use crate::palace::{drawer, fact_checker, graph, query_sanitizer, search};
 
 use super::protocol::{AAAK_SPEC, PALACE_PROTOCOL};
@@ -69,6 +70,8 @@ pub async fn dispatch(connection: &Connection, name: &str, args: &Value) -> Valu
         "mempalace_memories_filed_away" => tool_memories_filed_away(),
         "mempalace_reconnect" => tool_reconnect(connection).await,
         "mempalace_check_facts" => tool_check_facts(connection, args).await,
+        "mempalace_research_entity" => tool_research_entity(args),
+        "mempalace_confirm_entity" => tool_confirm_entity(args),
         _ => json!({"error": format!("Unknown tool: {name}"), "public": true}),
     }
 }
@@ -1694,6 +1697,87 @@ async fn tool_check_facts(connection: &Connection, args: &Value) -> Value {
             assert!(issues.iter().all(|i| !i.issue_type.is_empty()));
             json!({"issues": issues, "clean": is_clean})
         }
+        Err(error) => json!({"error": error.to_string()}),
+    }
+}
+
+/// Look up a word in the entity registry; optionally research it via Wikipedia.
+///
+/// Checks the local registry first via [`EntityRegistry::lookup`]. Only queries
+/// Wikipedia when `allow_network = true` (privacy-by-architecture).
+fn tool_research_entity(args: &Value) -> Value {
+    let word = str_arg(args, "word");
+    if word.is_empty() {
+        return json!({"error": "word argument is required", "public": true});
+    }
+    assert!(!word.is_empty(), "tool_research_entity: word guard passed");
+    let allow_network = args
+        .get("allow_network")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let auto_confirm = args
+        .get("auto_confirm")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let context = str_arg(args, "context");
+
+    let mut registry = EntityRegistry::load();
+
+    // Check local registry first — fast path with context disambiguation.
+    let local = registry.lookup(word, context);
+    if local.entity_type != "unknown" {
+        assert!(!local.entity_type.is_empty());
+        return json!({
+            "word": local.name,
+            "inferred_type": local.entity_type,
+            "confidence": local.confidence,
+            "source": local.source,
+            "contexts": local.contexts,
+            "needs_disambiguation": local.needs_disambiguation,
+            "disambiguated_by": local.disambiguated_by,
+            "confirmed": true,
+            "note": "found in local registry"
+        });
+    }
+
+    let entry = registry.research(word, auto_confirm, allow_network);
+    assert!(!entry.inferred_type.is_empty());
+    json!({
+        "word": word,
+        "inferred_type": entry.inferred_type,
+        "confidence": entry.confidence,
+        "confirmed": entry.confirmed,
+        "wiki_summary": entry.wiki_summary,
+        "wiki_title": entry.wiki_title,
+        "note": entry.note,
+    })
+}
+
+/// Confirm a previously researched word as a specific entity type.
+///
+/// When `entity_type` is `"person"`, the word is added to the people registry
+/// with `CONFIDENCE_WIKI` confidence, making it available for future lookups.
+fn tool_confirm_entity(args: &Value) -> Value {
+    let word = str_arg(args, "word");
+    if word.is_empty() {
+        return json!({"error": "word argument is required", "public": true});
+    }
+    let entity_type = str_arg(args, "entity_type");
+    if entity_type.is_empty() {
+        return json!({"error": "entity_type argument is required", "public": true});
+    }
+    assert!(!word.is_empty(), "tool_confirm_entity: word guard passed");
+    assert!(
+        !entity_type.is_empty(),
+        "tool_confirm_entity: entity_type guard passed"
+    );
+
+    let relationship = str_arg(args, "relationship");
+    let context = str_arg(args, "context");
+
+    let mut registry = EntityRegistry::load();
+    match registry.confirm_research(word, entity_type, relationship, context) {
+        Ok(()) => json!({"success": true, "word": word, "entity_type": entity_type}),
         Err(error) => json!({"error": error.to_string()}),
     }
 }
@@ -3463,5 +3547,127 @@ mod tests {
                 .unwrap_or(false),
             "error must be public"
         );
+    }
+
+    // --- tool_research_entity ---
+
+    #[test]
+    fn research_entity_empty_word_returns_error() {
+        // Empty word must produce a public error, not a panic.
+        let temp = tempfile::tempdir().expect("tempdir");
+        temp_env::with_var("MEMPALACE_DIR", Some(temp.path()), || {
+            let result = tool_research_entity(&json!({}));
+            assert!(
+                result.get("error").is_some(),
+                "must return error for empty word"
+            );
+            assert_eq!(
+                result["public"], true,
+                "error must be public for empty word"
+            );
+        });
+    }
+
+    #[test]
+    fn research_entity_unknown_word_no_network_returns_unknown() {
+        // Without network access a word absent from the registry must return inferred_type "unknown".
+        let temp = tempfile::tempdir().expect("tempdir");
+        temp_env::with_var("MEMPALACE_DIR", Some(temp.path()), || {
+            let result = tool_research_entity(&json!({"word": "Xyzzy"}));
+            assert!(
+                result.get("error").is_none(),
+                "must not error for valid word"
+            );
+            assert_eq!(
+                result["inferred_type"], "unknown",
+                "unknown word with no network must return unknown type"
+            );
+            assert_eq!(result["confirmed"], false);
+        });
+    }
+
+    #[test]
+    fn research_entity_known_word_returns_local_result() {
+        // A word already in the entity registry must be returned from the local path.
+        let temp = tempfile::tempdir().expect("tempdir");
+        temp_env::with_var("MEMPALACE_DIR", Some(temp.path()), || {
+            // Seed the registry with a known person.
+            let mut registry = EntityRegistry::load();
+            registry
+                .seed(
+                    "personal",
+                    &[crate::palace::entity_registry::SeedPerson {
+                        name: "Jordan".to_string(),
+                        relationship: "friend".to_string(),
+                        context: "personal".to_string(),
+                        nickname: None,
+                    }],
+                    &[],
+                )
+                .expect("seed must succeed");
+
+            let result = tool_research_entity(&json!({"word": "Jordan"}));
+            assert!(
+                result.get("error").is_none(),
+                "must not error for known word"
+            );
+            assert_eq!(
+                result["inferred_type"], "person",
+                "Jordan must resolve as person"
+            );
+            assert_eq!(result["confirmed"], true, "local result must be confirmed");
+        });
+    }
+
+    // --- tool_confirm_entity ---
+
+    #[test]
+    fn confirm_entity_empty_word_returns_error() {
+        // Empty word must produce a public error.
+        let temp = tempfile::tempdir().expect("tempdir");
+        temp_env::with_var("MEMPALACE_DIR", Some(temp.path()), || {
+            let result = tool_confirm_entity(&json!({"entity_type": "person"}));
+            assert!(
+                result.get("error").is_some(),
+                "must return error for empty word"
+            );
+            assert_eq!(result["public"], true, "error must be public");
+        });
+    }
+
+    #[test]
+    fn confirm_entity_empty_entity_type_returns_error() {
+        // Missing entity_type must produce a public error.
+        let temp = tempfile::tempdir().expect("tempdir");
+        temp_env::with_var("MEMPALACE_DIR", Some(temp.path()), || {
+            let result = tool_confirm_entity(&json!({"word": "Sam"}));
+            assert!(
+                result.get("error").is_some(),
+                "must return error for empty entity_type"
+            );
+            assert_eq!(result["public"], true, "error must be public");
+        });
+    }
+
+    #[test]
+    fn confirm_entity_person_returns_success() {
+        // Confirming a word as person must succeed and report the confirmed type.
+        let temp = tempfile::tempdir().expect("tempdir");
+        temp_env::with_var("MEMPALACE_DIR", Some(temp.path()), || {
+            let result = tool_confirm_entity(&json!({
+                "word": "Sam",
+                "entity_type": "person",
+                "relationship": "colleague"
+            }));
+            assert!(
+                result.get("error").is_none(),
+                "valid confirm must not error"
+            );
+            assert_eq!(result["success"], true, "valid confirm must report success");
+            assert_eq!(
+                result["entity_type"], "person",
+                "entity_type must match input"
+            );
+        });
     }
 }
