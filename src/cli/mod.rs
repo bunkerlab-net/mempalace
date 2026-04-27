@@ -1,6 +1,7 @@
 //! CLI command definitions and handlers for the `mempalace` binary.
 
 pub mod compress;
+pub mod export;
 pub mod hook;
 pub mod init;
 pub mod instructions;
@@ -192,6 +193,21 @@ pub enum Command {
 
     /// Run as MCP server (JSON-RPC over stdio)
     Mcp,
+
+    /// Export palace drawers to markdown files on disk
+    Export {
+        /// Output directory (default: ./palace-export)
+        #[arg(long, default_value = "palace-export")]
+        output: std::path::PathBuf,
+
+        /// Filter by wing
+        #[arg(long)]
+        wing: Option<String>,
+
+        /// Preview what would be exported without writing files
+        #[arg(long)]
+        dry_run: bool,
+    },
 
     /// Print packaged skill instructions for a named `MemPalace` command
     Instructions {

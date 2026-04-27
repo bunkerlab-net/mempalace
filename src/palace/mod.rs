@@ -11,6 +11,7 @@ pub mod entities;
 pub mod entity_confirm;
 #[cfg(test)]
 pub mod entity_detect;
+pub mod exporter;
 pub mod graph;
 pub mod known_entities;
 pub mod layers;

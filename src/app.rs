@@ -124,6 +124,14 @@ pub async fn run(cli: Cli) -> error::Result<()> {
             run_mcp().await?;
         }
 
+        Command::Export {
+            output,
+            wing,
+            dry_run,
+        } => {
+            run_export(output, wing, dry_run).await?;
+        }
+
         Command::Instructions { name } => {
             cli::instructions::run(&name)?;
         }
@@ -249,6 +257,17 @@ async fn run_sweep(target: std::path::PathBuf, wing: String) -> error::Result<()
     let target = expand_tilde(&target);
     let (_db, connection, _path) = open_palace().await?;
     cli::sweep::run(&connection, &target, &wing).await
+}
+
+/// Handle the `export` sub-command — exports palace drawers to markdown files.
+async fn run_export(
+    output: std::path::PathBuf,
+    wing: Option<String>,
+    dry_run: bool,
+) -> error::Result<()> {
+    let output = expand_tilde(&output);
+    let (_db, connection, _path) = open_palace().await?;
+    cli::export::run(&connection, &output, wing.as_deref(), dry_run).await
 }
 
 /// Handle the `mine` sub-command — delegates to the correct miner by mode.
