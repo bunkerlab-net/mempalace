@@ -12,6 +12,7 @@ use crate::config::config_dir;
 use crate::error::Result;
 use crate::palace::entities::DetectedEntity;
 use crate::palace::entity_detect::{detect_entities, scan_for_detection};
+use crate::palace::entity_registry::{EntityRegistry, SeedPerson as RegistrySeedPerson};
 use crate::palace::known_entities::add_to_known_entities;
 
 /// Maximum people that can be added in a single onboarding session.
@@ -129,6 +130,7 @@ pub fn run(directory: &Path) -> Result<()> {
     }
 
     let registry_path = onboarding_seed_registry(&all_people, &projects)?;
+    onboarding_seed_entity_registry(&all_people, &projects, &mode)?;
     onboarding_generate_aaak_bootstrap(&all_people, &projects, &wings, &mode)?;
 
     let config = config_dir();
@@ -472,6 +474,52 @@ fn onboarding_seed_registry(
         "non-empty people must populate registry"
     );
     add_to_known_entities(&by_category)
+}
+
+/// Seed the structured `EntityRegistry` (`entity_registry.json`) from onboarding data.
+///
+/// Converts `PersonEntry` slices into [`RegistrySeedPerson`] records and calls
+/// [`EntityRegistry::seed`], which persists the richer per-entity metadata
+/// (source, contexts, relationship, confidence) alongside the flat name list
+/// already written by [`onboarding_seed_registry`].
+fn onboarding_seed_entity_registry(
+    people: &[PersonEntry],
+    projects: &[String],
+    mode: &str,
+) -> Result<()> {
+    assert!(
+        !mode.is_empty(),
+        "onboarding_seed_entity_registry: mode must not be empty"
+    );
+    assert!(
+        people.len() <= PEOPLE_LIMIT,
+        "onboarding_seed_entity_registry: people count exceeds limit"
+    );
+
+    let seed_people: Vec<RegistrySeedPerson> = people
+        .iter()
+        .filter(|person| !person.name.trim().is_empty())
+        .map(|person| RegistrySeedPerson {
+            name: person.name.clone(),
+            relationship: person.relationship.clone(),
+            context: person.context.clone(),
+            nickname: if person.nickname.is_empty() {
+                None
+            } else {
+                Some(person.nickname.clone())
+            },
+        })
+        .collect();
+
+    let mut registry = EntityRegistry::load();
+    registry.seed(mode, &seed_people, projects)?;
+
+    // Pair assertion: converted list is a subset of the input (filter can only shrink it).
+    debug_assert!(
+        seed_people.len() <= people.len(),
+        "onboarding_seed_entity_registry: seed_people must be a subset of input people"
+    );
+    Ok(())
 }
 
 /// Generate AAAK entity codes for each person: first 3 letters uppercase.

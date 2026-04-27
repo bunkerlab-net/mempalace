@@ -13,6 +13,7 @@ pub mod drawer;
 pub mod entities;
 pub mod entity_confirm;
 pub mod entity_detect;
+pub mod entity_registry;
 pub mod exporter;
 pub mod fact_checker;
 pub mod graph;
