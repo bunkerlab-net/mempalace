@@ -2,7 +2,7 @@
 #![allow(clippy::expect_used)]
 
 use mempalace::kg::query::{query_entity, stats, timeline};
-use mempalace::kg::{TripleParams, add_entity, add_triple, invalidate};
+use mempalace::kg::{TripleParams, add_triple, invalidate};
 use mempalace::test_helpers::test_db;
 
 /// Add entities, create a triple, then query from both sides to verify
@@ -10,13 +10,6 @@ use mempalace::test_helpers::test_db;
 #[tokio::test]
 async fn entity_triple_query_lifecycle() {
     let (_db, connection) = test_db().await;
-
-    add_entity(&connection, "Alice", "person", None)
-        .await
-        .expect("add_entity Alice should succeed");
-    add_entity(&connection, "Bob", "person", None)
-        .await
-        .expect("add_entity Bob should succeed");
 
     add_triple(
         &connection,
@@ -120,13 +113,7 @@ async fn stats_reflect_operations() {
     assert_eq!(stats_empty.entities, 0, "fresh DB should have 0 entities");
     assert_eq!(stats_empty.triples, 0, "fresh DB should have 0 triples");
 
-    // Add entities and a triple.
-    add_entity(&connection, "Dave", "person", None)
-        .await
-        .expect("add_entity Dave should succeed");
-    add_entity(&connection, "Eve", "person", None)
-        .await
-        .expect("add_entity Eve should succeed");
+    // Add a triple; add_triple creates entities automatically.
     add_triple(
         &connection,
         &TripleParams {
@@ -182,13 +169,6 @@ async fn stats_reflect_operations() {
 #[tokio::test]
 async fn multiple_triples_same_entities() {
     let (_db, connection) = test_db().await;
-
-    add_entity(&connection, "Frank", "person", None)
-        .await
-        .expect("add_entity Frank should succeed");
-    add_entity(&connection, "Grace", "person", None)
-        .await
-        .expect("add_entity Grace should succeed");
 
     // Add three distinct relationships between the same pair.
     for predicate in &["knows", "works with", "mentors"] {

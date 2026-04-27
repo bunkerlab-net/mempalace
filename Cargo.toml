@@ -10,13 +10,14 @@ categories = ["command-line-utilities", "database"]
 rust-version = "1.88"
 
 [lints.rust]
+dead_code = "deny"
 unsafe_code = "deny"
 warnings = "deny"
 
 [lints.clippy]
 enum_glob_use = "deny"
 expect_used = "deny"
-pedantic = { level = "deny", priority = -1 }
+pedantic = "deny"
 unwrap_used = "deny"
 
 [dependencies]
@@ -40,7 +41,6 @@ serde = { version = "1", default-features = false, features = [
 serde_json = { version = "1", default-features = false, features = ["std"] }
 serde_yaml = { version = "0.9", default-features = false }
 sha2 = { version = "0.11", default-features = false }
-tempfile = "3"
 thiserror = { version = "2", default-features = false, features = ["std"] }
 tokio = { version = "1", default-features = false, features = [
   "rt-multi-thread",
@@ -61,3 +61,4 @@ uuid = { version = "1", default-features = false, features = ["v4"] }
 
 [dev-dependencies]
 temp-env = { version = "0.3", features = ["async_closure"] }
+tempfile = "3"

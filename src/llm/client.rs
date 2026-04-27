@@ -42,14 +42,6 @@ const _: () = assert!(CHECK_TIMEOUT_SECS > 0);
 pub struct LlmResponse {
     /// The raw text returned by the model (typically JSON for entity refinement).
     pub text: String,
-    /// Model identifier reported by or passed to the provider.
-    // Read by callers that log or display the model used; currently only `text` is consumed.
-    #[allow(dead_code)]
-    pub model: String,
-    /// Short provider name (e.g. `"ollama"`, `"anthropic"`).
-    // Read by callers that log or display the provider used; currently only `text` is consumed.
-    #[allow(dead_code)]
-    pub provider: String,
 }
 
 /// Common interface for all LLM providers.
@@ -170,11 +162,7 @@ impl LlmProvider for OllamaProvider {
                 self.model
             )));
         }
-        Ok(LlmResponse {
-            text,
-            model: self.model.clone(),
-            provider: self.name().to_string(),
-        })
+        Ok(LlmResponse { text })
     }
 }
 
@@ -311,11 +299,7 @@ impl LlmProvider for OpenAICompatProvider {
                 self.model
             )));
         }
-        Ok(LlmResponse {
-            text,
-            model: self.model.clone(),
-            provider: self.name().to_string(),
-        })
+        Ok(LlmResponse { text })
     }
 }
 
@@ -414,11 +398,7 @@ impl LlmProvider for AnthropicProvider {
                 self.model
             )));
         }
-        Ok(LlmResponse {
-            text,
-            model: self.model.clone(),
-            provider: self.name().to_string(),
-        })
+        Ok(LlmResponse { text })
     }
 }
 
@@ -942,7 +922,6 @@ mod tests {
             .classify("system prompt", "user prompt", false)
             .expect("must succeed with mock server");
         assert_eq!(result.text, "classified!");
-        assert_eq!(result.model, "gemma3:4b");
     }
 
     #[test]
@@ -1034,7 +1013,6 @@ mod tests {
             .classify("system prompt", "user prompt", false)
             .expect("must succeed with mock server");
         assert_eq!(result.text, "classified!");
-        assert_eq!(result.model, "gpt-4o");
     }
 
     #[test]
@@ -1099,7 +1077,6 @@ mod tests {
             .classify("system prompt", "user prompt", false)
             .expect("must succeed with mock server");
         assert_eq!(result.text, "classified!");
-        assert_eq!(result.model, "claude-haiku-4-5-20251001");
     }
 
     #[test]

@@ -74,10 +74,6 @@ pub struct RefineResult {
     pub batches_completed: usize,
     /// Total batch count (`batches_completed + errors`).
     pub batches_total: usize,
-    /// Always `false` — Ctrl-C handling is deferred to a future version.
-    // Reserved for future Ctrl-C support; currently always `false` and not read by callers.
-    #[allow(dead_code)]
-    pub cancelled: bool,
 }
 
 // ===================== PUBLIC API =====================
@@ -121,7 +117,6 @@ pub fn refine_entities(
         errors,
         batches_completed,
         batches_total,
-        cancelled: false,
     }
 }
 
@@ -796,8 +791,6 @@ mod tests {
         ) -> crate::error::Result<crate::llm::client::LlmResponse> {
             Ok(crate::llm::client::LlmResponse {
                 text: self.response.clone(),
-                model: "mock".to_string(),
-                provider: "mock".to_string(),
             })
         }
         fn check_available(&self) -> (bool, String) {
@@ -842,7 +835,6 @@ mod tests {
         assert_eq!(result.batches_total, 0);
         assert_eq!(result.batches_completed, 0);
         assert_eq!(result.errors, 0);
-        assert!(!result.cancelled);
     }
 
     #[test]

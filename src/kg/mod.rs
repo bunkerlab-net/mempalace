@@ -344,10 +344,7 @@ mod async_tests {
 }
 
 /// Add or update an entity node.
-// Used by integration tests in `tests/kg_workflow.rs`; the binary never calls it.
-// `#[cfg(test)]` would hide it from integration tests (which build the non-test lib),
-// so `#[allow(dead_code)]` is the correct suppression here.
-#[allow(dead_code)]
+#[cfg(test)]
 pub async fn add_entity(
     connection: &Connection,
     name: &str,
