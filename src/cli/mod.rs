@@ -27,6 +27,10 @@ use clap::{Parser, Subcommand};
     about = "A memory palace for AI assistants"
 )]
 pub struct Cli {
+    /// Path to the palace database file (overrides `MEMPALACE_PALACE_PATH` and config)
+    #[arg(long, global = true)]
+    pub palace: Option<PathBuf>,
+
     #[command(subcommand)]
     pub command: Command,
 }

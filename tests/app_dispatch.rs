@@ -19,6 +19,7 @@ async fn app_run_init_creates_config_with_yes_flag() {
         tempfile::tempdir().expect("failed to create temporary directory for init test");
 
     let cli_instance = Cli {
+        palace: None,
         command: Command::Init {
             directory: temp_directory.path().to_path_buf(),
             yes: true,
@@ -62,6 +63,7 @@ async fn app_run_split_with_no_mega_files_returns_ok() {
     .expect("failed to write single-session test file");
 
     let cli_instance = Cli {
+        palace: None,
         command: Command::Split {
             directory: temp_directory.path().to_path_buf(),
             output_dir: None,
@@ -94,6 +96,7 @@ async fn app_run_status_with_no_palace_returns_ok() {
         .to_string();
 
     let cli_instance = Cli {
+        palace: None,
         command: Command::Status,
     };
 
@@ -134,6 +137,7 @@ async fn app_run_mine_with_projects_mode_and_db() {
     .expect("failed to write mempalace.yaml for mine test");
 
     let cli_instance = Cli {
+        palace: None,
         command: Command::Mine {
             directory: temp_directory.path().to_path_buf(),
             mode: "projects".to_string(),
@@ -191,6 +195,7 @@ async fn app_run_mine_with_convos_mode_and_db() {
     .expect("failed to write test conversation file");
 
     let cli_instance = Cli {
+        palace: None,
         command: Command::Mine {
             directory: temp_directory.path().to_path_buf(),
             mode: "convos".to_string(),
@@ -240,6 +245,7 @@ async fn app_run_search_with_palace() {
         .to_string();
 
     let cli_instance = Cli {
+        palace: None,
         command: Command::Search {
             query: "test query".to_string(),
             wing: None,
@@ -285,6 +291,7 @@ async fn app_run_wakeup_with_palace() {
         .to_string();
 
     let cli_instance = Cli {
+        palace: None,
         command: Command::WakeUp {
             wing: None,
             room: None,
@@ -331,6 +338,7 @@ async fn app_run_wakeup_with_wing_exercises_l2_recall() {
         .to_string();
 
     let cli_instance = Cli {
+        palace: None,
         command: Command::WakeUp {
             wing: Some("test_wing".to_string()),
             room: None,
@@ -376,6 +384,7 @@ async fn app_run_wakeup_with_query_exercises_l3_search() {
         .to_string();
 
     let cli_instance = Cli {
+        palace: None,
         command: Command::WakeUp {
             wing: None,
             room: None,
@@ -421,6 +430,7 @@ async fn app_run_compress_with_palace() {
         .to_string();
 
     let cli_instance = Cli {
+        palace: None,
         command: Command::Compress {
             wing: None,
             dry_run: true,
@@ -480,6 +490,7 @@ async fn app_run_repair_with_palace() {
     }
 
     let cli_instance = Cli {
+        palace: None,
         command: Command::Repair,
     };
 
