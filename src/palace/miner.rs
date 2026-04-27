@@ -554,11 +554,121 @@ pub async fn mine(connection: &Connection, project_dir: &Path, opts: &MineParams
     Ok(())
 }
 
+/// RAII guard that holds a mine lockfile.
+///
+/// Created by [`acquire_mine_lock`]; automatically removes the lockfile when
+/// dropped so the next mine operation can proceed.
+pub struct MineGuard {
+    lock_path: PathBuf,
+}
+
+impl Drop for MineGuard {
+    fn drop(&mut self) {
+        assert!(
+            !self.lock_path.as_os_str().is_empty(),
+            "MineGuard::drop: lock_path must not be empty"
+        );
+        // Best-effort removal — don't panic on IO failure so Drop stays safe.
+        if let Err(error) = std::fs::remove_file(&self.lock_path) {
+            eprintln!(
+                "mine_lock: failed to remove lock file {}: {error}",
+                self.lock_path.display()
+            );
+        }
+    }
+}
+
+/// Acquire an exclusive mine lock in `lock_dir`.
+///
+/// Creates `lock_dir/mine.lock` atomically via `O_CREAT|O_EXCL` semantics.
+/// Returns `Err` immediately if the file already exists (another mine is
+/// running) or if creation fails for any other reason. The caller must keep
+/// the returned [`MineGuard`] alive for the duration of the mine operation —
+/// dropping it deletes the lockfile.
+pub fn acquire_mine_lock(lock_dir: &Path) -> Result<MineGuard> {
+    assert!(
+        lock_dir.is_dir(),
+        "acquire_mine_lock: lock_dir must be an existing directory"
+    );
+    let lock_path = lock_dir.join("mine.lock");
+    assert!(
+        !lock_path.as_os_str().is_empty(),
+        "acquire_mine_lock: lock_path must not be empty"
+    );
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lock_path)
+    {
+        Ok(_file) => {
+            assert!(
+                lock_path.exists(),
+                "acquire_mine_lock: lock file must exist after creation"
+            );
+            Ok(MineGuard { lock_path })
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(crate::error::Error::Other(
+                "a mine operation is already running for this palace; \
+                 if no mine is running, delete mine.lock and retry"
+                    .to_string(),
+            ))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 #[cfg(test)]
 // Acceptable in tests: .expect() produces immediate, clear failures.
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+
+    // --- acquire_mine_lock ---
+
+    #[test]
+    fn acquire_mine_lock_creates_and_cleans_up_lockfile() {
+        // acquire_mine_lock must create the lockfile on acquire and delete it on drop.
+        let temp_directory = tempfile::tempdir().expect("tempdir must succeed");
+        let lock_path = temp_directory.path().join("mine.lock");
+
+        {
+            let guard = acquire_mine_lock(temp_directory.path())
+                .expect("acquire_mine_lock must succeed on a clean directory");
+            // Positive space: lockfile must exist while the guard is held.
+            assert!(
+                lock_path.exists(),
+                "mine.lock must exist while guard is held"
+            );
+            drop(guard);
+        }
+
+        // Negative space: lockfile must be gone after the guard is dropped.
+        assert!(
+            !lock_path.exists(),
+            "mine.lock must be removed when MineGuard is dropped"
+        );
+    }
+
+    #[test]
+    fn acquire_mine_lock_second_acquire_returns_error() {
+        // A second acquire while the first guard is held must return Err.
+        let temp_directory = tempfile::tempdir().expect("tempdir must succeed");
+        let _guard =
+            acquire_mine_lock(temp_directory.path()).expect("first acquire_mine_lock must succeed");
+
+        let second = acquire_mine_lock(temp_directory.path());
+        assert!(
+            second.is_err(),
+            "second acquire_mine_lock must fail while first guard is held"
+        );
+        assert!(
+            second
+                .err()
+                .is_some_and(|e| e.to_string().contains("already running")),
+            "error message must mention 'already running'"
+        );
+    }
 
     #[test]
     fn scan_project_finds_text_files() {
