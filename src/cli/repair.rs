@@ -6,7 +6,6 @@ use turso::Connection;
 
 use crate::db::query_all;
 use crate::error::Result;
-use crate::palace::drawer;
 
 /// Backup the palace database, scan for inconsistencies, and rebuild the inverted word index.
 pub async fn run(connection: &Connection, palace_path: &Path) -> Result<()> {
@@ -96,52 +95,18 @@ async fn run_create_backup(connection: &Connection, palace_path: &Path) -> Resul
     Ok(())
 }
 
-/// Clear and rebuild the inverted word index within a transaction.
+/// Clear and rebuild the inverted word index via the palace library.
 ///
-/// BEGIN IMMEDIATE is taken before the SELECT so the snapshot is protected
-/// by the same exclusive lock that performs the delete and rebuild.
+/// Delegates the transaction and index work to `palace::repair::rebuild_index`,
+/// which wraps everything in a `BEGIN IMMEDIATE` transaction. The CLI layer adds
+/// the completion message.
 async fn run_rebuild_index(connection: &Connection) -> Result<()> {
-    connection.execute("BEGIN IMMEDIATE", ()).await?;
-
-    if let Err(e) = async {
-        let rows = query_all(connection, "SELECT id, content FROM drawers", ()).await?;
-        let total = rows.len();
-        println!("Found {total} drawers to re-index");
-
-        // Collect id+content before clearing index (borrow lifetime).
-        // Propagate column errors rather than silently producing empty IDs.
-        let drawers: Vec<(String, String)> = rows
-            .iter()
-            .map(|row| -> Result<(String, String)> {
-                let id: String = row.get(0)?;
-                let content: String = row.get(1)?;
-                Ok((id, content))
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        connection.execute("DELETE FROM drawer_words", ()).await?;
-        println!("Cleared existing index");
-
-        // Rebuild.
-        for (i, (id, content)) in drawers.iter().enumerate() {
-            drawer::index_words(connection, id, content).await?;
-            if (i + 1) % 100 == 0 || i + 1 == total {
-                println!("  [{}/{}] re-indexed", i + 1, total);
-            }
-        }
-        println!("\nRepair complete: {total} drawers re-indexed");
-        Ok::<(), crate::error::Error>(())
-    }
-    .await
-    {
-        // Attempt rollback and preserve the original error.
-        if let Err(rollback_err) = connection.execute("ROLLBACK", ()).await {
-            eprintln!("Rollback failed: {rollback_err}");
-        }
-        return Err(e);
-    }
-
-    connection.execute("COMMIT", ()).await?;
+    let total = crate::palace::repair::rebuild_index(connection).await?;
+    assert!(
+        total < usize::MAX,
+        "run_rebuild_index: reindexed count must be within usize range"
+    );
+    println!("\nRepair complete: {total} drawers re-indexed");
     Ok(())
 }
 

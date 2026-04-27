@@ -1,102 +1,15 @@
 use turso::Connection;
 
-use crate::db;
 use crate::error::Result;
 use crate::palace::entity_registry::EntityRegistry;
+use crate::palace::stats::query_stats;
 
-async fn run_print_wings(connection: &Connection) -> Result<()> {
-    let rows = db::query_all(
-        connection,
-        "SELECT wing, COUNT(*) as cnt FROM drawers GROUP BY wing ORDER BY cnt DESC",
-        (),
-    )
-    .await?;
-
-    println!("Wings:");
-    for row in &rows {
-        let wing = row
-            .get_value(0)
-            .ok()
-            .and_then(|cell| cell.as_text().cloned())
-            .unwrap_or_default();
-        let count = row
-            .get_value(1)
-            .ok()
-            .and_then(|cell| cell.as_integer().copied())
-            .unwrap_or(0);
-        println!("  {wing}: {count} drawers");
-    }
-    Ok(())
-}
-
-async fn run_print_rooms(connection: &Connection) -> Result<()> {
-    let rows = db::query_all(
-        connection,
-        "SELECT wing, room, COUNT(*) as cnt FROM drawers GROUP BY wing, room ORDER BY wing, cnt DESC",
-        (),
-    )
-    .await?;
-
-    println!("\nRooms:");
-    let mut wing_current = String::new();
-    for row in &rows {
-        let wing = row
-            .get_value(0)
-            .ok()
-            .and_then(|cell| cell.as_text().cloned())
-            .unwrap_or_default();
-        let room = row
-            .get_value(1)
-            .ok()
-            .and_then(|cell| cell.as_text().cloned())
-            .unwrap_or_default();
-        let count = row
-            .get_value(2)
-            .ok()
-            .and_then(|cell| cell.as_integer().copied())
-            .unwrap_or(0);
-
-        if wing != wing_current {
-            println!("  [{wing}]");
-            wing_current = wing;
-        }
-        println!("    {room}: {count}");
-    }
-    Ok(())
-}
-
-async fn run_print_kg(connection: &Connection) -> Result<()> {
-    let entity_rows = db::query_all(connection, "SELECT COUNT(*) FROM entities", ()).await?;
-    let entity_count: i64 = entity_rows
-        .first()
-        .and_then(|row| row.get_value(0).ok())
-        .and_then(|cell| cell.as_integer().copied())
-        .unwrap_or(0);
-
-    let triple_rows = db::query_all(connection, "SELECT COUNT(*) FROM triples", ()).await?;
-    let triple_count: i64 = triple_rows
-        .first()
-        .and_then(|row| row.get_value(0).ok())
-        .and_then(|cell| cell.as_integer().copied())
-        .unwrap_or(0);
-
-    if entity_count > 0 || triple_count > 0 {
-        println!("\nKnowledge Graph:");
-        println!("  Entities: {entity_count}");
-        println!("  Triples: {triple_count}");
-    }
-    Ok(())
-}
-
+/// Print palace statistics: total drawers, per-wing and per-room counts, KG summary,
+/// and entity registry summary.
 pub async fn run(connection: &Connection) -> Result<()> {
-    let rows = db::query_all(connection, "SELECT COUNT(*) FROM drawers", ()).await?;
-    let total: i64 = rows
-        .first()
-        .and_then(|row| row.get_value(0).ok())
-        .and_then(|cell| cell.as_integer().copied())
-        .unwrap_or(0);
+    let stats = query_stats(connection).await?;
 
-    if total == 0 {
+    if stats.total_drawers == 0 {
         println!(
             "Palace is empty. Run `mempalace init <dir>` then `mempalace mine <dir>` to get started."
         );
@@ -104,14 +17,56 @@ pub async fn run(connection: &Connection) -> Result<()> {
     }
 
     println!("=== MemPalace Status ===\n");
-    println!("Total drawers: {total}\n");
+    println!("Total drawers: {}\n", stats.total_drawers);
 
-    run_print_wings(connection).await?;
-    run_print_rooms(connection).await?;
-    run_print_kg(connection).await?;
+    println!("Wings:");
+    for (wing, count) in &stats.wing_counts {
+        println!("  {wing}: {count} drawers");
+    }
+
+    run_print_rooms(&stats.room_counts);
+    run_print_kg(stats.entity_count, stats.triple_count);
     run_print_entity_registry();
 
     Ok(())
+}
+
+/// Print per-room drawer counts, grouping rooms under their wing header.
+fn run_print_rooms(room_counts: &[(String, String, i64)]) {
+    assert!(
+        room_counts.iter().all(|(_, _, c)| *c >= 0),
+        "run_print_rooms: all room counts must be non-negative"
+    );
+    println!("\nRooms:");
+    let mut current_wing = String::new();
+    for (wing, room, count) in room_counts {
+        if wing != &current_wing {
+            println!("  [{wing}]");
+            current_wing.clone_from(wing);
+        }
+        println!("    {room}: {count}");
+    }
+    assert!(
+        !current_wing.is_empty() || room_counts.is_empty(),
+        "run_print_rooms: must print at least one wing when rooms are present"
+    );
+}
+
+/// Print KG entity and triple counts when either is non-zero.
+fn run_print_kg(entity_count: i64, triple_count: i64) {
+    assert!(
+        entity_count >= 0,
+        "run_print_kg: entity_count must be non-negative"
+    );
+    assert!(
+        triple_count >= 0,
+        "run_print_kg: triple_count must be non-negative"
+    );
+    if entity_count > 0 || triple_count > 0 {
+        println!("\nKnowledge Graph:");
+        println!("  Entities: {entity_count}");
+        println!("  Triples: {triple_count}");
+    }
 }
 
 /// Print entity registry summary: people, projects, ambiguous names, wiki cache count.
