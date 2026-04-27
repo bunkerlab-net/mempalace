@@ -7,7 +7,7 @@
 //! Language codes are matched case-insensitively against the filename stem
 //! (e.g., `"PT-BR"` resolves to `pt-br.json`).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde::Deserialize;
 
@@ -65,6 +65,19 @@ struct LocaleEntitySection {
 struct LocaleFile {
     #[serde(default)]
     entity: LocaleEntitySection,
+}
+
+/// UI string tables from a locale JSON file (cli, aaak, terms, regex sections).
+#[derive(Deserialize, Default)]
+struct LocaleStrings {
+    #[serde(default)]
+    cli: HashMap<String, String>,
+    #[serde(default)]
+    aaak: HashMap<String, String>,
+    #[serde(default)]
+    terms: HashMap<String, String>,
+    #[serde(default)]
+    regex: HashMap<String, String>,
 }
 
 // ── Public API ──────────────────────────────────────────────────────────────
@@ -147,6 +160,94 @@ pub fn get_entity_patterns(languages: &[&str]) -> EntityPatterns {
     patterns
 }
 
+/// Return all available locale language codes.
+///
+/// Codes are the canonical lowercase stems used in `get_entity_patterns` and
+/// `t`, e.g. `"en"`, `"de"`, `"pt-br"`.
+pub fn available_languages() -> Vec<&'static str> {
+    let languages: Vec<&'static str> = ALL_LOCALES.iter().map(|(stem, _)| *stem).collect();
+    assert!(
+        !languages.is_empty(),
+        "available_languages: must return at least one language"
+    );
+    // Postcondition: "en" is always present as the canonical fallback locale.
+    assert!(
+        languages.contains(&"en"),
+        "available_languages: English must always be present"
+    );
+    languages
+}
+
+/// Return the active locale language code.
+///
+/// Resolution order: `MEMPALACE_LANG`, then `MEMPAL_LANG`, then `"en"`.
+/// The result is always lowercased and validated against `available_languages()`.
+/// If the env var names an unknown locale, falls back to `"en"`.
+pub fn current_lang() -> String {
+    let available = available_languages();
+    assert!(
+        !available.is_empty(),
+        "current_lang: available languages must not be empty"
+    );
+    for var in &["MEMPALACE_LANG", "MEMPAL_LANG"] {
+        if let Ok(lang) = std::env::var(var)
+            && !lang.trim().is_empty()
+        {
+            let lower = lang.to_lowercase();
+            assert!(
+                !lower.is_empty(),
+                "current_lang: normalized lang must not be empty"
+            );
+            if available.contains(&lower.as_str()) {
+                return lower;
+            }
+        }
+    }
+    "en".to_string()
+}
+
+/// Translate a key using the active locale, with `{name}` variable interpolation.
+///
+/// Key format: `"section.subkey"` (e.g. `"cli.mine_start"`) or a bare subkey
+/// searched across `cli`, `terms`, and `aaak` sections. Falls back to English,
+/// then to the raw key string when no translation exists.
+pub fn t(key: &str, vars: &[(&str, &str)]) -> String {
+    assert!(!key.is_empty(), "t: key must not be empty");
+    let lang = current_lang();
+    let text = t_resolve_key(&lang, key)
+        .or_else(|| {
+            if lang == "en" {
+                None
+            } else {
+                t_resolve_key("en", key)
+            }
+        })
+        .unwrap_or_else(|| key.to_string());
+    let result = t_interpolate(text, vars);
+    assert!(
+        !result.is_empty(),
+        "t: result must not be empty for non-empty key"
+    );
+    result
+}
+
+/// Return a regex pattern from the active locale's `regex` section.
+///
+/// Falls back to English when the key is absent in the current locale.
+/// Returns `None` if the key is not found in any locale.
+pub fn get_regex(key: &str) -> Option<String> {
+    assert!(!key.is_empty(), "get_regex: key must not be empty");
+    let lang = current_lang();
+    let full_key = format!("regex.{key}");
+    t_resolve_key(&lang, &full_key).or_else(|| {
+        if lang == "en" {
+            None
+        } else {
+            t_resolve_key("en", &full_key)
+        }
+    })
+}
+
 // ── Private helpers ─────────────────────────────────────────────────────────
 
 /// Accumulator used while merging multiple locale sections.
@@ -207,7 +308,51 @@ fn dedupe_vec(items: Vec<String>) -> Vec<String> {
         .collect()
 }
 
+/// Resolve a dotted-path key (`"section.subkey"` or bare `"subkey"`) against
+/// the string tables for the given locale.  Returns `None` when the locale or
+/// key is absent.
+fn t_resolve_key(lang: &str, key: &str) -> Option<String> {
+    assert!(!lang.is_empty(), "t_resolve_key: lang must not be empty");
+    assert!(!key.is_empty(), "t_resolve_key: key must not be empty");
+    let raw_json = get_entity_patterns_resolve_locale(lang)?;
+    let strings: LocaleStrings = serde_json::from_str(raw_json).ok()?;
+    if let Some((section, subkey)) = key.split_once('.') {
+        let map = match section {
+            "cli" => &strings.cli,
+            "aaak" => &strings.aaak,
+            "terms" => &strings.terms,
+            "regex" => &strings.regex,
+            _ => return None,
+        };
+        map.get(subkey).cloned()
+    } else {
+        strings
+            .cli
+            .get(key)
+            .or_else(|| strings.terms.get(key))
+            .or_else(|| strings.aaak.get(key))
+            .cloned()
+    }
+}
+
+/// Substitute `{name}` placeholders in `text` with the provided values.
+///
+/// Placeholders not present in `vars` are left as-is; no error is raised for
+/// unresolved placeholders (callers are responsible for passing complete vars).
+fn t_interpolate(mut text: String, vars: &[(&str, &str)]) -> String {
+    assert!(
+        !text.is_empty(),
+        "t_interpolate: input text must not be empty"
+    );
+    for (name, value) in vars {
+        text = text.replace(&format!("{{{name}}}"), value);
+    }
+    text
+}
+
 #[cfg(test)]
+// Test code — .expect() is acceptable with a descriptive message.
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -251,6 +396,113 @@ mod tests {
         let upper = get_entity_patterns(&["PT-BR"]);
         // Same locale regardless of case — both must produce the same stopword count.
         assert_eq!(lower.stopwords.len(), upper.stopwords.len());
+    }
+
+    // ── available_languages / current_lang ─────────────────────────────────
+
+    #[test]
+    fn available_languages_contains_english() {
+        // English must always be present as the canonical fallback locale.
+        let langs = available_languages();
+        assert!(!langs.is_empty(), "must return at least one language");
+        assert!(
+            langs.contains(&"en"),
+            "English must be included in available languages"
+        );
+    }
+
+    #[test]
+    fn current_lang_defaults_to_en_when_env_absent() {
+        // With no MEMPALACE_LANG or MEMPAL_LANG set, current_lang must return "en".
+        temp_env::with_vars(
+            [
+                ("MEMPALACE_LANG", None::<&str>),
+                ("MEMPAL_LANG", None::<&str>),
+            ],
+            || {
+                let lang = current_lang();
+                assert_eq!(lang, "en", "current_lang must default to 'en'");
+            },
+        );
+    }
+
+    #[test]
+    fn current_lang_reads_mempalace_lang_env_var() {
+        // When MEMPALACE_LANG is set, current_lang must return it lowercased.
+        temp_env::with_vars(
+            [
+                ("MEMPALACE_LANG", Some("DE")),
+                ("MEMPAL_LANG", None::<&str>),
+            ],
+            || {
+                let lang = current_lang();
+                assert_eq!(lang, "de", "current_lang must lowercase the env value");
+            },
+        );
+    }
+
+    // ── t ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn t_resolves_dotted_cli_key_in_english() {
+        // "cli.search_no_results" must return the English template string.
+        let result = t("cli.search_no_results", &[("query", "Rust")]);
+        assert!(!result.is_empty(), "t must return a non-empty string");
+        assert!(
+            result.contains("Rust"),
+            "t must interpolate the query variable"
+        );
+    }
+
+    #[test]
+    fn t_falls_back_to_raw_key_for_unknown_key() {
+        // An unrecognised key must be returned as-is so callers are never stuck.
+        let result = t("no_such_section.no_such_key", &[]);
+        assert_eq!(
+            result, "no_such_section.no_such_key",
+            "unknown key must be returned verbatim"
+        );
+    }
+
+    #[test]
+    fn t_falls_back_to_english_for_unknown_language() {
+        // When MEMPALACE_LANG is a non-existent code, t must fall back to English.
+        temp_env::with_vars([("MEMPALACE_LANG", Some("xx"))], || {
+            let result = t("cli.no_palace", &[]);
+            assert!(
+                !result.is_empty(),
+                "t must return English fallback for unknown language"
+            );
+            // English "no_palace" string must not be a raw key fallback.
+            assert_ne!(
+                result, "cli.no_palace",
+                "English translation must be found even for unknown locale"
+            );
+        });
+    }
+
+    // ── get_regex ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn get_regex_returns_action_pattern_for_english() {
+        // "action_pattern" must be present in the English regex section.
+        let pattern = get_regex("action_pattern");
+        assert!(
+            pattern.is_some(),
+            "get_regex must find action_pattern in English locale"
+        );
+        let pattern_value = pattern.expect("already asserted Some above");
+        assert!(
+            !pattern_value.is_empty(),
+            "action_pattern must be a non-empty regex string"
+        );
+    }
+
+    #[test]
+    fn get_regex_returns_none_for_unknown_key() {
+        // A key absent from all locales must produce None without panicking.
+        let result = get_regex("no_such_regex_key");
+        assert!(result.is_none(), "unknown regex key must return None");
     }
 
     #[test]

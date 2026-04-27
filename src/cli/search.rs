@@ -13,7 +13,10 @@ pub async fn run(
     let results = search_memories(connection, query, wing, room, n_results).await?;
 
     if results.is_empty() {
-        println!("\n  No results found for: \"{query}\"");
+        println!(
+            "\n  {}",
+            crate::i18n::t("cli.search_no_results", &[("query", query)])
+        );
         return Ok(());
     }
 

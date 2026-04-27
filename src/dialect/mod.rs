@@ -31,6 +31,14 @@ static NON_ALPHA_RE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("non-alpha strip regex is a compile-time literal and cannot fail to compile")
 });
 
+// Locale-aware quote pattern loaded once at first use via `i18n::get_regex`.
+// Returns None when the locale JSON is absent or the pattern fails to compile.
+static LOCALE_QUOTE_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    crate::i18n::get_regex("quote_pattern")
+        .as_deref()
+        .and_then(|pattern| Regex::new(pattern).ok())
+});
+
 /// AAAK Dialect encoder — compresses plain text into symbolic memory format.
 pub struct Dialect {
     /// Known entity name → short code mappings.
@@ -108,8 +116,23 @@ fn detect_flags(text: &str) -> Vec<String> {
     detected
 }
 
-/// Extract the most important sentence fragment from text.
+/// Extract the most memorable sentence from `text` for the AAAK quote field.
+///
+/// Tries the locale's `quote_pattern` first (verbatim quoted strings are ideal
+/// key sentences). Falls back to scoring all sentences by decision-word density
+/// via `extract_key_sentence_score`.
 fn extract_key_sentence(text: &str) -> String {
+    // Prefer a verbatim quoted string when the locale defines a quote pattern.
+    if let Some(re) = LOCALE_QUOTE_RE.as_ref()
+        && let Some(cap) = re.captures(text)
+        && let Some(matched) = cap.get(1)
+    {
+        let quoted = matched.as_str().trim();
+        if quoted.len() > 10 {
+            return quoted.to_string();
+        }
+    }
+
     let sentences: Vec<&str> = SENTENCE_SPLIT_RE
         .split(text)
         .map(str::trim)
@@ -119,6 +142,19 @@ fn extract_key_sentence(text: &str) -> String {
     if sentences.is_empty() {
         return String::new();
     }
+
+    extract_key_sentence_score(sentences)
+}
+
+/// Called by `extract_key_sentence` to score, rank, and truncate sentences.
+///
+/// Scores each sentence by decision-word density and length. Returns the
+/// highest-scoring sentence, truncated to ≤55 characters when needed.
+fn extract_key_sentence_score(sentences: Vec<&str>) -> String {
+    assert!(
+        !sentences.is_empty(),
+        "extract_key_sentence_score: sentences must not be empty"
+    );
 
     let decision_words = [
         "decided",
@@ -167,6 +203,11 @@ fn extract_key_sentence(text: &str) -> String {
     scored.sort_by_key(|b| std::cmp::Reverse(b.0));
     let best = scored[0].1;
 
+    assert!(
+        !best.is_empty(),
+        "extract_key_sentence_score: best sentence must not be empty"
+    );
+
     if best.len() > 55 {
         let mut end = 52;
         let mut snap_steps: usize = 0;
@@ -174,7 +215,7 @@ fn extract_key_sentence(text: &str) -> String {
             snap_steps += 1;
             assert!(
                 snap_steps < CHAR_BOUNDARY_SNAP_MAX,
-                "extract_key_sentence: exceeded CHAR_BOUNDARY_SNAP_MAX ({CHAR_BOUNDARY_SNAP_MAX}) snap steps"
+                "extract_key_sentence_score: exceeded CHAR_BOUNDARY_SNAP_MAX ({CHAR_BOUNDARY_SNAP_MAX}) snap steps"
             );
             end += 1;
         }
