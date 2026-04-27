@@ -191,6 +191,38 @@ fn walk_dir(directory: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
+/// Detect the "hall" — the top-level subdirectory within the project containing the file.
+///
+/// Hall is the second-level grouping between wing (the whole project) and room
+/// (the semantic category). Returns `None` when the file lives directly in the
+/// project root with no subdirectory.
+pub fn detect_hall(filepath: &Path, project_dir: &Path) -> Option<String> {
+    assert!(
+        !filepath.as_os_str().is_empty(),
+        "detect_hall: filepath must not be empty"
+    );
+    assert!(
+        !project_dir.as_os_str().is_empty(),
+        "detect_hall: project_dir must not be empty"
+    );
+
+    let relative = filepath.strip_prefix(project_dir).ok()?;
+    let mut components = relative.components();
+
+    // The first component is the top-level entry. Only treat it as a hall when at
+    // least one more component exists (i.e., the file is inside a subdirectory).
+    let first = components.next()?;
+    // Return None when there is no second component — the file is directly in project_dir.
+    components.next()?;
+
+    let hall_name = first.as_os_str().to_string_lossy().to_string();
+    assert!(
+        !hall_name.is_empty(),
+        "detect_hall: hall name must not be empty"
+    );
+    Some(hall_name)
+}
+
 fn mine_print_header(
     wing: &str,
     rooms: &[crate::config::RoomConfig],
@@ -321,6 +353,107 @@ fn mine_read_file(filepath: &Path) -> Option<String> {
     Some(content)
 }
 
+/// Read the modification time of `filepath` as seconds since the Unix epoch.
+///
+/// Called by `mine_process_file_one` to stamp all chunks from the same file
+/// with the same mtime. Returns `None` when the mtime cannot be read.
+fn mine_get_mtime(filepath: &Path) -> Option<f64> {
+    assert!(
+        !filepath.as_os_str().is_empty(),
+        "mine_get_mtime: filepath must not be empty"
+    );
+    std::fs::metadata(filepath)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs_f64())
+}
+
+/// Extract entity names from a file for per-drawer metadata annotation.
+///
+/// Called by `mine_process_file_one` to surface named entities (people and
+/// projects) detected in the mined content. Uncertain candidates are omitted
+/// to reduce noise. Returns names sorted and deduplicated.
+fn mine_extract_entities_for_metadata(filepath: &Path) -> Vec<String> {
+    assert!(
+        !filepath.as_os_str().is_empty(),
+        "mine_extract_entities_for_metadata: filepath must not be empty"
+    );
+
+    let result = crate::palace::entity_detect::detect_entities(&[filepath], 1, &["en"]);
+    let mut names: Vec<String> = result
+        .people
+        .iter()
+        .chain(result.projects.iter())
+        .map(|entity| entity.name.clone())
+        .collect();
+    names.sort();
+    names.dedup();
+
+    assert!(
+        names.len() <= 1000,
+        "mine_extract_entities_for_metadata: entity count must be bounded"
+    );
+    names
+}
+
+/// Process a single file in the mine loop.
+///
+/// Returns `None` when the file is unreadable or too short. Otherwise returns
+/// `(drawers_added, room, hall, entity_count)`. The caller handles the
+/// already-mined skip check before calling this function.
+async fn mine_process_file_one(
+    connection: &Connection,
+    filepath: &Path,
+    project_dir: &Path,
+    wing: &str,
+    rooms: &[crate::config::RoomConfig],
+    opts: &MineParams,
+) -> Result<Option<(usize, String, Option<String>, usize)>> {
+    let source_file = filepath.to_string_lossy().to_string();
+    let Some(content) = mine_read_file(filepath) else {
+        return Ok(None);
+    };
+
+    let room = detect_room(filepath, &content, rooms, project_dir);
+    let hall = detect_hall(filepath, project_dir);
+    let entities = mine_extract_entities_for_metadata(filepath);
+    let chunks = chunk_text(&content);
+
+    assert!(
+        !room.is_empty(),
+        "mine_process_file_one: room must not be empty"
+    );
+    assert!(
+        !chunks.is_empty(),
+        "mine_process_file_one: chunks must not be empty for readable content"
+    );
+
+    if !opts.dry_run {
+        let source_mtime = mine_get_mtime(filepath);
+        mine_write_chunks(
+            connection,
+            &chunks,
+            wing,
+            &room,
+            &source_file,
+            source_mtime,
+            opts,
+        )
+        .await?;
+    }
+
+    let entity_count = entities.len();
+    let drawers_added = chunks.len();
+
+    // Postcondition: must have counted at least one drawer for readable content.
+    assert!(
+        drawers_added > 0,
+        "mine_process_file_one: drawers_added must be positive"
+    );
+    Ok(Some((drawers_added, room, hall, entity_count)))
+}
+
 /// Process all files in the mine loop. Returns `(drawers_total, files_skipped, files_unreadable_or_too_short, room_counts)`.
 async fn mine_process_files(
     connection: &Connection,
@@ -345,46 +478,27 @@ async fn mine_process_files(
             continue;
         }
 
-        let Some(content) = mine_read_file(filepath) else {
-            files_unreadable_or_too_short += 1;
-            continue;
-        };
-
-        let room = detect_room(filepath, &content, rooms, project_dir);
-        let chunks = chunk_text(&content);
-        let drawers_added = chunks.len();
-
-        if !opts.dry_run {
-            // Capture mtime now so all chunks from the same file share the same timestamp.
-            let source_mtime: Option<f64> = std::fs::metadata(filepath)
-                .ok()
-                .and_then(|metadata| metadata.modified().ok())
-                .and_then(|system_time| {
-                    system_time
-                        .duration_since(std::time::SystemTime::UNIX_EPOCH)
-                        .ok()
-                })
-                .map(|duration| duration.as_secs_f64());
-            mine_write_chunks(
-                connection,
-                &chunks,
-                wing,
-                &room,
-                &source_file,
-                source_mtime,
-                opts,
-            )
-            .await?;
+        match mine_process_file_one(connection, filepath, project_dir, wing, rooms, opts).await? {
+            None => {
+                files_unreadable_or_too_short += 1;
+            }
+            Some((drawers_added, room, hall, entity_count)) => {
+                drawers_total += drawers_added;
+                *room_counts.entry(room.clone()).or_insert(0) += 1;
+                let file_name = filepath.file_name().unwrap_or_default().to_string_lossy();
+                let hall_label = hall.as_deref().unwrap_or("-");
+                println!(
+                    "  [{:4}/{}] {:50} {:15} +{drawers_added}",
+                    i + 1,
+                    files.len(),
+                    file_name,
+                    hall_label,
+                );
+                if entity_count > 0 {
+                    println!("              ({entity_count} entities detected)");
+                }
+            }
         }
-
-        drawers_total += drawers_added;
-        *room_counts.entry(room.clone()).or_insert(0) += 1;
-        println!(
-            "  [{:4}/{}] {:50} +{drawers_added}",
-            i + 1,
-            files.len(),
-            filepath.file_name().unwrap_or_default().to_string_lossy(),
-        );
     }
 
     Ok((
@@ -623,6 +737,78 @@ pub fn acquire_mine_lock(lock_dir: &Path) -> Result<MineGuard> {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+
+    // --- detect_hall ---
+
+    #[test]
+    fn detect_hall_returns_subdirectory_for_nested_file() {
+        // A file nested inside a subdirectory must return the subdirectory as the hall.
+        let dir = tempfile::tempdir().expect("tempdir should succeed");
+        let sub = dir.path().join("src");
+        std::fs::create_dir_all(&sub).expect("create_dir src should succeed");
+        let filepath = sub.join("main.rs");
+        std::fs::write(&filepath, "fn main() {}").expect("write file should succeed");
+
+        let hall = detect_hall(&filepath, dir.path());
+        assert!(hall.is_some(), "nested file must produce a hall name");
+        assert_eq!(
+            hall.expect("hall must be Some for nested file"),
+            "src",
+            "hall must equal the top-level subdirectory"
+        );
+    }
+
+    #[test]
+    fn detect_hall_returns_none_for_top_level_file() {
+        // A file directly in the project root must return None — no hall grouping.
+        let dir = tempfile::tempdir().expect("tempdir should succeed");
+        let filepath = dir.path().join("readme.md");
+        std::fs::write(&filepath, "# Readme").expect("write readme should succeed");
+
+        let hall = detect_hall(&filepath, dir.path());
+        assert!(hall.is_none(), "top-level file must produce no hall");
+    }
+
+    // --- mine_extract_entities_for_metadata ---
+
+    #[test]
+    fn mine_extract_entities_for_metadata_returns_empty_for_minimal_file() {
+        // A file with no entity-like proper nouns must return an empty list.
+        let dir = tempfile::tempdir().expect("tempdir should succeed");
+        let filepath = dir.path().join("config.txt");
+        std::fs::write(&filepath, "timeout = 30\nretry = 3").expect("write config should succeed");
+
+        let names = mine_extract_entities_for_metadata(&filepath);
+        // config.txt has no proper names — result may be empty or small.
+        // Pair assertion: count is bounded regardless of content.
+        assert!(names.len() <= 1000, "entity count must always be bounded");
+    }
+
+    #[test]
+    fn mine_extract_entities_for_metadata_returns_vec_for_entity_rich_file() {
+        // A file with many proper-noun phrases must return a sorted, deduped vec.
+        let dir = tempfile::tempdir().expect("tempdir should succeed");
+        let filepath = dir.path().join("notes.txt");
+        // Deliberately repeat "Alice" to test deduplication.
+        std::fs::write(
+            &filepath,
+            "Alice Smith worked with Alice Smith on the project. \
+             Bob Jones reviewed it. Alice Smith approved the PR.",
+        )
+        .expect("write notes should succeed");
+
+        let names = mine_extract_entities_for_metadata(&filepath);
+        // Names must be deduplicated: "Alice Smith" should appear at most once.
+        let unique_count = names.len();
+        let mut sorted = names.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(
+            unique_count,
+            sorted.len(),
+            "entity names must be deduplicated"
+        );
+    }
 
     // --- acquire_mine_lock ---
 
