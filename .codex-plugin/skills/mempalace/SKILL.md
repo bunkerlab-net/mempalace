@@ -25,36 +25,48 @@ via MCP tools or the `mempalace` CLI. No cloud services or API keys required.
 
 ## MCP Tools Quick Reference
 
+Signatures match the canonical schemas in `src/mcp/protocol.rs`. Required
+parameters are listed first; optional parameters are suffixed with `?`.
+
 ### Search and recall
 
-    mempalace_search(query, wing?, room?)     -- keyword search with BM25 ranking
-    mempalace_list_wings()                    -- list all top-level wings
-    mempalace_list_rooms(wing)                -- list rooms within a wing
-    mempalace_get_taxonomy()                  -- full wing/room/drawer tree
-    mempalace_traverse(room, wing?)           -- graph traversal from a room
-    mempalace_find_tunnels(wing1, wing2)      -- cross-wing connections
-    mempalace_follow_tunnels(wing, room?)     -- follow tunnels from a location
+    mempalace_search(query, limit?, wing?, room?, context?)   -- keyword search with BM25 ranking
+    mempalace_check_duplicate(content)                        -- check if content already filed
+    mempalace_list_wings()                                    -- list all wings with drawer counts
+    mempalace_list_rooms(wing?)                               -- list rooms (all wings if omitted)
+    mempalace_get_taxonomy()                                  -- full wing → room → count tree
+    mempalace_get_aaak_spec()                                 -- AAAK dialect specification
+    mempalace_traverse(start_room, max_hops?)                 -- BFS from a room (max_hops default 2)
+    mempalace_find_tunnels(wing_a?, wing_b?)                  -- rooms that bridge two wings
+    mempalace_follow_tunnels(wing, room)                      -- follow explicit tunnels from a room
+    mempalace_graph_stats()                                   -- rooms, tunnels, wing edges
 
 ### Write
 
-    mempalace_add_drawer(wing, room, content, source_file?)   -- store a memory
-    mempalace_update_drawer(id, content)                      -- update a memory
-    mempalace_delete_drawer(id)                               -- remove a memory
-    mempalace_get_drawer(id)                                  -- fetch one drawer
-    mempalace_list_drawers(wing?, room?, limit?, offset?)     -- paginated listing
+    mempalace_add_drawer(wing, room, content, source_file?, added_by?)   -- file a memory
+    mempalace_update_drawer(drawer_id, content?, wing?, room?)           -- update content/location
+    mempalace_delete_drawer(drawer_id)                                   -- remove a memory
+    mempalace_get_drawer(drawer_id)                                      -- fetch one drawer
+    mempalace_list_drawers(wing?, room?, limit?, offset?)                -- paginated listing
 
 ### Knowledge Graph
 
-    mempalace_kg_query(entity?, predicate?, object?)    -- query KG triples
-    mempalace_kg_add(subject, predicate, object, ...)   -- assert a KG fact
-    mempalace_kg_invalidate(id)                         -- retract a KG fact
-    mempalace_kg_timeline(entity)                       -- entity history
-    mempalace_kg_stats()                                -- graph statistics
+    mempalace_kg_query(entity, as_of?, direction?)                       -- query an entity's facts
+    mempalace_kg_add(subject, predicate, object, valid_from?, source_closet?)  -- assert a fact
+    mempalace_kg_invalidate(subject, predicate, object, ended?)          -- retract a fact
+    mempalace_kg_timeline(entity?)                                       -- chronological fact list
+    mempalace_kg_stats()                                                 -- graph statistics
+
+### Tunnels (explicit cross-wing links)
+
+    mempalace_create_tunnel(source_wing, source_room, target_wing, target_room, label?, source_drawer_id?, target_drawer_id?)
+    mempalace_list_tunnels(wing?)                                        -- list explicit tunnels
+    mempalace_delete_tunnel(tunnel_id)                                   -- delete a tunnel by ID
 
 ### Diary
 
-    mempalace_diary_write(content, date?)    -- write a diary entry
-    mempalace_diary_read(date?, wing?)       -- read diary entries
+    mempalace_diary_write(agent_name, entry, topic?, wing?)              -- write a diary entry
+    mempalace_diary_read(agent_name, last_n?, wing?)                     -- read recent entries
 
 ## CLI Commands (fallback when MCP is unavailable)
 
