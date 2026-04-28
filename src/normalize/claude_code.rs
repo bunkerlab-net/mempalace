@@ -442,20 +442,31 @@ mod tests {
     #[test]
     fn strip_noise_removes_blockquote_prefixed_noise_line() {
         // Noise lines preceded by "> " must be stripped via the NOISE_LINE_RES patterns.
-        let text = "useful\n> CURRENT TIME: 2026-01-01T00:00:00Z\nmore useful";
+        // Use distinct sentinels before and after so the substring checks cannot
+        // be satisfied by a single match leaking into the wrong half.
+        let text = "before-useful\n> CURRENT TIME: 2026-01-01T00:00:00Z\nafter-useful";
         let result = strip_noise(text);
         assert!(
             !result.contains("CURRENT TIME:"),
             "blockquote noise line must be removed"
         );
         assert!(
-            result.contains("useful"),
-            "surrounding text must be preserved"
+            result.contains("before-useful"),
+            "first-line content must be preserved"
         );
         assert!(
-            result.contains("more useful"),
+            result.contains("after-useful"),
             "text after noise line must be preserved"
         );
+        // Pair assertion: ordering must be preserved — the first-line sentinel
+        // appears before the trailing one.
+        let first = result
+            .find("before-useful")
+            .expect("before-useful must be present");
+        let second = result
+            .find("after-useful")
+            .expect("after-useful must be present");
+        assert!(first < second, "line order must be preserved after strip");
     }
 
     #[test]

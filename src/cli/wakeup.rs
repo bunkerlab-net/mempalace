@@ -117,10 +117,27 @@ mod tests {
     #[tokio::test]
     async fn run_with_wing_exercises_l2_non_empty_branch() {
         // L2 recall for a populated wing must print a non-empty context block.
+        // Capture output via `run_to_writer` (mirroring the L3 test) so we
+        // can assert the seeded drawer's content actually surfaces — a bare
+        // `is_ok()` check would pass even if the L2 branch silently no-op'd.
         let (_db, connection) = test_db_with_drawer("l2_wing").await;
-        run(&connection, Some("l2_wing"), None, None, 5)
+        let mut buffer: Vec<u8> = Vec::new();
+        run_to_writer(&mut buffer, &connection, Some("l2_wing"), None, None, 5)
             .await
             .expect("run with populated wing must succeed");
+        let captured = String::from_utf8(buffer).expect("captured output must be UTF-8");
+        assert!(
+            !captured.is_empty(),
+            "wake-up output must include the L0/L1 base block at minimum"
+        );
+        assert!(
+            captured.contains("L2"),
+            "L2 branch heading must appear in the captured output: {captured}"
+        );
+        assert!(
+            captured.contains("architecture design patterns overview"),
+            "L2 branch must surface the seeded drawer's content: {captured}"
+        );
     }
 
     #[tokio::test]

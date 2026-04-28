@@ -140,12 +140,12 @@ fn extract_key_sentence(text: &str) -> String {
     // pattern. The regex is compiled per call so a runtime locale switch is
     // honored — caching by locale would freeze whatever was active at first use.
     let raw = extract_key_sentence_raw(text);
-    // Pipe is the AAAK field separator — a literal `|` in the quote would
-    // corrupt the encoded line and break `decode_fill_content`. Strip
-    // rather than escape: the format has no in-band escape mechanism
-    // today, and a lossy substitution keeps the grammar single-byte and
-    // round-trip-safe.
-    raw.replace('|', "/")
+    // Pipe is the AAAK field separator and `\n`/`\r` end the content line —
+    // either character in the quote would corrupt the encoded line and break
+    // `decode_fill_content`. Strip rather than escape: the format has no
+    // in-band escape mechanism today, and a lossy substitution keeps the
+    // grammar single-byte and round-trip-safe.
+    raw.replace('|', "/").replace(['\n', '\r'], " ")
 }
 
 /// Resolve the unfiltered key sentence — caller is responsible for sanitizing
@@ -396,7 +396,9 @@ impl Dialect {
     /// endpoint.
     pub fn count_tokens(text: &str) -> usize {
         assert!(!text.is_empty(), "count_tokens: text must not be empty");
-        let word_count = text.split_ascii_whitespace().count();
+        // Use Unicode whitespace so non-ASCII separators (e.g. NBSP, ideographic
+        // space) split words consistently with Python's str.split().
+        let word_count = text.split_whitespace().count();
         // 1.3 tokens per word: (wc * 13 + 5) / 10 gives standard rounding.
         // Floor to 1: whitespace-only input yields 0 words, but 1 token is a safer
         // estimate than 0 for LLM context budgeting.
@@ -523,11 +525,13 @@ fn decode_fill_content(content: &str, decoded: &mut DecodedDialect) {
         }
     }
 
-    // AAAK content lines may legitimately have zero entities (??? placeholder)
-    // and zero topics (misc) for degenerate input; just assert the split worked.
+    // The encoder produces at most five pipe-separated segments:
+    // `0:ENTITIES|topics|"quote"|emotions|FLAGS`. A higher count means the
+    // input was hand-edited or corrupted — fail fast rather than letting the
+    // skip(2) loop above accumulate stray segments into emotions/flags/quote.
     assert!(
-        parts.len() <= 10,
-        "decode_fill_content: content line must have at most 10 pipe-separated segments"
+        parts.len() <= 5,
+        "decode_fill_content: content line must have at most 5 pipe-separated segments"
     );
 }
 

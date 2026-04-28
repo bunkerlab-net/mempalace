@@ -132,7 +132,8 @@ pub async fn regenerate_closets(
 /// Called by `regenerate_closets` to query drawers from the database.
 ///
 /// When `wing` is `Some`, only drawers in that wing are returned.
-/// Rows are ordered by `filed_at` ascending so processing is deterministic.
+/// Rows are ordered by `(filed_at, id)` ascending so processing is deterministic
+/// even when multiple drawers share the same `filed_at` timestamp.
 async fn regenerate_closets_fetch_drawers(
     connection: &Connection,
     wing: Option<&str>,
@@ -144,14 +145,14 @@ async fn regenerate_closets_fetch_drawers(
         );
         query_all(
             connection,
-            "SELECT id, content, wing, room, source_file FROM drawers WHERE wing = ? ORDER BY filed_at",
+            "SELECT id, content, wing, room, source_file FROM drawers WHERE wing = ? ORDER BY filed_at, id",
             (wing_filter,),
         )
         .await?
     } else {
         query_all(
             connection,
-            "SELECT id, content, wing, room, source_file FROM drawers ORDER BY filed_at",
+            "SELECT id, content, wing, room, source_file FROM drawers ORDER BY filed_at, id",
             (),
         )
         .await?

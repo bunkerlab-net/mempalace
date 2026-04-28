@@ -36,6 +36,26 @@ struct FileState {
     entry_count: usize,
     /// Byte length of the file on the last run.
     size: u64,
+    /// Last modification time in Unix-epoch seconds. Pairs with `size` so a
+    /// same-length edit (which would not change `size`) still invalidates the
+    /// cursor. `serde(default)` keeps cursor files written before this field
+    /// existed loadable; their `mtime == 0` will mismatch any real file mtime
+    /// and force one safe re-ingest after upgrade.
+    #[serde(default)]
+    mtime: u64,
+}
+
+/// Read the file's modification time as Unix-epoch seconds.
+///
+/// Returns `0` when the platform or filesystem does not expose mtime — this
+/// pairs with the resume check, which only trusts an mtime that is both
+/// non-zero and equal across runs.
+fn diary_ingest_file_mtime(path: &Path) -> u64 {
+    path.metadata()
+        .ok()
+        .and_then(|meta| meta.modified().ok())
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |duration| duration.as_secs())
 }
 
 /// Ingest all diary files from `diary_dir` into the palace.
@@ -167,6 +187,8 @@ async fn diary_ingest_file(
         return Ok(0);
     }
 
+    let file_mtime = diary_ingest_file_mtime(file_path);
+
     let key = file_path.to_string_lossy().to_string();
     let prev_count = if force {
         0
@@ -174,8 +196,12 @@ async fn diary_ingest_file(
         cursor
             .get(&key)
             .and_then(|state| {
-                // Only resume from cursor if the file size has not changed.
-                if state.size == file_size {
+                // Resume only when *both* size and mtime match — same-length
+                // edits leave `size` unchanged but bump `mtime`. Require
+                // `mtime > 0` so a platform that cannot report mtime (or a
+                // pre-upgrade cursor file) forces a safe re-ingest instead of
+                // matching a degenerate zero.
+                if state.size == file_size && state.mtime == file_mtime && file_mtime > 0 {
                     Some(state.entry_count)
                 } else {
                     None
@@ -225,6 +251,7 @@ async fn diary_ingest_file(
         FileState {
             entry_count: sections.len(),
             size: file_size,
+            mtime: file_mtime,
         },
     );
     Ok(created)
@@ -468,22 +495,38 @@ mod tests {
         )
         .expect("failed to write test diary file");
 
-        let (_db, connection) = crate::test_helpers::test_db().await;
-        let stats = ingest_diaries(
-            &connection,
-            diary_dir.path(),
-            "journal",
-            "test_agent",
-            false,
-        )
-        .await
-        .expect("ingest_diaries must succeed");
+        // Redirect `config_dir()` to a fresh tempdir so this test's
+        // `diary_cursors.json` cannot collide with the real user config or
+        // with sibling tests running in parallel.
+        let cursor_home =
+            tempfile::tempdir().expect("failed to create temp cursor home for ingest test");
+        let cursor_home_path = cursor_home
+            .path()
+            .to_str()
+            .expect("temp cursor home path must be valid UTF-8")
+            .to_string();
+        temp_env::async_with_vars(
+            [("MEMPALACE_DIR", Some(cursor_home_path.as_str()))],
+            async {
+                let (_db, connection) = crate::test_helpers::test_db().await;
+                let stats = ingest_diaries(
+                    &connection,
+                    diary_dir.path(),
+                    "journal",
+                    "test_agent",
+                    false,
+                )
+                .await
+                .expect("ingest_diaries must succeed");
 
-        assert_eq!(stats.days_updated, 1, "one diary file must be updated");
-        assert_eq!(
-            stats.drawers_created, 2,
-            "two sections must produce two drawers"
-        );
+                assert_eq!(stats.days_updated, 1, "one diary file must be updated");
+                assert_eq!(
+                    stats.drawers_created, 2,
+                    "two sections must produce two drawers"
+                );
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -496,19 +539,32 @@ mod tests {
         )
         .expect("failed to write non-diary file");
 
-        let (_db, connection) = crate::test_helpers::test_db().await;
-        let stats = ingest_diaries(
-            &connection,
-            diary_dir.path(),
-            "journal",
-            "test_agent",
-            false,
-        )
-        .await
-        .expect("ingest_diaries must succeed with no matching files");
+        let cursor_home =
+            tempfile::tempdir().expect("failed to create temp cursor home for skip test");
+        let cursor_home_path = cursor_home
+            .path()
+            .to_str()
+            .expect("temp cursor home path must be valid UTF-8")
+            .to_string();
+        temp_env::async_with_vars(
+            [("MEMPALACE_DIR", Some(cursor_home_path.as_str()))],
+            async {
+                let (_db, connection) = crate::test_helpers::test_db().await;
+                let stats = ingest_diaries(
+                    &connection,
+                    diary_dir.path(),
+                    "journal",
+                    "test_agent",
+                    false,
+                )
+                .await
+                .expect("ingest_diaries must succeed with no matching files");
 
-        assert_eq!(stats.days_updated, 0, "non-diary file must be skipped");
-        assert_eq!(stats.drawers_created, 0);
+                assert_eq!(stats.days_updated, 0, "non-diary file must be skipped");
+                assert_eq!(stats.drawers_created, 0);
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -523,33 +579,46 @@ mod tests {
         )
         .expect("failed to write test diary file for cursor test");
 
-        let (_db, connection) = crate::test_helpers::test_db().await;
-        let stats1 = ingest_diaries(
-            &connection,
-            diary_dir.path(),
-            "journal",
-            "test_agent",
-            false,
-        )
-        .await
-        .expect("first ingest must succeed");
-        let stats2 = ingest_diaries(
-            &connection,
-            diary_dir.path(),
-            "journal",
-            "test_agent",
-            false,
-        )
-        .await
-        .expect("second ingest must succeed");
+        let cursor_home =
+            tempfile::tempdir().expect("failed to create temp cursor home for cursor test");
+        let cursor_home_path = cursor_home
+            .path()
+            .to_str()
+            .expect("temp cursor home path must be valid UTF-8")
+            .to_string();
+        temp_env::async_with_vars(
+            [("MEMPALACE_DIR", Some(cursor_home_path.as_str()))],
+            async {
+                let (_db, connection) = crate::test_helpers::test_db().await;
+                let stats1 = ingest_diaries(
+                    &connection,
+                    diary_dir.path(),
+                    "journal",
+                    "test_agent",
+                    false,
+                )
+                .await
+                .expect("first ingest must succeed");
+                let stats2 = ingest_diaries(
+                    &connection,
+                    diary_dir.path(),
+                    "journal",
+                    "test_agent",
+                    false,
+                )
+                .await
+                .expect("second ingest must succeed");
 
-        assert_eq!(
-            stats1.drawers_created, 1,
-            "first run must create one drawer"
-        );
-        assert_eq!(
-            stats2.drawers_created, 0,
-            "second run must create no new drawers"
-        );
+                assert_eq!(
+                    stats1.drawers_created, 1,
+                    "first run must create one drawer"
+                );
+                assert_eq!(
+                    stats2.drawers_created, 0,
+                    "second run must create no new drawers"
+                );
+            },
+        )
+        .await;
     }
 }
