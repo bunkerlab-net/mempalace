@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
-use std::fs;
+use std::fs::File;
+use std::io::Read as _;
 use std::path::Path;
 use std::sync::LazyLock;
 
@@ -122,22 +123,38 @@ fn detect_entities_load_text(file_paths: &[&Path], files_max: usize) -> (String,
         if index >= files_max {
             break;
         }
-        if let Ok(content) = fs::read_to_string(path) {
-            let truncated = if content.len() > BYTES_PER_FILE_MAX {
-                // Walk backward from the byte limit to find a valid UTF-8 char
-                // boundary. Slicing at a raw byte offset can panic on multi-byte chars.
-                let mut end = BYTES_PER_FILE_MAX;
-                while end > 0 && !content.is_char_boundary(end) {
-                    end -= 1;
-                }
-                &content[..end]
-            } else {
-                &content
-            };
-            all_text.push_str(truncated);
-            all_text.push('\n');
-            all_lines.extend(truncated.lines().map(String::from));
+        // Stream up to BYTES_PER_FILE_MAX bytes only — fs::read_to_string would
+        // first allocate the entire file before truncating, defeating the cap
+        // on huge files.
+        let Ok(file) = File::open(path) else {
+            continue;
+        };
+        // +4 lets us detect that the file exceeded the cap and lets us walk back
+        // to a UTF-8 boundary without losing bytes in the truncated case.
+        let mut buffer = Vec::with_capacity(BYTES_PER_FILE_MAX + 4);
+        if file
+            .take((BYTES_PER_FILE_MAX as u64) + 4)
+            .read_to_end(&mut buffer)
+            .is_err()
+        {
+            continue;
         }
+        let read_len = buffer.len().min(BYTES_PER_FILE_MAX);
+        let mut end = read_len;
+        // Walk backward to a valid UTF-8 boundary so non-ASCII content does not
+        // produce a partial character at the cap.
+        while end > 0 {
+            if std::str::from_utf8(&buffer[..end]).is_ok() {
+                break;
+            }
+            end -= 1;
+        }
+        let Ok(text) = std::str::from_utf8(&buffer[..end]) else {
+            continue;
+        };
+        all_text.push_str(text);
+        all_text.push('\n');
+        all_lines.extend(text.lines().map(String::from));
     }
 
     (all_text, all_lines)
@@ -263,6 +280,20 @@ fn extract_candidates(text: &str, patterns: &EntityPatterns) -> HashMap<String, 
 
     let mut counts: HashMap<String, usize> = HashMap::new();
 
+    // Phrase-level stopword check: joined multi-word locale stopwords (e.g. Hindi
+    // "के लिए") would otherwise slip past the per-token check below because none
+    // of the constituent tokens is itself listed as a stopword.
+    let phrase_is_stopped = |phrase: &str| -> bool {
+        let lower_phrase = phrase.to_lowercase();
+        if locale_stops.contains(&lower_phrase) {
+            return true;
+        }
+        phrase.split_whitespace().any(|token| {
+            let lower = token.to_lowercase();
+            base_stops.contains(lower.as_str()) || locale_stops.contains(&lower)
+        })
+    };
+
     for cap in SINGLE_RE.captures_iter(text) {
         let word = &cap[1];
         let lower = word.to_lowercase();
@@ -272,13 +303,29 @@ fn extract_candidates(text: &str, patterns: &EntityPatterns) -> HashMap<String, 
         }
     }
 
+    // Locale-specific single-word patterns capture non-Latin scripts (Devanagari,
+    // CJK, Cyrillic, etc.) whose characters fall outside SINGLE_RE's ASCII range.
+    for pattern in &patterns.candidate_patterns {
+        if let Ok(re) = Regex::new(pattern) {
+            for cap in re.captures_iter(text) {
+                // Some locale patterns lack an explicit capture group (e.g. CJK
+                // surnames concatenated with a unicode range); fall back to the
+                // whole match when group 1 is absent.
+                let word = cap.get(1).map_or_else(|| &cap[0], |m| m.as_str());
+                let lower = word.to_lowercase();
+                if word.chars().count() > 1
+                    && !base_stops.contains(lower.as_str())
+                    && !locale_stops.contains(&lower)
+                {
+                    *counts.entry(word.to_string()).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+
     for cap in MULTI_RE.captures_iter(text) {
         let phrase = &cap[1];
-        let is_stopped = phrase.split_whitespace().any(|token| {
-            let lower = token.to_lowercase();
-            base_stops.contains(lower.as_str()) || locale_stops.contains(&lower)
-        });
-        if !is_stopped {
+        if !phrase_is_stopped(phrase) {
             *counts.entry(phrase.to_string()).or_insert(0) += 1;
         }
     }
@@ -289,11 +336,7 @@ fn extract_candidates(text: &str, patterns: &EntityPatterns) -> HashMap<String, 
         if let Ok(re) = Regex::new(pattern) {
             for cap in re.captures_iter(text) {
                 let phrase = &cap[1];
-                let is_stopped = phrase.split_whitespace().any(|token| {
-                    let lower = token.to_lowercase();
-                    base_stops.contains(lower.as_str()) || locale_stops.contains(&lower)
-                });
-                if !is_stopped {
+                if !phrase_is_stopped(phrase) {
                     *counts.entry(phrase.to_string()).or_insert(0) += 1;
                 }
             }
