@@ -1,7 +1,11 @@
 #!/bin/bash
 # MEMPALACE PRE-COMPACT HOOK — Synchronous mine before context compression
 #
-# Claude Code "PreCompact" hook. Delegates to `mempalace hook --hook precompact --harness claude-code`.
+# PreCompact hook. Delegates to
+# `mempalace hook --hook precompact --harness "${MEMPAL_HARNESS:-claude-code}"`,
+# letting the harness identifier flow from the `MEMPAL_HARNESS` env var (defaulting
+# to `claude-code` for legacy installs and `codex` for Codex CLI — see the example
+# block below).
 # The Rust binary mines the transcript directory synchronously so memories land
 # before the compaction window closes, then outputs `{}` to allow compaction.
 #

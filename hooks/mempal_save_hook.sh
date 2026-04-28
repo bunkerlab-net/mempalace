@@ -1,7 +1,11 @@
 #!/bin/bash
 # MEMPALACE SAVE HOOK — Auto-save every N exchanges
 #
-# Claude Code "Stop" hook. Delegates to `mempalace hook --hook stop --harness claude-code`.
+# Stop hook. Delegates to
+# `mempalace hook --hook stop --harness "${MEMPAL_HARNESS:-claude-code}"`,
+# letting the harness identifier flow from the `MEMPAL_HARNESS` env var
+# (defaulting to `claude-code` for legacy installs and `codex` for Codex CLI —
+# see the example block below).
 # The Rust binary counts messages, manages save state, writes diary entries,
 # and emits the correct JSON response on stdout.
 #
