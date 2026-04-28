@@ -105,11 +105,9 @@ pub async fn regenerate_closets(
         drawers.len()
     };
 
-    // Purge stale closets before regenerating so that chunks deleted from the
-    // drawers table do not leave orphaned entries in `compressed`.
-    if !dry_run && !drawers.is_empty() {
-        regenerate_closets_purge_drawers(connection, &drawers[..limit]).await?;
-    }
+    // Do not purge upfront: a provider failure mid-batch would otherwise wipe
+    // existing closets the user could still rely on. Replacement happens
+    // atomically per drawer inside upsert_closet_lines (INSERT OR REPLACE).
 
     let mut stats = RegenerateStats::default();
     for drawer in drawers.into_iter().take(limit) {
@@ -184,31 +182,6 @@ async fn regenerate_closets_fetch_drawers(
     debug_assert!(drawers.iter().all(|drawer| !drawer.content.is_empty()));
 
     Ok(drawers)
-}
-
-/// Delete `compressed` rows for the specific drawer IDs being regenerated.
-///
-/// Used instead of source-file purging so that when `sample > 0`, only the
-/// sampled drawers' closet entries are removed — unsampled drawers sharing the
-/// same source file are left untouched.
-async fn regenerate_closets_purge_drawers(
-    connection: &Connection,
-    drawers: &[DrawerRow],
-) -> Result<()> {
-    assert!(
-        !drawers.is_empty(),
-        "regenerate_closets_purge_drawers: drawers must not be empty"
-    );
-    for drawer in drawers {
-        assert!(
-            !drawer.id.is_empty(),
-            "regenerate_closets_purge_drawers: drawer id must not be empty"
-        );
-        connection
-            .execute("DELETE FROM compressed WHERE id = ?", (drawer.id.as_str(),))
-            .await?;
-    }
-    Ok(())
 }
 
 /// Called by `regenerate_closets` to process one drawer through the LLM and upsert the result.

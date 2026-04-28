@@ -646,9 +646,25 @@ fn onboarding_write_aaak_entities_file(
     if !projects.is_empty() {
         lines.push(String::new());
         lines.push("## Projects".to_string());
+        // Track codes already issued to people so project codes can't collide with
+        // them, and across projects so two projects sharing a 4-char prefix get
+        // distinct deterministic suffixes.
+        let mut used: std::collections::HashSet<String> =
+            codes.iter().map(|(_, code)| code.clone()).collect();
         for proj in projects {
-            let code: String = proj.chars().take(4).collect::<String>().to_uppercase();
-            lines.push(format!("  {code}={proj}"));
+            let base: String = proj.chars().take(4).collect::<String>().to_uppercase();
+            let mut candidate = base.clone();
+            let mut suffix: usize = 1;
+            while used.contains(&candidate) {
+                candidate = format!("{base}{suffix}");
+                suffix += 1;
+                assert!(
+                    suffix < 1000,
+                    "onboarding project code collision suffix exceeded"
+                );
+            }
+            used.insert(candidate.clone());
+            lines.push(format!("  {candidate}={proj}"));
         }
     }
 

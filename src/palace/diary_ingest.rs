@@ -198,6 +198,10 @@ async fn diary_ingest_file(
         let drawer_id = diary_ingest_drawer_id(wing, &date_prefix, index);
         let source_path = file_path.to_string_lossy();
 
+        if force {
+            diary_ingest_file_purge_drawer(connection, &drawer_id).await?;
+        }
+
         let inserted = add_drawer(
             connection,
             &DrawerParams {
@@ -227,6 +231,30 @@ async fn diary_ingest_file(
         },
     );
     Ok(created)
+}
+
+/// Called by `diary_ingest_file` when `--force` is set so `add_drawer` (INSERT OR
+/// IGNORE) refreshes existing diary content instead of silently no-op'ing on the
+/// duplicate id.
+async fn diary_ingest_file_purge_drawer(connection: &Connection, drawer_id: &str) -> Result<()> {
+    assert!(
+        !drawer_id.is_empty(),
+        "diary_ingest_file_purge_drawer: drawer_id must not be empty"
+    );
+    // Negative-space precondition: drawer ids never contain SQL wildcards or path
+    // separators — those would indicate a bug in diary_ingest_drawer_id, not a
+    // user-supplied value.
+    assert!(
+        !drawer_id.contains('%') && !drawer_id.contains('/'),
+        "diary_ingest_file_purge_drawer: drawer_id must not contain wildcards or slashes"
+    );
+    connection
+        .execute("DELETE FROM drawers WHERE id = ?", (drawer_id,))
+        .await?;
+    connection
+        .execute("DELETE FROM drawer_words WHERE drawer_id = ?", (drawer_id,))
+        .await?;
+    Ok(())
 }
 
 /// Split diary text on `## ` H2 headers.

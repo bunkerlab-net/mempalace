@@ -319,11 +319,25 @@ struct EntityScores {
     person_category_count: usize,
 }
 
+/// Distinct person-signal categories that contribute to corroboration.
+///
+/// Returned as a `HashSet` rather than a count so the locale-signal helper and
+/// the hardcoded English checks can be unioned without double-counting overlaps
+/// (e.g. both English and a locale firing on the verb arm).
+#[derive(Hash, Eq, PartialEq, Copy, Clone)]
+enum PersonCategory {
+    Verb,
+    Dialogue,
+    Pronoun,
+    DirectAddress,
+}
+
 /// Score person-related signals: verb patterns, dialogue markers, pronouns, direct address.
 ///
 /// `pronoun_re` is the compiled locale pronoun regex built from `EntityPatterns`.
-/// Returns `(score, category_count)` where `category_count` is the number of distinct
-/// signal categories that fired (verb, dialogue, pronoun, addressed — max 4).
+/// Returns `(score, categories)` where `categories` is the set of distinct
+/// signal kinds that fired across both the hardcoded English checks and the
+/// locale templates — caller computes the count from the union.
 fn score_entity_person(
     name: &str,
     escaped: &str,
@@ -331,9 +345,9 @@ fn score_entity_person(
     lines: &[String],
     pronoun_re: &Regex,
     patterns: &EntityPatterns,
-) -> (i32, usize) {
+) -> (i32, HashSet<PersonCategory>) {
     let mut score = 0i32;
-    let mut category_count: usize = 0;
+    let mut categories: HashSet<PersonCategory> = HashSet::new();
 
     let person_verbs = [
         "said", "asked", "told", "replied", "laughed", "smiled", "cried", "felt", "thinks?",
@@ -350,7 +364,7 @@ fn score_entity_person(
         }
     }
     if verb_hit {
-        category_count += 1;
+        categories.insert(PersonCategory::Verb);
     }
 
     let dialogue_pats = [
@@ -369,13 +383,13 @@ fn score_entity_person(
         }
     }
     if dialogue_hit {
-        category_count += 1;
+        categories.insert(PersonCategory::Dialogue);
     }
 
     let pronoun_hits = score_entity_person_pronoun_score(name, lines, pronoun_re);
     if pronoun_hits > 0 {
         score += pronoun_hits * 2;
-        category_count += 1;
+        categories.insert(PersonCategory::Pronoun);
     }
 
     if let Ok(re) = Regex::new(&format!(
@@ -384,13 +398,17 @@ fn score_entity_person(
         let count = re.find_iter(text).count();
         if count > 0 {
             score += i32::try_from(count).unwrap_or(i32::MAX) * 4;
-            category_count += 1;
+            categories.insert(PersonCategory::DirectAddress);
         }
     }
 
     let (locale_score, locale_categories) =
         score_entity_person_locale_signals(escaped, text, patterns);
-    (score + locale_score, category_count + locale_categories)
+    // Union ensures a locale verb hit and an English verb hit count as one
+    // verb category, not two. Without this, the >=2 corroboration check could
+    // pass on what is really a single signal kind seen twice.
+    categories.extend(locale_categories);
+    (score + locale_score, categories)
 }
 
 /// Called by `score_entity_person` to keep that function within the 70-line limit.
@@ -429,19 +447,20 @@ fn score_entity_person_pronoun_score(name: &str, lines: &[String], pronoun_re: &
 ///
 /// Each template substitutes `{name}` with `escaped` before compilation.
 /// Verb hits weight 2×, dialogue 3×, direct-address 4× — matching the hardcoded English weights.
-/// Returns `(score, category_count)` for the locale signal categories that fired.
+/// Returns `(score, categories)` so the caller can union them with the English
+/// signal set and avoid double-counting overlapping signal kinds.
 fn score_entity_person_locale_signals(
     escaped: &str,
     text: &str,
     patterns: &EntityPatterns,
-) -> (i32, usize) {
+) -> (i32, HashSet<PersonCategory>) {
     assert!(
         !escaped.is_empty(),
         "score_entity_person_locale_signals: escaped must not be empty"
     );
 
     let mut score = 0i32;
-    let mut category_count: usize = 0;
+    let mut categories: HashSet<PersonCategory> = HashSet::new();
 
     let mut verb_hit = false;
     for template in &patterns.person_verb_patterns {
@@ -455,7 +474,7 @@ fn score_entity_person_locale_signals(
         }
     }
     if verb_hit {
-        category_count += 1;
+        categories.insert(PersonCategory::Verb);
     }
 
     let mut dialogue_hit = false;
@@ -470,7 +489,7 @@ fn score_entity_person_locale_signals(
         }
     }
     if dialogue_hit {
-        category_count += 1;
+        categories.insert(PersonCategory::Dialogue);
     }
 
     let mut address_hit = false;
@@ -485,13 +504,13 @@ fn score_entity_person_locale_signals(
         }
     }
     if address_hit {
-        category_count += 1;
+        categories.insert(PersonCategory::DirectAddress);
     }
 
-    // Postcondition: at most 3 categories (verb, dialogue, direct-address).
-    debug_assert!(category_count <= 3);
+    // Postcondition: at most 3 distinct locale categories (verb, dialogue, direct-address).
+    debug_assert!(categories.len() <= 3);
 
-    (score, category_count)
+    (score, categories)
 }
 
 /// Score project-related signals for `escaped` against `text`: build/deploy verbs and versioned references.
@@ -555,12 +574,12 @@ fn score_entity(
     assert!(!name.is_empty(), "score_entity: name must not be empty");
     let escaped = regex::escape(name);
 
-    let (person_score, person_category_count) =
+    let (person_score, person_categories) =
         score_entity_person(name, &escaped, text, lines, pronoun_re, patterns);
     EntityScores {
         person_score,
         project_score: score_entity_project(&escaped, text, patterns),
-        person_category_count,
+        person_category_count: person_categories.len(),
     }
 }
 
@@ -1424,18 +1443,18 @@ Clara said the migration is complete. He agreed.\n";
     fn score_entity_person_locale_signals_fires_verb_pattern() {
         // The German locale has person_verb_patterns such as `\b{name}\s+sagte\b`.
         // Providing German text with a matching verb must produce a positive score
-        // and a category_count of at least 1.
+        // and surface the Verb category in the returned set.
         let patterns = get_entity_patterns(&["de"]);
         let escaped = regex::escape("Klaus");
         let text = "Klaus sagte, dass er kommt. Klaus sagte es noch einmal.";
-        let (score, category_count) = score_entity_person_locale_signals(&escaped, text, &patterns);
+        let (score, categories) = score_entity_person_locale_signals(&escaped, text, &patterns);
         assert!(
             score > 0,
             "German verb pattern must yield positive score; got {score}"
         );
         assert!(
-            category_count >= 1,
-            "German verb hit must increment category_count; got {category_count}"
+            categories.contains(&PersonCategory::Verb),
+            "German verb hit must surface the Verb category"
         );
     }
 
@@ -1447,14 +1466,14 @@ Clara said the migration is complete. He agreed.\n";
         let escaped = regex::escape("Klaus");
         // Line starts with "Klaus: " which matches `^{name}:\s`.
         let text = "Klaus: Ich bin hier. Alle hörten zu.";
-        let (score, category_count) = score_entity_person_locale_signals(&escaped, text, &patterns);
+        let (score, categories) = score_entity_person_locale_signals(&escaped, text, &patterns);
         assert!(
             score > 0,
             "German dialogue pattern must yield positive score; got {score}"
         );
         assert!(
-            category_count >= 1,
-            "German dialogue hit must increment category_count; got {category_count}"
+            categories.contains(&PersonCategory::Dialogue),
+            "German dialogue hit must surface the Dialogue category"
         );
     }
 
@@ -1465,28 +1484,28 @@ Clara said the migration is complete. He agreed.\n";
         let patterns = get_entity_patterns(&["de"]);
         let escaped = regex::escape("Klaus");
         let text = "hallo Klaus, wie geht es dir?";
-        let (score, category_count) = score_entity_person_locale_signals(&escaped, text, &patterns);
+        let (score, categories) = score_entity_person_locale_signals(&escaped, text, &patterns);
         assert!(
             score > 0,
             "German direct-address pattern must yield positive score; got {score}"
         );
         assert!(
-            category_count >= 1,
-            "German direct-address hit must increment category_count; got {category_count}"
+            categories.contains(&PersonCategory::DirectAddress),
+            "German direct-address hit must surface the DirectAddress category"
         );
     }
 
     #[test]
     fn score_entity_person_locale_signals_no_match_returns_zero() {
-        // Text with no German person signals must return (0, 0).
+        // Text with no German person signals must return (0, empty set).
         let patterns = get_entity_patterns(&["de"]);
         let escaped = regex::escape("Klaus");
         let text = "The weather is fine today and nothing unusual happened.";
-        let (score, category_count) = score_entity_person_locale_signals(&escaped, text, &patterns);
+        let (score, categories) = score_entity_person_locale_signals(&escaped, text, &patterns);
         assert_eq!(score, 0, "no matching pattern must yield score 0");
-        assert_eq!(
-            category_count, 0,
-            "no matching pattern must yield category_count 0"
+        assert!(
+            categories.is_empty(),
+            "no matching pattern must yield an empty category set"
         );
     }
 

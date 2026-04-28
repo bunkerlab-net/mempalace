@@ -1272,13 +1272,11 @@ mod tests {
             "timestamp line with unknown month must still parse"
         );
         let timestamp = result.expect("timestamp must be Some");
+        // Anchor on the YYYY-MM- prefix so the assertion can't pass merely because
+        // the minutes field happens to be "00"; the month component itself must be "00".
         assert!(
-            timestamp.contains("00"),
+            timestamp.starts_with("2025-00-"),
             "unknown month must produce '00' as month component: {timestamp}"
-        );
-        assert!(
-            timestamp.contains("2025"),
-            "year must be preserved even with unknown month: {timestamp}"
         );
     }
 }

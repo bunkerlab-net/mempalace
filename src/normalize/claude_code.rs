@@ -550,15 +550,9 @@ mod tests {
 
     #[test]
     fn strip_noise_removes_all_named_noise_tags() {
-        // Every tag name in NOISE_TAG_NAMES must be removed by strip_noise.
-        let tag_names = [
-            "command-message",
-            "command-name",
-            "task-notification",
-            "user-prompt-submit-hook",
-            "hook_output",
-        ];
-        for tag_name in tag_names {
+        // Drive the test from the canonical NOISE_TAG_NAMES list so any tag added
+        // there is automatically exercised — a hardcoded list would silently drift.
+        for tag_name in NOISE_TAG_NAMES {
             let text = format!("before\n<{tag_name}>body</{tag_name}>\nafter");
             let result = strip_noise(&text);
             assert!(

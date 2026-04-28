@@ -374,13 +374,11 @@ impl EntityRegistry {
             if name.is_empty() {
                 continue;
             }
+            // seed_person_entry already records the nickname under the canonical
+            // entry's `aliases`; a second nickname-keyed PersonEntry would create
+            // two records for the same person and make canonical resolution
+            // depend on HashMap iteration order.
             self.seed_person_entry(name, person);
-            if let Some(nickname) = person.nickname.as_deref() {
-                let nick = nickname.trim();
-                if !nick.is_empty() && nick != name {
-                    self.seed_nickname_entry(nick, name, person);
-                }
-            }
         }
 
         self.seed_ambiguous_flags();
@@ -723,10 +721,8 @@ impl EntityRegistry {
         let aliases = person
             .nickname
             .as_deref()
-            .filter(|nick| {
-                let nick = nick.trim();
-                !nick.is_empty() && nick != name
-            })
+            .map(str::trim)
+            .filter(|nick| !nick.is_empty() && *nick != name)
             .map(|nick| vec![nick.to_string()])
             .unwrap_or_default();
 
@@ -745,40 +741,6 @@ impl EntityRegistry {
 
         // Pair assertion: the name must be present immediately after insert.
         debug_assert!(self.data.people.contains_key(name));
-    }
-
-    /// Insert an alias `PersonEntry` pointing back to `canonical`.
-    ///
-    /// Called when a [`SeedPerson`] has a non-empty nickname. The alias entry
-    /// carries `canonical: Some(canonical.to_string())` so lookups can resolve
-    /// aliases to their canonical form.
-    fn seed_nickname_entry(&mut self, nickname: &str, canonical: &str, person: &SeedPerson) {
-        assert!(
-            !nickname.is_empty(),
-            "seed_nickname_entry: nickname must not be empty"
-        );
-        assert!(
-            !canonical.is_empty(),
-            "seed_nickname_entry: canonical must not be empty"
-        );
-
-        let ctx = if person.context.is_empty() {
-            "personal".to_string()
-        } else {
-            person.context.clone()
-        };
-        self.data.people.insert(
-            nickname.to_string(),
-            PersonEntry {
-                source: "onboarding".to_string(),
-                contexts: vec![ctx],
-                aliases: vec![canonical.to_string()],
-                relationship: person.relationship.clone(),
-                confidence: CONFIDENCE_ONBOARDING,
-                seen_count: 0,
-                canonical: Some(canonical.to_string()),
-            },
-        );
     }
 
     /// Rebuild `ambiguous_flags` from the current `people` map.
@@ -1359,6 +1321,9 @@ mod tests {
 
     #[test]
     fn seed_registers_nickname_as_alias_entry() {
+        // Nicknames live on the canonical record's `aliases` list rather than as a
+        // separate map entry — keeping a single source of truth means lookups
+        // resolve deterministically regardless of HashMap iteration order.
         let (temp, mut registry) = test_registry();
         let people = vec![SeedPerson {
             name: "Maxwell".to_string(),
@@ -1376,13 +1341,20 @@ mod tests {
             "Maxwell must be present"
         );
         assert!(
-            registry.data.people.contains_key("Max"),
-            "Max alias must be present"
+            !registry.data.people.contains_key("Max"),
+            "Max must not be a separate map entry — only an alias on Maxwell"
         );
         assert_eq!(
-            registry.data.people["Max"].canonical,
-            Some("Maxwell".to_string()),
-            "Max must point to Maxwell"
+            registry.data.people["Maxwell"].aliases,
+            vec!["Max".to_string()],
+            "Max must appear as an alias on Maxwell's canonical entry"
+        );
+        // Lookup resolves the nickname to Maxwell via the alias path.
+        let resolved = registry.lookup("Max", "work");
+        assert_eq!(resolved.name, "Maxwell", "alias lookup must return Maxwell");
+        assert_eq!(
+            resolved.entity_type, "person",
+            "alias lookup must classify as person"
         );
     }
 

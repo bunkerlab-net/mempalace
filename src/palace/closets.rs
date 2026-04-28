@@ -191,6 +191,11 @@ fn search_closet_boost_score(rows: &[turso::Row], query_words: &[String]) -> Vec
 
     let mut best: HashMap<String, usize> = HashMap::new();
 
+    // Lowercase query words once so case-insensitive matching also works when a
+    // caller passes mixed-case input — internal callers already lowercase, but
+    // this keeps the function correct under its public signature.
+    let query_lower: Vec<String> = query_words.iter().map(|word| word.to_lowercase()).collect();
+
     for row in rows {
         let source_file: String = row.get(0).unwrap_or_default();
         let content: String = row.get(1).unwrap_or_default();
@@ -198,7 +203,7 @@ fn search_closet_boost_score(rows: &[turso::Row], query_words: &[String]) -> Vec
             continue;
         }
         let content_lower = content.to_lowercase();
-        let hit_count = query_words
+        let hit_count = query_lower
             .iter()
             .filter(|word| content_lower.contains(word.as_str()))
             .count();

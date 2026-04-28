@@ -34,6 +34,9 @@
 # MEMPALACE_DIR — override the palace data directory (optional).
 #                 Defaults to $XDG_DATA_HOME/mempalace or ~/.local/share/mempalace.
 #
+# MEMPAL_HARNESS — override the harness identifier passed to the hook command (optional).
+#                  Defaults to "claude-code". Set to "codex" for Codex CLI installs.
+#
 # A longer timeout (120s) is appropriate here because the mine runs synchronously.
 
-exec mempalace hook --hook precompact --harness claude-code
+exec mempalace hook --hook precompact --harness "${MEMPAL_HARNESS:-claude-code}"

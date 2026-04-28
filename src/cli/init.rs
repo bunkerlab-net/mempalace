@@ -89,7 +89,7 @@ pub fn run(
     assert!(!directory.as_os_str().is_empty());
 
     // Phase 1: discover entities from manifest files and git history.
-    let (projects, detected) = run_discover_entities(&directory);
+    let (projects, detected) = run_discover_entities(&directory, lang);
 
     // Phase 1.5: optionally refine entities with the LLM.
     let detected = run_refine_entities(detected, &directory, llm_opts)?;
@@ -126,7 +126,7 @@ pub fn run(
 /// Returns the raw `ProjectInfo` list (for wing-name derivation) and the merged
 /// `DetectedDict`. Never fails — returns empty collections when the directory has
 /// no recognized signals. Called by [`run`].
-fn run_discover_entities(directory: &Path) -> (Vec<ProjectInfo>, DetectedDict) {
+fn run_discover_entities(directory: &Path, lang: &[String]) -> (Vec<ProjectInfo>, DetectedDict) {
     assert!(directory.is_dir());
     assert!(!directory.as_os_str().is_empty());
 
@@ -142,10 +142,10 @@ fn run_discover_entities(directory: &Path) -> (Vec<ProjectInfo>, DetectedDict) {
     let has_real_signal = !projects.is_empty() || !people.is_empty();
     let detected = merge_detected(real_signal, session_signal, has_real_signal);
 
-    // Phase 1b: supplement with prose-based entity detection.
-    // Languages default to English; entity_languages config is read by the
-    // hook/MCP path where the config is already loaded.
-    let detected = run_discover_entities_prose(directory, detected);
+    // Phase 1b: supplement with prose-based entity detection. Use the CLI-provided
+    // languages so prose detection respects --lang during init; defaults to English
+    // when the caller passed no languages.
+    let detected = run_discover_entities_prose(directory, detected, lang);
 
     // Pair assertion: entity lists are bounded.
     debug_assert!(
@@ -165,7 +165,11 @@ fn run_discover_entities(directory: &Path) -> (Vec<ProjectInfo>, DetectedDict) {
 /// Scans up to 10 prose/code files in `directory`, runs `detect_entities` with
 /// English patterns, then merges any new candidates into `current`. Returns
 /// `current` unchanged if no prose files are found.
-fn run_discover_entities_prose(directory: &Path, current: DetectedDict) -> DetectedDict {
+fn run_discover_entities_prose(
+    directory: &Path,
+    current: DetectedDict,
+    lang: &[String],
+) -> DetectedDict {
     let prose_files = entity_detect::scan_for_detection(directory, 10);
     if prose_files.is_empty() {
         return current;
@@ -174,7 +178,15 @@ fn run_discover_entities_prose(directory: &Path, current: DetectedDict) -> Detec
         .iter()
         .map(std::path::PathBuf::as_path)
         .collect();
-    let result = entity_detect::detect_entities(&prose_refs, 10, &["en"]);
+    // Borrow the caller's languages as &str slices; default to English when empty
+    // so existing single-language callers keep working without configuration.
+    let lang_refs: Vec<&str> = lang.iter().map(String::as_str).collect();
+    let languages: &[&str] = if lang_refs.is_empty() {
+        &["en"]
+    } else {
+        &lang_refs
+    };
+    let result = entity_detect::detect_entities(&prose_refs, 10, languages);
 
     assert!(
         result.people.len() + result.projects.len() + result.uncertain.len()
@@ -908,7 +920,7 @@ mod tests {
         .expect("must write session file");
 
         // run_discover_entities should take the is_claude_projects_root=true branch.
-        let (_projects, detected) = run_discover_entities(temp_dir.path());
+        let (_projects, detected) = run_discover_entities(temp_dir.path(), &[]);
         // The session JSONL carries cwd="/Users/robbie/test-proj", so the session
         // scanner must surface "test-proj" in detected.projects.
         assert!(

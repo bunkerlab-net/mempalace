@@ -214,7 +214,10 @@ fn dedup_find_duplicates(
             }
             pairs_checked += 1;
 
-            if to_delete.contains(&drawer_i.id) && to_delete.contains(&drawer_j.id) {
+            // Skip when EITHER drawer is already marked for deletion: comparing a
+            // condemned drawer against a fresh one wastes a Jaccard call and could
+            // re-mark the survivor we already chose to keep.
+            if to_delete.contains(&drawer_i.id) || to_delete.contains(&drawer_j.id) {
                 continue;
             }
 
@@ -268,7 +271,11 @@ fn dedup_jaccard(set_a: &HashSet<String>, set_b: &HashSet<String>) -> f64 {
     result
 }
 
-/// Delete one drawer and its associated `drawer_words` and `compressed` rows.
+/// Delete one drawer and every row that references it.
+///
+/// Without this, dropping a drawer would leave dangling `triples.source_drawer_id`
+/// and `explicit_tunnels.source_drawer_id` / `target_drawer_id` references —
+/// neither table has FK cascades configured.
 async fn dedup_delete_drawer(connection: &Connection, id: &str) -> Result<()> {
     assert!(!id.is_empty(), "dedup_delete_drawer: id must not be empty");
 
@@ -282,11 +289,29 @@ async fn dedup_delete_drawer(connection: &Connection, id: &str) -> Result<()> {
     connection
         .execute("DELETE FROM compressed WHERE id = ?", (id,))
         .await?;
+    // Knowledge-graph triples: clear the back-reference but keep the triple itself
+    // — the fact may still be valid even if the original evidence drawer is gone.
+    connection
+        .execute(
+            "UPDATE triples SET source_drawer_id = NULL WHERE source_drawer_id = ?",
+            (id,),
+        )
+        .await?;
+    // Explicit cross-wing tunnels: drop any tunnel whose source or target was the
+    // deleted drawer; leaving them would point at an id that no longer exists.
+    connection
+        .execute(
+            "DELETE FROM explicit_tunnels WHERE source_drawer_id = ? OR target_drawer_id = ?",
+            (id, id),
+        )
+        .await?;
 
     Ok(())
 }
 
 #[cfg(test)]
+// Test code — .expect() is acceptable: tests run only in dev/CI and a panic
+// produces a clearer failure than propagating an unexpected `Result` error.
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;

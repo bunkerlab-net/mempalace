@@ -109,7 +109,7 @@ pub async fn layer1(connection: &Connection, wing: Option<&str>) -> Result<Strin
         }
     }
 
-    let kg_fact_lines = layer1_append_kg_facts(connection).await?;
+    let kg_fact_lines = layer1_append_kg_facts(connection, wing).await?;
     for fact_line in kg_fact_lines {
         if total_len + fact_line.len() > CHARS_MAX {
             break;
@@ -156,19 +156,38 @@ fn layer1_build_room_map(rows: &[turso::Row]) -> HashMap<String, Vec<(String, St
 /// Query active KG facts and format them as display lines for L1 context injection.
 ///
 /// Called by `layer1` to append entity-relationship context below the room-based
-/// drawer summaries. Capped at 20 distinct (subject, predicate) pairs to bound
-/// the number of follow-up `query_relationship` calls and output size.
-async fn layer1_append_kg_facts(connection: &Connection) -> Result<Vec<String>> {
+/// drawer summaries. When `wing` is `Some`, the query is scoped to triples whose
+/// `source_drawer_id` belongs to that wing, so wake-up text stays on-topic
+/// instead of leaking facts from unrelated projects. Capped at 20 distinct
+/// (subject, predicate) pairs to bound the number of follow-up
+/// `query_relationship` calls and output size.
+async fn layer1_append_kg_facts(
+    connection: &Connection,
+    wing: Option<&str>,
+) -> Result<Vec<String>> {
     const PAIRS_LIMIT: usize = 20;
 
-    let pair_rows = db::query_all(
-        connection,
-        "SELECT DISTINCT s.name, t.predicate \
-         FROM triples t JOIN entities s ON t.subject = s.id \
-         WHERE t.valid_to IS NULL LIMIT 20",
-        (),
-    )
-    .await?;
+    let pair_rows = if let Some(wing_name) = wing {
+        db::query_all(
+            connection,
+            "SELECT DISTINCT s.name, t.predicate \
+             FROM triples t JOIN entities s ON t.subject = s.id \
+             WHERE t.valid_to IS NULL \
+               AND t.source_drawer_id IN (SELECT id FROM drawers WHERE wing = ?) \
+             LIMIT 20",
+            (wing_name,),
+        )
+        .await?
+    } else {
+        db::query_all(
+            connection,
+            "SELECT DISTINCT s.name, t.predicate \
+             FROM triples t JOIN entities s ON t.subject = s.id \
+             WHERE t.valid_to IS NULL LIMIT 20",
+            (),
+        )
+        .await?
+    };
 
     if pair_rows.is_empty() {
         return Ok(Vec::new());

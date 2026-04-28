@@ -106,11 +106,14 @@ mod tests {
         run(&connection, output_dir.path(), None, true)
             .await
             .expect("dry-run export must succeed");
+        // Explicitly require read_dir to succeed and produce no entries; treating
+        // an Err as "empty" would mask filesystem failures during the assertion.
+        let mut entries = output_dir
+            .path()
+            .read_dir()
+            .expect("read_dir on temp output dir must succeed");
         assert!(
-            !output_dir
-                .path()
-                .read_dir()
-                .is_ok_and(|mut entries| entries.next().is_some()),
+            entries.next().is_none(),
             "dry run must not create any files"
         );
     }

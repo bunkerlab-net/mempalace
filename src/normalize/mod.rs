@@ -384,7 +384,9 @@ mod tests {
 
     #[test]
     fn messages_to_transcript_multiple_exchanges() {
-        // A multi-exchange conversation must render all turns in order.
+        // A multi-exchange conversation must render all turns in order. Use byte
+        // offsets to compare relative position; presence checks alone wouldn't
+        // catch a regression that emitted turns out of order.
         let messages = vec![
             ("user", "ping"),
             ("assistant", "pong"),
@@ -392,16 +394,30 @@ mod tests {
             ("assistant", "ack"),
         ];
         let result = messages_to_transcript(&messages);
+        let user_one = result
+            .find("> ping")
+            .expect("first user turn must be present");
+        let assistant_one = result
+            .find("pong")
+            .expect("first assistant turn must appear");
+        let user_two = result
+            .find("> done")
+            .expect("second user turn must be present");
+        let assistant_two = result
+            .find("ack")
+            .expect("second assistant turn must appear");
         assert!(
-            result.contains("> ping"),
-            "first user turn must be prefixed"
+            user_one < assistant_one,
+            "first user turn must precede first assistant turn"
         );
-        assert!(result.contains("pong"), "first assistant turn must appear");
         assert!(
-            result.contains("> done"),
-            "second user turn must be prefixed"
+            assistant_one < user_two,
+            "first assistant turn must precede second user turn"
         );
-        assert!(result.contains("ack"), "second assistant turn must appear");
+        assert!(
+            user_two < assistant_two,
+            "second user turn must precede second assistant turn"
+        );
     }
 
     #[test]

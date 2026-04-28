@@ -276,7 +276,11 @@ async fn hook_stop_save_silently(
         } else {
             format!(" \u{2014} {}", themes.join(", "))
         };
-        hook_try_desktop_toast(&format!("{count} memories woven into the palace{tag}"));
+        // Honor the user's hook_desktop_toast setting (default false). The notification
+        // is opt-in to avoid spamming desktops that don't have notify-send configured.
+        if crate::config::MempalaceConfig::load().is_ok_and(|config| config.hook_desktop_toast) {
+            hook_try_desktop_toast(&format!("{count} memories woven into the palace{tag}"));
+        }
         hook_output(&json!({
             "systemMessage": format!("\u{2726} {count} memories woven into the palace{tag}"),
         }));
@@ -566,26 +570,28 @@ fn hook_theme_stopwords() -> std::collections::HashSet<&'static str> {
 fn hook_wing_from_transcript(transcript_path: &str) -> String {
     let normalized = transcript_path.replace('\\', "/");
 
-    // Primary: last dash-token of the encoded .claude/projects folder name.
-    if let Ok(re) = regex::Regex::new(r"/\.claude/projects/-([^/]+)")
+    // Primary: capture the segment after `-Projects-` so the wing name is the
+    // actual project (`myapp`) rather than the full encoded parent path
+    // (`users_alice_projects_myapp`).
+    if let Ok(re) = regex::Regex::new(r"/\.claude/projects/.*-Projects-([^/]+)")
         && let Some(caps) = re.captures(&normalized)
     {
-        let encoded = &caps[1];
-        if !encoded.is_empty() {
-            let project = encoded.to_lowercase().replace(['-', ' '], "_");
-            let project = project.trim_matches('_');
-            if !project.is_empty() {
-                return format!("wing_{project}");
-            }
+        let project = caps[1].to_lowercase().replace(['-', ' '], "_");
+        let project = project.trim_matches('_');
+        if !project.is_empty() {
+            return format!("wing_{project}");
         }
     }
 
-    // Fallback: explicit `-Projects-<name>` segment.
+    // Fallback: explicit `-Projects-<name>` segment anywhere in the path.
     if let Ok(re) = regex::Regex::new(r"-Projects-([^/]+?)(?:/|$)")
         && let Some(caps) = re.captures(&normalized)
     {
-        let project = caps[1].to_lowercase().replace(' ', "_");
-        return format!("wing_{project}");
+        let project = caps[1].to_lowercase().replace(['-', ' '], "_");
+        let project = project.trim_matches('_');
+        if !project.is_empty() {
+            return format!("wing_{project}");
+        }
     }
 
     "wing_sessions".to_string()
@@ -886,10 +892,11 @@ mod tests {
 
     #[test]
     fn hook_wing_from_transcript_extracts_project_name() {
-        // The full encoded folder slug is normalized (dashes → underscores) to form the wing name.
+        // Capture only the segment after `-Projects-` so the wing name is the
+        // actual project (`myapp`) rather than the full encoded parent path.
         let path = "/Users/alice/.claude/projects/-Users-alice-Projects-myapp/session.jsonl";
         let wing = hook_wing_from_transcript(path);
-        assert_eq!(wing, "wing_users_alice_projects_myapp");
+        assert_eq!(wing, "wing_myapp");
         assert!(wing.starts_with("wing_"));
     }
 

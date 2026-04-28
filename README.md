@@ -184,7 +184,7 @@ src/
 | Concurrency                    | SQLite locking issues         | WAL mode; resolved at turso layer   |
 | Duplicate detection            | 0.9 cosine threshold          | Keyword overlap threshold           |
 | Entity registry                | Wikipedia lookups             | Heuristic only (deferred)           |
-| Onboarding wizard              | Interactive                   | Not implemented (deferred)          |
+| Onboarding wizard              | Interactive                   | Interactive (`mempalace onboard`)   |
 | ChromaDB import                | N/A                           | Not implemented (deferred)          |
 | Gitignore support              | Full (projects)               | Full (`ignore` crate)               |
 | Repair command                 | Yes                           | Yes (`mempalace repair`)            |

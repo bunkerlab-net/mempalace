@@ -31,13 +31,27 @@ static NON_ALPHA_RE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("non-alpha strip regex is a compile-time literal and cannot fail to compile")
 });
 
-// Locale-aware quote pattern loaded once at first use via `i18n::get_regex`.
-// Returns None when the locale JSON is absent or the pattern fails to compile.
-static LOCALE_QUOTE_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
-    crate::i18n::get_regex("quote_pattern")
-        .as_deref()
-        .and_then(|pattern| Regex::new(pattern).ok())
-});
+/// Compile the current locale's `quote_pattern` regex on demand.
+///
+/// Returns `None` when the locale JSON omits `quote_pattern` or the pattern
+/// fails to compile. Compiled per call rather than cached at first use so a
+/// runtime locale change is honored — if compilation cost becomes a concern,
+/// add a per-locale cache, but a single regex compile is cheap relative to
+/// the surrounding text scan.
+fn current_locale_quote_re() -> Option<Regex> {
+    let pattern = crate::i18n::get_regex("quote_pattern")?;
+    // Locale JSON contracts non-empty patterns; an empty string would silently
+    // compile into a regex that matches every position.
+    assert!(
+        !pattern.is_empty(),
+        "current_locale_quote_re: quote_pattern must not be empty"
+    );
+    let compiled = Regex::new(&pattern).ok()?;
+    // Pair assertion: a successful compile must produce a non-trivial pattern
+    // (the locale JSON should never define an empty regex).
+    debug_assert!(!compiled.as_str().is_empty());
+    Some(compiled)
+}
 
 /// AAAK Dialect encoder — compresses plain text into symbolic memory format.
 pub struct Dialect {
@@ -122,8 +136,10 @@ fn detect_flags(text: &str) -> Vec<String> {
 /// key sentences). Falls back to scoring all sentences by decision-word density
 /// via `extract_key_sentence_score`.
 fn extract_key_sentence(text: &str) -> String {
-    // Prefer a verbatim quoted string when the locale defines a quote pattern.
-    if let Some(re) = LOCALE_QUOTE_RE.as_ref()
+    // Prefer a verbatim quoted string when the current locale defines a quote
+    // pattern. The regex is compiled per call so a runtime locale switch is
+    // honored — caching by locale would freeze whatever was active at first use.
+    if let Some(re) = current_locale_quote_re()
         && let Some(cap) = re.captures(text)
         && let Some(matched) = cap.get(1)
     {
@@ -688,7 +704,7 @@ mod tests {
 
     #[test]
     fn extract_key_sentence_returns_verbatim_quoted_string_via_locale_pattern() {
-        // Lines 128-133: when LOCALE_QUOTE_RE is Some (English locale has quote_pattern
+        // When current_locale_quote_re returns Some (English locale has quote_pattern
         // `"([^"]{20,200})"`), extract_key_sentence must return the quoted content
         // directly instead of scoring sentences. The quoted span must be >10 chars
         // to pass the inner length guard.
@@ -720,7 +736,7 @@ mod tests {
             "We decided to restructure all of the backend system",
             "first 51 bytes must be ASCII confirming é starts at byte 51"
         );
-        // No quotes in the text so LOCALE_QUOTE_RE does not short-circuit.
+        // No quotes in the text so current_locale_quote_re does not short-circuit.
         let result = extract_key_sentence(long_sentence);
         // The result must be truncated with "..." because len > 55 bytes.
         assert!(

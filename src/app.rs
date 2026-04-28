@@ -309,10 +309,11 @@ async fn run_repair(
 fn run_repair_confirm(mut reader: impl std::io::BufRead) -> bool {
     let mut answer = String::new();
     reader.read_line(&mut answer).ok();
-    assert!(
-        answer.len() <= 1024,
-        "run_repair_confirm: answer must be bounded"
-    );
+    // Treat unreasonably long input as invalid user input, not a contract violation.
+    // A user pasting a megabyte of text into the prompt should decline rather than panic.
+    if answer.len() > 1024 {
+        return false;
+    }
     let confirmed = answer.trim().to_lowercase() == "y";
     // Pair assertion: empty or whitespace-only input can never be confirmation.
     if answer.trim().is_empty() {

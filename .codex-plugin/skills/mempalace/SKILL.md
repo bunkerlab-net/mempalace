@@ -62,10 +62,17 @@ via MCP tools or the `mempalace` CLI. No cloud services or API keys required.
     mempalace mine <dir>                 Mine project files
     mempalace mine <dir> --mode convos   Mine conversation exports
     mempalace search "query"             Keyword search
-    mempalace wakeup                     Print L0+L1 wake-up context
+    mempalace wake-up                    Print L0+L1 wake-up context
     mempalace status                     Palace stats overview
     mempalace compress                   AAAK dialect compression
     mempalace split <dir>                Split large transcript files
+    mempalace sweep <target>             Tandem miner: catch missed messages
+    mempalace dedup                      Detect/remove near-duplicate drawers
+    mempalace export --output <dir>      Export drawers to markdown
+    mempalace instructions <name>        Print packaged skill instructions
+    mempalace onboard                    First-run interactive setup wizard
+    mempalace diary-ingest <dir>         Ingest YYYY-MM-DD*.md diary files
+    mempalace closet-llm --llm           Regenerate closets via LLM
     mempalace repair                     Rebuild inverted index
     mempalace mcp                        Run MCP server (stdio)
 

@@ -23,23 +23,24 @@ pub async fn run(connection: &Connection, palace_path: &Path) -> Result<()> {
 /// Both classes are fixed by the rebuild step that follows, so this function
 /// is informational only — it does not modify the database.
 pub(crate) async fn run_scan(connection: &Connection) -> Result<()> {
-    let unindexed_rows = query_all(
+    // Single round-trip: ask SQLite to count both classes of inconsistency at once
+    // rather than fetching the full unindexed id list just to take its length.
+    let rows = query_all(
         connection,
-        "SELECT id FROM drawers WHERE id NOT IN (SELECT DISTINCT drawer_id FROM drawer_words)",
+        "SELECT \
+           (SELECT count(*) FROM drawers WHERE id NOT IN (SELECT DISTINCT drawer_id FROM drawer_words)) AS unindexed_count, \
+           (SELECT count(*) FROM drawer_words WHERE drawer_id NOT IN (SELECT id FROM drawers)) AS orphan_count",
         (),
     )
     .await?;
-    let unindexed_count = unindexed_rows.len();
 
-    let orphan_rows = query_all(
-        connection,
-        "SELECT count(*) FROM drawer_words WHERE drawer_id NOT IN (SELECT id FROM drawers)",
-        (),
-    )
-    .await?;
-    let orphan_count: i64 = orphan_rows
-        .first()
+    let row = rows.first();
+    let unindexed_count: i64 = row
         .and_then(|row| row.get_value(0).ok())
+        .and_then(|cell| cell.as_integer().copied())
+        .unwrap_or(0);
+    let orphan_count: i64 = row
+        .and_then(|row| row.get_value(1).ok())
         .and_then(|cell| cell.as_integer().copied())
         .unwrap_or(0);
 
@@ -58,6 +59,7 @@ pub(crate) async fn run_scan(connection: &Connection) -> Result<()> {
     }
 
     // Postconditions: counts are non-negative.
+    debug_assert!(unindexed_count >= 0, "unindexed count must be non-negative");
     debug_assert!(orphan_count >= 0, "orphan count must be non-negative");
     Ok(())
 }

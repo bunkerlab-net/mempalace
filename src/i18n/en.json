@@ -60,11 +60,7 @@
       "\\b{name}\\s+knows?\\b",
       "\\b{name}\\s+decided\\b",
       "\\b{name}\\s+pushed\\b",
-      "\\b{name}\\s+wrote\\b",
-      "\\bhey\\s+{name}\\b",
-      "\\bthanks?\\s+{name}\\b",
-      "\\bhi\\s+{name}\\b",
-      "\\bdear\\s+{name}\\b"
+      "\\b{name}\\s+wrote\\b"
     ],
     "pronoun_patterns": [
       "\\bshe\\b",
@@ -83,7 +79,7 @@
       "^\\[{name}\\]",
       "\"{name}\\s+said"
     ],
-    "direct_address_pattern": "\\bhey\\s+{name}\\b|\\bthanks?\\s+{name}\\b|\\bhi\\s+{name}\\b",
+    "direct_address_pattern": "\\bhey\\s+{name}\\b|\\bthanks?\\s+{name}\\b|\\bhi\\s+{name}\\b|\\bdear\\s+{name}\\b",
     "project_verb_patterns": [
       "\\bbuilding\\s+{name}\\b",
       "\\bbuilt\\s+{name}\\b",
