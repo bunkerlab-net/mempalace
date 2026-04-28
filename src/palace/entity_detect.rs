@@ -1467,6 +1467,72 @@ Clara said the migration is complete. He agreed.\n";
         // The important assertion is that "The Moon" is absent.
     }
 
+    // ── extract_candidates — Hindi multi-word stopwords filtered by phrase check ─
+    //
+    // Covers issue #61: phrase-level stopword filtering for multi-word entries
+    // such as "के लिए" whose constituent tokens are not individually stopwords.
+
+    #[test]
+    fn extract_candidates_hindi_multi_word_stopword_is_filtered_by_phrase_check() {
+        // Hindi locale defines multi-word stopwords such as "के लिए" whose
+        // constituent tokens are not individually listed as stopwords, so only
+        // the phrase-level path inside phrase_is_stopped can suppress them.
+        // A multi_word_patterns entry targeting Devanagari bigrams is supplied
+        // so MULTI_RE (ASCII-only) does not need to capture the Devanagari phrase.
+        let mut stopwords = std::collections::HashSet::new();
+        stopwords.insert("के लिए".to_string());
+        let patterns = EntityPatterns {
+            candidate_patterns: vec![],
+            // Captures any two consecutive Devanagari-script words.
+            multi_word_patterns: vec![r"([\u{0900}-\u{097F}]+\s+[\u{0900}-\u{097F}]+)".to_string()],
+            person_verb_patterns: vec![],
+            pronoun_patterns: vec![],
+            dialogue_patterns: vec![],
+            direct_address_patterns: vec![],
+            project_verb_patterns: vec![],
+            stopwords,
+        };
+        // "के लिए" appears 4 times — above the frequency threshold of 3; without
+        // the phrase-level check it would survive as a candidate.
+        let text = "a के लिए b. a के लिए b. a के लिए b. a के लिए b.";
+        let candidates = extract_candidates(text, &patterns);
+        assert!(
+            !candidates.contains_key("के लिए"),
+            "Hindi multi-word stopword 'के लिए' must be suppressed by phrase-level check"
+        );
+    }
+
+    // ── extract_candidates — non-ASCII candidate_patterns wired correctly ────
+    //
+    // Covers issue #62: candidate_patterns targeting non-Latin scripts must be
+    // applied by extract_candidates (guarded by pattern_targets_non_ascii so
+    // ASCII-only patterns do not double-count Latin candidates).
+
+    #[test]
+    fn extract_candidates_non_ascii_candidate_pattern_captures_devanagari_name() {
+        // A candidate_patterns entry whose pattern contains \u (Devanagari block
+        // range) passes pattern_targets_non_ascii and must capture single-word
+        // Devanagari candidates that the ASCII SINGLE_RE cannot see.
+        // "राम" repeats 4 times, which exceeds the minimum frequency of 3.
+        let patterns = EntityPatterns {
+            // [\u{0900}-\u{097F}]{2,20} targets the Devanagari Unicode block.
+            candidate_patterns: vec![r"([\u{0900}-\u{097F}]{2,20})".to_string()],
+            multi_word_patterns: vec![],
+            person_verb_patterns: vec![],
+            pronoun_patterns: vec![],
+            dialogue_patterns: vec![],
+            direct_address_patterns: vec![],
+            project_verb_patterns: vec![],
+            stopwords: std::collections::HashSet::new(),
+        };
+        let text = "राम आया। राम गया। राम बोला। राम सोया।";
+        let candidates = extract_candidates(text, &patterns);
+        assert!(
+            candidates.contains_key("राम"),
+            "Devanagari name 'राम' must be detected via non-ASCII candidate_patterns entry"
+        );
+    }
+
     // ── detect_entities_load_text — files_max respected ──────────────────────
 
     #[test]
