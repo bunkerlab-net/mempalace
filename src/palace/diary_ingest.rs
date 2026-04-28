@@ -189,63 +189,45 @@ async fn diary_ingest_file(
     }
 
     let file_mtime = diary_ingest_file_mtime(file_path);
-
     let key = file_path.to_string_lossy().to_string();
-    let prev_count = if force {
-        0
-    } else {
-        cursor
-            .get(&key)
-            .and_then(|state| {
-                // Resume only when *both* size and mtime match — same-length
-                // edits leave `size` unchanged but bump `mtime`. Require
-                // `mtime > 0` so a platform that cannot report mtime (or a
-                // pre-upgrade cursor file) forces a safe re-ingest instead of
-                // matching a degenerate zero.
-                if state.size == file_size && state.mtime == file_mtime && file_mtime > 0 {
-                    Some(state.entry_count)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(0)
-    };
+    // Pull two distinct values from the cursor:
+    //   * `prev_count` — sections to skip on resume (0 when force or mismatch);
+    //   * `previous_entry_count` — total sections recorded on the last run,
+    //     used to purge orphaned drawers when the file has shrunk since.
+    let cursor_state = cursor.get(&key);
+    let previous_entry_count = cursor_state.map_or(0, |state| state.entry_count);
+    let prev_count = diary_ingest_resume_count(cursor_state, file_size, file_mtime, force);
 
     let text = std::fs::read_to_string(file_path).unwrap_or_default();
     let sections = diary_ingest_parse_sections(&text);
     let date_prefix = diary_ingest_extract_date(file_path);
 
-    let mut created = 0usize;
-    for (index, (header, body)) in sections.iter().enumerate().skip(prev_count) {
-        let label = if header.is_empty() {
-            &date_prefix
-        } else {
-            header.as_str()
-        };
-        let content = format!("{label}\n\n{body}");
-        let drawer_id = diary_ingest_drawer_id(wing, &date_prefix, index);
-        let source_path = file_path.to_string_lossy();
-
-        let params = DrawerParams {
-            id: &drawer_id,
+    let created = diary_ingest_file_apply_sections(
+        connection,
+        file_path,
+        DiarySectionContext {
             wing,
-            // Must match the room filter used by `tool_diary_read` in
-            // src/mcp/tools.rs (`WHERE room = 'diary'`); the previous
-            // value `"daily"` made ingested entries invisible to readers.
-            room: "diary",
-            content: &content,
-            source_file: source_path.as_ref(),
-            chunk_index: index,
-            added_by: agent,
-            ingest_mode: "diary",
-            source_mtime: None,
-        };
-        let inserted = diary_ingest_file_replace(connection, &drawer_id, &params, force).await?;
+            agent,
+            force,
+            prev_count,
+            date_prefix: &date_prefix,
+        },
+        &sections,
+    )
+    .await?;
 
-        if inserted {
-            created += 1;
-        }
-    }
+    // Purge drawers for sections that disappeared since the last run. Without
+    // this, deleting a `## Header` block from a file would leave its drawer
+    // floating in the palace forever, and a subsequent `--force` run would
+    // only refresh the surviving indices instead of cleaning up the tail.
+    diary_ingest_file_purge_orphans(
+        connection,
+        wing,
+        &date_prefix,
+        sections.len(),
+        previous_entry_count,
+    )
+    .await?;
 
     cursor.insert(
         key,
@@ -256,6 +238,107 @@ async fn diary_ingest_file(
         },
     );
     Ok(created)
+}
+
+/// Bundle of constant per-file parameters threaded through section ingestion.
+///
+/// Grouped into a struct so `diary_ingest_file_apply_sections` keeps a small,
+/// comprehensible parameter list rather than exploding into 7 positional args.
+struct DiarySectionContext<'a> {
+    wing: &'a str,
+    agent: &'a str,
+    force: bool,
+    prev_count: usize,
+    date_prefix: &'a str,
+}
+
+/// Called by `diary_ingest_file` to compute the resume index from the cursor.
+///
+/// Returns `0` when `force` is set or when the recorded `(size, mtime)` does
+/// not match the current file. Requires `file_mtime > 0` so a platform that
+/// cannot report mtime (or a pre-upgrade cursor file) re-ingests safely
+/// instead of matching a degenerate zero.
+fn diary_ingest_resume_count(
+    cursor_state: Option<&FileState>,
+    file_size: u64,
+    file_mtime: u64,
+    force: bool,
+) -> usize {
+    if force {
+        return 0;
+    }
+    cursor_state
+        .filter(|state| state.size == file_size && state.mtime == file_mtime && file_mtime > 0)
+        .map_or(0, |state| state.entry_count)
+}
+
+/// Called by `diary_ingest_file` to insert/replace drawers for each section.
+///
+/// Skips the first `ctx.prev_count` sections (resume) and returns the number
+/// of new drawers actually created.
+async fn diary_ingest_file_apply_sections(
+    connection: &Connection,
+    file_path: &Path,
+    ctx: DiarySectionContext<'_>,
+    sections: &[(String, String)],
+) -> Result<usize> {
+    let mut created = 0usize;
+    let source_path = file_path.to_string_lossy();
+    for (index, (header, body)) in sections.iter().enumerate().skip(ctx.prev_count) {
+        let label = if header.is_empty() {
+            ctx.date_prefix
+        } else {
+            header.as_str()
+        };
+        let content = format!("{label}\n\n{body}");
+        let drawer_id = diary_ingest_drawer_id(ctx.wing, ctx.date_prefix, index);
+
+        let params = DrawerParams {
+            id: &drawer_id,
+            wing: ctx.wing,
+            // Must match the room filter used by `tool_diary_read` in
+            // src/mcp/tools.rs (`WHERE room = 'diary'`); the previous
+            // value `"daily"` made ingested entries invisible to readers.
+            room: "diary",
+            content: &content,
+            source_file: source_path.as_ref(),
+            chunk_index: index,
+            added_by: ctx.agent,
+            ingest_mode: "diary",
+            source_mtime: None,
+        };
+        let inserted =
+            diary_ingest_file_replace(connection, &drawer_id, &params, ctx.force).await?;
+        if inserted {
+            created += 1;
+        }
+    }
+    Ok(created)
+}
+
+/// Called by `diary_ingest_file` to delete drawers for sections that no longer
+/// exist in the source file.
+///
+/// Iterates the open range `current_count..previous_count` so a shrunk file
+/// does not leave stranded drawers behind. When the file grew or stayed the
+/// same length this is a zero-iteration no-op.
+async fn diary_ingest_file_purge_orphans(
+    connection: &Connection,
+    wing: &str,
+    date_prefix: &str,
+    current_count: usize,
+    previous_count: usize,
+) -> Result<()> {
+    assert!(!wing.is_empty());
+    assert!(!date_prefix.is_empty());
+    if current_count >= previous_count {
+        return Ok(());
+    }
+    for stale_index in current_count..previous_count {
+        let drawer_id = diary_ingest_drawer_id(wing, date_prefix, stale_index);
+        diary_ingest_file_purge_drawer(connection, &drawer_id).await?;
+    }
+    Ok(())
 }
 
 /// Called by `diary_ingest_file` when `--force` is set so `add_drawer` (INSERT OR
@@ -599,6 +682,91 @@ mod tests {
 
                 assert_eq!(stats.days_updated, 0, "non-diary file must be skipped");
                 assert_eq!(stats.drawers_created, 0);
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn ingest_diaries_purges_drawers_for_deleted_sections() {
+        // First ingest creates two drawers; a later ingest after one section
+        // is removed must purge the orphaned drawer so a subsequent --force
+        // run does not silently leave a stale section behind. Prior to the
+        // purge fix, `diary-…-1` would persist in `drawers` forever.
+        let diary_dir =
+            tempfile::tempdir().expect("failed to create temp diary dir for shrink test");
+        let diary_file = diary_dir.path().join("2024-04-01.md");
+        std::fs::write(
+            &diary_file,
+            "## Morning\n\nFirst section with enough content to clear the size floor.\n\n## Evening\n\nSecond section with enough content to clear the size floor.",
+        )
+        .expect("failed to write initial diary file for shrink test");
+
+        let cursor_home =
+            tempfile::tempdir().expect("failed to create temp cursor home for shrink test");
+        let cursor_home_path = cursor_home
+            .path()
+            .to_str()
+            .expect("temp cursor home path must be valid UTF-8")
+            .to_string();
+        temp_env::async_with_vars(
+            [("MEMPALACE_DIR", Some(cursor_home_path.as_str()))],
+            async {
+                let (_db, connection) = crate::test_helpers::test_db().await;
+
+                let stats1 = ingest_diaries(
+                    &connection,
+                    diary_dir.path(),
+                    "journal",
+                    "test_agent",
+                    false,
+                )
+                .await
+                .expect("first ingest must succeed");
+                assert_eq!(
+                    stats1.drawers_created, 2,
+                    "first run must create both sections"
+                );
+
+                // Sleep one second so the rewrite gets a different mtime;
+                // resume requires both size and mtime to match, and on
+                // some filesystems same-second writes round to the same
+                // mtime which would short-circuit the shrink path.
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                std::fs::write(
+                    &diary_file,
+                    "## Morning\n\nFirst section with enough content to clear the size floor.",
+                )
+                .expect("failed to write shrunk diary file");
+
+                let _stats2 = ingest_diaries(
+                    &connection,
+                    diary_dir.path(),
+                    "journal",
+                    "test_agent",
+                    false,
+                )
+                .await
+                .expect("second ingest must succeed");
+
+                // The dropped section's drawer must have been purged. We
+                // query the drawers table directly so the test exercises
+                // the real database state, not just the returned stats.
+                let rows = crate::db::query_all(
+                    &connection,
+                    "SELECT COUNT(*) FROM drawers WHERE room = 'diary'",
+                    (),
+                )
+                .await
+                .expect("count query must succeed");
+                let count: i64 = rows
+                    .first()
+                    .and_then(|row| row.get(0).ok())
+                    .expect("count query must return one row with one column");
+                assert_eq!(
+                    count, 1,
+                    "deleting a section must leave exactly one diary drawer"
+                );
             },
         )
         .await;
