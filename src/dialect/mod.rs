@@ -151,16 +151,19 @@ fn extract_key_sentence(text: &str) -> String {
 /// Resolve the unfiltered key sentence — caller is responsible for sanitizing
 /// AAAK-reserved characters before encoding.
 fn extract_key_sentence_raw(text: &str) -> String {
-    if let Some(re) = current_locale_quote_re()
-        && let Some(cap) = re.captures(text)
+    if let Some(re) = current_locale_quote_re() {
         // Spanish (and potentially other locales) declare two alternations in
         // `quote_pattern` — one for `"..."` and one for `«...»` — so the
-        // matching capture may land in either group. Fall through to group 2
-        // when group 1 is absent so the second alternation is honored.
-        && let Some(matched) = cap.get(1).or_else(|| cap.get(2))
-    {
-        let quoted = matched.as_str().trim();
-        if quoted.len() > 10 {
+        // matching capture may land in either group. Iterate all matches to
+        // find the longest qualifying quote; `chars().count()` handles
+        // multibyte characters correctly where `.len()` would count bytes.
+        let best = re
+            .captures_iter(text)
+            .filter_map(|cap| cap.get(1).or_else(|| cap.get(2)))
+            .map(|m| m.as_str().trim())
+            .filter(|quoted| quoted.chars().count() > 10)
+            .max_by_key(|quoted| quoted.chars().count());
+        if let Some(quoted) = best {
             return quoted.to_string();
         }
     }
@@ -958,20 +961,32 @@ mod tests {
 
     #[test]
     fn extract_key_sentence_returns_verbatim_quoted_string_via_locale_pattern() {
-        // When current_locale_quote_re returns Some (English locale has quote_pattern
-        // `"([^"]{20,200})"`), extract_key_sentence must return the quoted content
-        // directly instead of scoring sentences. The quoted span must be >10 chars
-        // to pass the inner length guard.
-        let text = r#"She said "We should switch to GraphQL for better performance" and move on."#;
-        let result = extract_key_sentence(text);
-        // The quoted string "We should switch to GraphQL for better performance" is 49 chars > 10.
-        assert_eq!(
-            result, "We should switch to GraphQL for better performance",
-            "extract_key_sentence must return the quoted content directly"
-        );
-        assert!(
-            result.len() > 10,
-            "returned quote must exceed the 10-char length guard"
+        // Pin the locale to English so current_locale_quote_re uses the English
+        // quote_pattern (`"([^"]{20,200})"`) regardless of the process environment.
+        // Without pinning, a non-English MEMPALACE_LANG would change or omit the
+        // regex and make this test flaky.
+        temp_env::with_vars(
+            [
+                ("MEMPALACE_LANG", Some("en")),
+                ("MEMPAL_LANG", None::<&str>),
+            ],
+            || {
+                // When current_locale_quote_re returns Some, extract_key_sentence
+                // must return the quoted content directly instead of scoring sentences.
+                // The quoted span must be >10 chars to pass the inner length guard.
+                let text =
+                    r#"She said "We should switch to GraphQL for better performance" and move on."#;
+                let result = extract_key_sentence(text);
+                // "We should switch to GraphQL for better performance" is 49 chars > 10.
+                assert_eq!(
+                    result, "We should switch to GraphQL for better performance",
+                    "extract_key_sentence must return the quoted content directly"
+                );
+                assert!(
+                    result.len() > 10,
+                    "returned quote must exceed the 10-char length guard"
+                );
+            },
         );
     }
 

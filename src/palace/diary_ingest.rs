@@ -37,26 +37,31 @@ struct FileState {
     entry_count: usize,
     /// Byte length of the file on the last run.
     size: u64,
-    /// Last modification time in Unix-epoch seconds. Pairs with `size` so a
-    /// same-length edit (which would not change `size`) still invalidates the
-    /// cursor. `serde(default)` keeps cursor files written before this field
-    /// existed loadable; their `mtime == 0` will mismatch any real file mtime
-    /// and force one safe re-ingest after upgrade.
+    /// Last modification time in Unix-epoch milliseconds. Pairs with `size` so
+    /// a same-length edit (which would not change `size`) still invalidates the
+    /// cursor. Sub-second resolution catches same-second rewrites that
+    /// `as_secs()` would miss. `serde(default)` keeps cursor files written
+    /// before this field existed loadable; their `mtime == 0` will mismatch any
+    /// real file mtime and force one safe re-ingest after upgrade.
     #[serde(default)]
     mtime: u64,
 }
 
-/// Read the file's modification time as Unix-epoch seconds.
+/// Read the file's modification time as Unix-epoch milliseconds.
 ///
 /// Returns `0` when the platform or filesystem does not expose mtime — this
 /// pairs with the resume check, which only trusts an mtime that is both
 /// non-zero and equal across runs.
 fn diary_ingest_file_mtime(path: &Path) -> u64 {
-    path.metadata()
+    let duration = path
+        .metadata()
         .ok()
         .and_then(|meta| meta.modified().ok())
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map_or(0, |duration| duration.as_secs())
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok());
+    // as_millis() returns u128; truncation is safe: u64 holds ~585 million
+    // years of milliseconds, far exceeding any realistic mtime value.
+    #[allow(clippy::cast_possible_truncation)]
+    duration.map_or(0, |elapsed| elapsed.as_millis() as u64)
 }
 
 /// Ingest all diary files from `diary_dir` into the palace.
@@ -104,9 +109,9 @@ pub async fn ingest_diaries(
 
 /// Find `<config_dir>/diary_cursors.json`.
 ///
-/// The cursor file is global (not per-directory) so ingestion state is shared
-/// across all diary roots — a file ingested from one path is not re-ingested
-/// from another.
+/// The cursor file is stored in a single location; keys within it are scoped
+/// to `(wing, agent, path)` so two callers ingesting the same file into
+/// different wings or as different agents maintain independent resume state.
 fn diary_ingest_cursor_path() -> PathBuf {
     config::config_dir().join("diary_cursors.json")
 }
@@ -185,7 +190,11 @@ async fn diary_ingest_file(
 
     let file_size = file_path.metadata().map_or(0, |meta| meta.len());
     let file_mtime = diary_ingest_file_mtime(file_path);
-    let key = file_path.to_string_lossy().to_string();
+    let source_path = file_path.to_string_lossy();
+    // Composite key: scopes resume state to (wing, agent, path) so two callers
+    // ingesting the same file into different wings or as different agents do not
+    // share state. Null-byte separators prevent key injection between segments.
+    let key = format!("{wing}\x00{agent}\x00{source_path}");
     let date_prefix = diary_ingest_extract_date(file_path);
     // Always read `previous_entry_count` from the cursor — even for files now
     // below `MIN_FILE_BYTES` — so a diary that shrinks below the size floor
@@ -193,8 +202,16 @@ async fn diary_ingest_file(
     let previous_entry_count = cursor.get(&key).map_or(0, |state| state.entry_count);
 
     if file_size < MIN_FILE_BYTES {
-        diary_ingest_file_purge_orphans(connection, wing, &date_prefix, 0, previous_entry_count)
-            .await?;
+        diary_ingest_file_purge_orphans(
+            connection,
+            wing,
+            agent,
+            source_path.as_ref(),
+            &date_prefix,
+            0,
+            previous_entry_count,
+        )
+        .await?;
         cursor.insert(
             key,
             FileState {
@@ -209,15 +226,15 @@ async fn diary_ingest_file(
     let cursor_state = cursor.get(&key);
     let prev_count = diary_ingest_resume_count(cursor_state, file_size, file_mtime, force);
 
-    let text = std::fs::read_to_string(file_path).unwrap_or_default();
+    let text = std::fs::read_to_string(file_path)?;
     let sections = diary_ingest_parse_sections(&text);
 
     let created = diary_ingest_file_apply_sections(
         connection,
-        file_path,
         DiarySectionContext {
             wing,
             agent,
+            source_path: source_path.as_ref(),
             force,
             prev_count,
             date_prefix: &date_prefix,
@@ -233,6 +250,8 @@ async fn diary_ingest_file(
     diary_ingest_file_purge_orphans(
         connection,
         wing,
+        agent,
+        source_path.as_ref(),
         &date_prefix,
         sections.len(),
         previous_entry_count,
@@ -253,10 +272,13 @@ async fn diary_ingest_file(
 /// Bundle of constant per-file parameters threaded through section ingestion.
 ///
 /// Grouped into a struct so `diary_ingest_file_apply_sections` keeps a small,
-/// comprehensible parameter list rather than exploding into 7 positional args.
+/// comprehensible parameter list rather than exploding into 8 positional args.
 struct DiarySectionContext<'a> {
     wing: &'a str,
     agent: &'a str,
+    /// Canonical source file path passed to `DrawerParams.source_file` and used
+    /// when computing the drawer ID so agent+source combinations are unique.
+    source_path: &'a str,
     force: bool,
     prev_count: usize,
     date_prefix: &'a str,
@@ -288,12 +310,10 @@ fn diary_ingest_resume_count(
 /// of new drawers actually created.
 async fn diary_ingest_file_apply_sections(
     connection: &Connection,
-    file_path: &Path,
     ctx: DiarySectionContext<'_>,
     sections: &[(String, String)],
 ) -> Result<usize> {
     let mut created = 0usize;
-    let source_path = file_path.to_string_lossy();
     for (index, (header, body)) in sections.iter().enumerate().skip(ctx.prev_count) {
         let label = if header.is_empty() {
             ctx.date_prefix
@@ -301,7 +321,8 @@ async fn diary_ingest_file_apply_sections(
             header.as_str()
         };
         let content = format!("{label}\n\n{body}");
-        let drawer_id = diary_ingest_drawer_id(ctx.wing, ctx.date_prefix, index);
+        let drawer_id =
+            diary_ingest_drawer_id(ctx.wing, ctx.agent, ctx.source_path, ctx.date_prefix, index);
 
         let params = DrawerParams {
             id: &drawer_id,
@@ -311,7 +332,7 @@ async fn diary_ingest_file_apply_sections(
             // value `"daily"` made ingested entries invisible to readers.
             room: "diary",
             content: &content,
-            source_file: source_path.as_ref(),
+            source_file: ctx.source_path,
             chunk_index: index,
             added_by: ctx.agent,
             ingest_mode: "diary",
@@ -335,17 +356,20 @@ async fn diary_ingest_file_apply_sections(
 async fn diary_ingest_file_purge_orphans(
     connection: &Connection,
     wing: &str,
+    agent: &str,
+    source_path: &str,
     date_prefix: &str,
     current_count: usize,
     previous_count: usize,
 ) -> Result<()> {
     assert!(!wing.is_empty());
+    assert!(!agent.is_empty());
     assert!(!date_prefix.is_empty());
     if current_count >= previous_count {
         return Ok(());
     }
     for stale_index in current_count..previous_count {
-        let drawer_id = diary_ingest_drawer_id(wing, date_prefix, stale_index);
+        let drawer_id = diary_ingest_drawer_id(wing, agent, source_path, date_prefix, stale_index);
         diary_ingest_file_purge_drawer(connection, &drawer_id).await?;
     }
     Ok(())
@@ -482,14 +506,21 @@ fn diary_ingest_extract_date(file_path: &Path) -> String {
 
 /// Generate a stable, unique drawer ID for a diary section.
 ///
-/// Format: `diary-{wing_prefix}-{wing_hash}-{date}-{index}`. The 20-char
+/// Format: `diary-{wing_prefix}-{identity_hash}-{date}-{index}`. The 20-char
 /// sanitized prefix keeps IDs human-readable; the 8-hex-char SHA-256 slug of
-/// the original (unsanitized) wing string disambiguates wings that would
-/// otherwise collapse to the same prefix — e.g. `"work_2024_q1"` and
-/// `"work_2024_q2"` truncate identically at 20 chars, and `"work/notes"` and
-/// `"work_notes"` sanitize identically.
-fn diary_ingest_drawer_id(wing: &str, date: &str, index: usize) -> String {
+/// `wing + agent + source` disambiguates identities that would otherwise
+/// collapse to the same prefix — e.g. `"work_2024_q1"` and `"work_2024_q2"`
+/// truncate identically at 20 chars, and the same file ingested by two
+/// different agents must not share drawer IDs.
+fn diary_ingest_drawer_id(
+    wing: &str,
+    agent: &str,
+    source: &str,
+    date: &str,
+    index: usize,
+) -> String {
     assert!(!wing.is_empty());
+    assert!(!agent.is_empty());
     assert!(!date.is_empty());
 
     let wing_prefix: String = wing
@@ -503,17 +534,20 @@ fn diary_ingest_drawer_id(wing: &str, date: &str, index: usize) -> String {
             }
         })
         .collect();
-    let hash = sha2::Sha256::digest(wing.as_bytes());
-    let wing_hash: String = hash.iter().take(4).fold(String::new(), |mut acc, byte| {
+    // Null-byte separators prevent "a\0bc"+"ab\0c" from hashing identically.
+    let hash_input = format!("{wing}\x00{agent}\x00{source}");
+    let hash = sha2::Sha256::digest(hash_input.as_bytes());
+    let identity_hash: String = hash.iter().take(4).fold(String::new(), |mut acc, byte| {
         use std::fmt::Write as _;
-        // 4 bytes → 8 hex chars; collisions across the full 32-bit space are
-        // a non-concern for per-wing diary IDs (a user with >65k wings would
-        // hit far worse problems first).
+        // 4 bytes → 8 hex chars; 32-bit collision space is sufficient here.
         let _ = write!(acc, "{byte:02x}");
         acc
     });
-    assert!(wing_hash.len() == 8, "wing hash must be 8 hex chars");
-    let id = format!("diary-{wing_prefix}-{wing_hash}-{date}-{index}");
+    assert!(
+        identity_hash.len() == 8,
+        "identity hash must be 8 hex chars"
+    );
+    let id = format!("diary-{wing_prefix}-{identity_hash}-{date}-{index}");
     assert!(!id.is_empty());
     id
 }
@@ -584,8 +618,20 @@ mod tests {
 
     #[test]
     fn drawer_id_is_stable_and_non_empty() {
-        let id1 = diary_ingest_drawer_id("myproject", "2024-01-15", 0);
-        let id2 = diary_ingest_drawer_id("myproject", "2024-01-15", 0);
+        let id1 = diary_ingest_drawer_id(
+            "myproject",
+            "agent",
+            "/diary/2024-01-15.md",
+            "2024-01-15",
+            0,
+        );
+        let id2 = diary_ingest_drawer_id(
+            "myproject",
+            "agent",
+            "/diary/2024-01-15.md",
+            "2024-01-15",
+            0,
+        );
         assert_eq!(id1, id2, "drawer ID must be deterministic");
         assert!(!id1.is_empty());
         assert!(id1.starts_with("diary-"));
@@ -597,16 +643,40 @@ mod tests {
         // before the hash slug they would collide. The same is true of two
         // wings that truncate identically at 20 chars. Both pairs must now
         // emit distinct IDs because the hash is computed on the original
-        // unsanitized, untruncated wing string.
-        let slash = diary_ingest_drawer_id("work/notes", "2024-01-15", 0);
-        let underscore = diary_ingest_drawer_id("work_notes", "2024-01-15", 0);
+        // unsanitized, untruncated wing + agent + source string.
+        let slash = diary_ingest_drawer_id(
+            "work/notes",
+            "agent",
+            "/diary/2024-01-15.md",
+            "2024-01-15",
+            0,
+        );
+        let underscore = diary_ingest_drawer_id(
+            "work_notes",
+            "agent",
+            "/diary/2024-01-15.md",
+            "2024-01-15",
+            0,
+        );
         assert_ne!(
             slash, underscore,
             "wings that sanitize identically must still produce distinct IDs"
         );
 
-        let q1 = diary_ingest_drawer_id("work_2024_quarter_one_long", "2024-01-15", 0);
-        let q2 = diary_ingest_drawer_id("work_2024_quarter_two_long", "2024-01-15", 0);
+        let q1 = diary_ingest_drawer_id(
+            "work_2024_quarter_one_long",
+            "agent",
+            "/diary/2024-01-15.md",
+            "2024-01-15",
+            0,
+        );
+        let q2 = diary_ingest_drawer_id(
+            "work_2024_quarter_two_long",
+            "agent",
+            "/diary/2024-01-15.md",
+            "2024-01-15",
+            0,
+        );
         assert_ne!(
             q1, q2,
             "wings that truncate identically must still produce distinct IDs"
