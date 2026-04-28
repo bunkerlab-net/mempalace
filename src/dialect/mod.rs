@@ -462,10 +462,22 @@ fn decode_fill_header(header: &str, decoded: &mut DecodedDialect) {
         "decode_fill_header: split must produce at least one part"
     );
 
-    decoded.wing = parts.first().copied().unwrap_or("").to_string();
-    decoded.room = parts.get(1).copied().unwrap_or("").to_string();
-    decoded.date = parts.get(2).copied().unwrap_or("").to_string();
-    decoded.stem = parts.get(3).copied().unwrap_or("").to_string();
+    // The encoder emits a literal "?" in any of the four header positions
+    // when the corresponding metadata field was empty (see the header line
+    // in `compress`). Translating "?" back to "" here makes round-trips
+    // through `compress` → `decode` lossless: a missing field stays
+    // missing rather than re-surfacing as a synthetic question mark.
+    let unsentinel = |part: &&str| -> String {
+        if *part == "?" {
+            String::new()
+        } else {
+            (*part).to_string()
+        }
+    };
+    decoded.wing = parts.first().map(unsentinel).unwrap_or_default();
+    decoded.room = parts.get(1).map(unsentinel).unwrap_or_default();
+    decoded.date = parts.get(2).map(unsentinel).unwrap_or_default();
+    decoded.stem = parts.get(3).map(unsentinel).unwrap_or_default();
 }
 
 /// Called by [`Dialect::decode`] to populate content fields of `decoded`.
