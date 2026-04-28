@@ -214,11 +214,16 @@ impl MempalaceConfig {
         }
     }
 
-    /// Write the current config to the standard config file path.
+    /// Write the current config to the standard config file path durably.
     ///
-    /// Creates the config directory if it does not yet exist. Overwrites any
-    /// existing `config.json` atomically via `std::fs::write`.
+    /// Writes JSON to a temporary file in the config directory, fsyncs it,
+    /// renames over `config.json` (atomic on the same filesystem), then fsyncs
+    /// the parent directory so the rename itself survives a power loss. A
+    /// crash between any of these steps either leaves the previous config
+    /// intact or commits the new one — never a truncated middle state.
     pub fn save(&self) -> Result<()> {
+        use std::io::Write as _;
+
         assert!(
             !self.palace_path.as_os_str().is_empty(),
             "palace_path must not be empty before saving config"
@@ -226,11 +231,30 @@ impl MempalaceConfig {
         let directory = config_dir();
         std::fs::create_dir_all(&directory)?;
         let data = serde_json::to_string_pretty(self)?;
-        // Write to a temp file in the same directory, then rename atomically so a
-        // partial write never leaves a truncated config.json on disk.
+
         let tmp_path = directory.join("config.json.tmp");
-        std::fs::write(&tmp_path, &data)?;
+        let mut tmp_file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&tmp_path)?;
+        tmp_file.write_all(data.as_bytes())?;
+        // Persist the file's bytes before the rename; without sync_all, a power
+        // loss after the rename can leave the directory entry pointing at a
+        // file whose data has not yet hit disk.
+        tmp_file.sync_all()?;
+        drop(tmp_file);
+
         std::fs::rename(&tmp_path, config_path())?;
+
+        // Persist the directory entry too. On most filesystems the rename
+        // itself is journalled separately from the file's data; fsyncing the
+        // parent directory commits the rename so a subsequent crash cannot
+        // resurrect the old name.
+        if let Ok(dir_file) = std::fs::File::open(&directory) {
+            let _ = dir_file.sync_all();
+        }
+
         // Pair assertion: the file must exist after a successful rename.
         debug_assert!(config_path().exists(), "config.json must exist after save");
         Ok(())
