@@ -248,9 +248,10 @@ async fn check_text_kg_contradictions(
 
     let mut issues = Vec::new();
     for claim in &claims {
-        let facts = query::query_entity(connection, &claim.subject, None, "outgoing")
-            .await
-            .unwrap_or_default();
+        // Propagate KG/query errors instead of silently treating them as
+        // "no facts found"; otherwise check_text would return Ok([]) on a
+        // database failure, hiding contradictions the caller relies on.
+        let facts = query::query_entity(connection, &claim.subject, None, "outgoing").await?;
         if facts.is_empty() {
             continue;
         }
