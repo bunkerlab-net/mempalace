@@ -102,10 +102,17 @@ static COLLAPSED_LINES_RE: LazyLock<Regex> = LazyLock::new(|| {
 
 // "[N tokens] (ctrl+o to expand)" inline chrome.
 // Narrow pattern — a bare "(ctrl+o to expand)" in user prose stays intact.
+// Two alternations: a line-anchored form that swallows an optional `> `
+// blockquote prefix and the trailing newline (so quoted markers leave no
+// stray `>` behind), and the original inline form for markers that appear
+// mid-line. Order matters: the line-anchored alternative must come first
+// so it consumes the prefix before the inline rule sees the bracket.
 #[allow(clippy::expect_used)]
 static TOKEN_MARKER_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\s*\[\d+\s+tokens?\]\s*\(ctrl\+o to expand\)")
-        .expect("token marker regex is a compile-time literal and cannot fail")
+    Regex::new(
+        r"(?m)^(?:> )?\s*\[\d+\s+tokens?\]\s*\(ctrl\+o to expand\)\s*\n?|\s*\[\d+\s+tokens?\]\s*\(ctrl\+o to expand\)",
+    )
+    .expect("token marker regex is a compile-time literal and cannot fail")
 });
 
 // Collapse runs of blank lines created by the removals.
@@ -328,6 +335,24 @@ mod tests {
             result.contains("big response"),
             "surrounding text preserved"
         );
+    }
+
+    #[test]
+    fn strip_noise_removes_blockquote_prefixed_token_marker() {
+        // A token marker quoted via Claude Code's `> ` blockquote chrome
+        // must come out cleanly with no stray `>` left on the line.
+        let text = "before\n> [512 tokens] (ctrl+o to expand)\nafter";
+        let result = strip_noise(text);
+        assert!(
+            !result.contains("ctrl+o to expand"),
+            "blockquoted token marker must be removed"
+        );
+        assert!(
+            !result.contains("> "),
+            "no stray `>` blockquote sigil may survive on the marker's line"
+        );
+        assert!(result.contains("before"), "preceding line must survive");
+        assert!(result.contains("after"), "following line must survive");
     }
 
     #[test]
