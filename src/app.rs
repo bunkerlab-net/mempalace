@@ -5,14 +5,16 @@ use crate::{db, error, mcp, palace, schema};
 /// Open the palace DB, ensuring schema exists. Returns `(db, connection, path)`.
 ///
 /// `palace_override` takes priority over `MEMPALACE_PALACE_PATH` and the config
-/// file — mirrors the `--palace` CLI flag semantics.
+/// file — mirrors the `--palace` CLI flag semantics. When the override is set
+/// we skip `MempalaceConfig::init()` entirely so a one-off `--palace` flag
+/// does not create or migrate the global config directory; falling through
+/// to `init()` only happens when no override is supplied.
 async fn open_palace(
     palace_override: Option<&std::path::Path>,
 ) -> error::Result<(turso::Database, turso::Connection, std::path::PathBuf)> {
-    let config = MempalaceConfig::init()?;
     let db_path = match palace_override {
         Some(path) => crate::config::expand_tilde(path),
-        None => config.palace_db_path(),
+        None => MempalaceConfig::init()?.palace_db_path(),
     };
     let db_path_str = db_path.to_str().ok_or_else(|| {
         error::Error::Other(format!(
