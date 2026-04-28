@@ -1592,6 +1592,106 @@ Clara said the migration is complete. He agreed.\n";
         );
     }
 
+    // ── score_entity_person_locale_signals — Hindi (Devanagari) ──────────────
+    //
+    // Mirrors the German test set above; confirms locale loading, regex
+    // compilation, and PersonCategory bookkeeping all work for Devanagari
+    // names. The regex crate's default Unicode word-boundary handling is what
+    // lets `\b{name}\b` match Devanagari runs surrounded by spaces or
+    // punctuation; if a future change disabled Unicode mode these tests
+    // would catch the regression before it shipped.
+
+    #[test]
+    fn score_entity_person_locale_signals_fires_verb_pattern_hindi() {
+        // The Hindi locale has person_verb_patterns such as
+        // `\b{name}\s+ने\s+कहा\b` ("X said"). Text containing the phrase
+        // twice must yield a positive score and surface the Verb category.
+        let patterns = get_entity_patterns(&["hi"]);
+        let escaped = regex::escape("राम");
+        let text = "राम ने कहा कि वह आ रहा है। राम ने कहा फिर से।";
+        let (score, categories) = score_entity_person_locale_signals(&escaped, text, &patterns);
+        assert!(
+            score > 0,
+            "Hindi verb pattern must yield positive score; got {score}"
+        );
+        assert!(
+            categories.contains(&PersonCategory::Verb),
+            "Hindi verb hit must surface the Verb category"
+        );
+    }
+
+    #[test]
+    fn score_entity_person_locale_signals_fires_dialogue_pattern_hindi() {
+        // The Hindi locale inherits dialogue_patterns including `^{name}:\s`.
+        // A line beginning with the Devanagari name followed by colon must
+        // fire the dialogue arm under the (?im) multi-line flag.
+        let patterns = get_entity_patterns(&["hi"]);
+        let escaped = regex::escape("राम");
+        let text = "राम: मैं यहाँ हूँ। सब सुन रहे थे।";
+        let (score, categories) = score_entity_person_locale_signals(&escaped, text, &patterns);
+        assert!(
+            score > 0,
+            "Hindi dialogue pattern must yield positive score; got {score}"
+        );
+        assert!(
+            categories.contains(&PersonCategory::Dialogue),
+            "Hindi dialogue hit must surface the Dialogue category"
+        );
+    }
+
+    #[test]
+    fn score_entity_person_locale_signals_fires_direct_address_pattern_hindi() {
+        // The Hindi locale's direct_address_pattern includes
+        // `\bनमस्ते\s+{name}\b`. Text containing "नमस्ते राम" must fire the
+        // direct-address arm — the hardcoded English `hey/thanks/hi`
+        // pattern will not match a Devanagari greeting, so this test
+        // proves the locale template is reaching the scoring path.
+        let patterns = get_entity_patterns(&["hi"]);
+        let escaped = regex::escape("राम");
+        let text = "नमस्ते राम, आप कैसे हैं?";
+        let (score, categories) = score_entity_person_locale_signals(&escaped, text, &patterns);
+        assert!(
+            score > 0,
+            "Hindi direct-address pattern must yield positive score; got {score}"
+        );
+        assert!(
+            categories.contains(&PersonCategory::DirectAddress),
+            "Hindi direct-address hit must surface the DirectAddress category"
+        );
+    }
+
+    #[test]
+    fn score_entity_person_locale_signals_no_match_returns_zero_hindi() {
+        // English-only text with no Hindi signals must return (0, empty set)
+        // even when the Hindi locale is active, confirming the patterns do
+        // not spuriously match unrelated content.
+        let patterns = get_entity_patterns(&["hi"]);
+        let escaped = regex::escape("राम");
+        let text = "The weather is fine today and nothing unusual happened.";
+        let (score, categories) = score_entity_person_locale_signals(&escaped, text, &patterns);
+        assert_eq!(score, 0, "no matching pattern must yield score 0");
+        assert!(
+            categories.is_empty(),
+            "no matching pattern must yield an empty category set"
+        );
+    }
+
+    #[test]
+    fn score_entity_project_locale_verb_patterns_add_score_hindi() {
+        // Hindi project_verb_patterns include `\b{name}\s+बनाया\b` ("X built").
+        // The project name precedes the verb in Hindi (subject-object-verb
+        // order), inverted from the German `\bgebaut\s+{name}\b` pattern.
+        // Text repeating "Falcon बनाया" must increase the project score.
+        let patterns = get_entity_patterns(&["hi"]);
+        let escaped = regex::escape("Falcon");
+        let text = "Falcon बनाया था कल। Falcon बनाया वाकई कठिन था।";
+        let score = score_entity_project(&escaped, text, &patterns);
+        assert!(
+            score > 0,
+            "Hindi project verb pattern must contribute positive score; got {score}"
+        );
+    }
+
     // ── scan_for_detection — early-exit when prose meets max_files ───────────
 
     #[test]
