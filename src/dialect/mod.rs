@@ -3,9 +3,6 @@
 pub mod emotions;
 pub mod topics;
 
-/// UTF-8 code points are at most 4 bytes, so a char-boundary snap never takes more than 3 steps.
-const CHAR_BOUNDARY_SNAP_MAX: usize = 4;
-
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::LazyLock;
@@ -222,13 +219,14 @@ fn extract_key_sentence_score(sentences: Vec<&str>) -> String {
                     score += 2;
                 }
             }
-            if sentence.len() < 80 {
+            let char_count = sentence.chars().count();
+            if char_count < 80 {
                 score += 1;
             }
-            if sentence.len() < 40 {
+            if char_count < 40 {
                 score += 1;
             }
-            if sentence.len() > 150 {
+            if char_count > 150 {
                 score -= 2;
             }
             (score, sentence)
@@ -243,17 +241,10 @@ fn extract_key_sentence_score(sentences: Vec<&str>) -> String {
         "extract_key_sentence_score: best sentence must not be empty"
     );
 
-    if best.len() > 55 {
-        let mut end = 52;
-        let mut snap_steps: usize = 0;
-        while end < best.len() && !best.is_char_boundary(end) {
-            snap_steps += 1;
-            assert!(
-                snap_steps < CHAR_BOUNDARY_SNAP_MAX,
-                "extract_key_sentence_score: exceeded CHAR_BOUNDARY_SNAP_MAX ({CHAR_BOUNDARY_SNAP_MAX}) snap steps"
-            );
-            end += 1;
-        }
+    if best.chars().count() > 55 {
+        // Resolve byte index of the 52nd character so the slice is always on a
+        // char boundary without a manual snap loop.
+        let end = best.char_indices().nth(52).map_or(best.len(), |(b, _)| b);
         format!("{}...", &best[..end])
     } else {
         best.to_string()
@@ -620,7 +611,13 @@ fn decode_fill_content(content: &str, decoded: &mut DecodedDialect) {
             continue;
         }
         if part.starts_with('"') {
-            decoded.quote = part.trim_matches('"').to_string();
+            // strip_prefix + strip_suffix removes exactly one wrapping quote from
+            // each end, preserving embedded quotes that trim_matches would eat.
+            decoded.quote = part
+                .strip_prefix('"')
+                .and_then(|without_prefix| without_prefix.strip_suffix('"'))
+                .unwrap_or(part)
+                .to_string();
         } else if part.chars().next().is_some_and(char::is_uppercase) {
             decoded.flags.extend(part.split('+').map(str::to_string));
         } else {

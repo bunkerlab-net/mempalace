@@ -102,7 +102,7 @@ pub async fn ingest_diaries(
     }
 
     assert!(stats.drawers_created >= stats.days_updated);
-    diary_ingest_save_cursor(&cursor_path, &cursor);
+    diary_ingest_save_cursor(&cursor_path, &cursor)?;
 
     Ok(stats)
 }
@@ -128,15 +128,15 @@ fn diary_ingest_load_cursor(cursor_path: &Path) -> HashMap<String, FileState> {
         .unwrap_or_default()
 }
 
-/// Persist cursor map to disk; silently ignores write errors.
-fn diary_ingest_save_cursor(cursor_path: &Path, cursor: &HashMap<String, FileState>) {
+/// Persist cursor map to disk; propagates I/O and serialisation failures.
+fn diary_ingest_save_cursor(cursor_path: &Path, cursor: &HashMap<String, FileState>) -> Result<()> {
     assert!(!cursor_path.as_os_str().is_empty());
     if let Some(parent) = cursor_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent)?;
     }
-    if let Ok(json) = serde_json::to_string_pretty(cursor) {
-        let _ = std::fs::write(cursor_path, json);
-    }
+    let json = serde_json::to_string_pretty(cursor)?;
+    std::fs::write(cursor_path, json)?;
+    Ok(())
 }
 
 /// Return all diary files in `diary_dir` matching `YYYY-MM-DD*.md`.
@@ -144,8 +144,9 @@ fn diary_ingest_scan_files(diary_dir: &Path) -> Result<Vec<PathBuf>> {
     assert!(diary_dir.is_dir());
 
     let mut files: Vec<PathBuf> = std::fs::read_dir(diary_dir)?
-        .filter_map(std::result::Result::ok)
-        .map(|entry| entry.path())
+        .map(|result| result.map(|entry| entry.path()))
+        .collect::<std::result::Result<Vec<PathBuf>, _>>()?
+        .into_iter()
         .filter(|path| diary_ingest_is_diary_file(path))
         .collect();
 
@@ -808,11 +809,6 @@ mod tests {
                     "first run must create both sections"
                 );
 
-                // Sleep one second so the rewrite gets a different mtime;
-                // resume requires both size and mtime to match, and on
-                // some filesystems same-second writes round to the same
-                // mtime which would short-circuit the shrink path.
-                std::thread::sleep(std::time::Duration::from_secs(1));
                 std::fs::write(
                     &diary_file,
                     "## Morning\n\nFirst section with enough content to clear the size floor.",
