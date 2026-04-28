@@ -16,8 +16,11 @@ via MCP tools or the `mempalace` CLI. No cloud services or API keys required.
 
 - **Remember context** across sessions: call `mempalace_search` when the user
   references something that may have been discussed before.
-- **Wake up** at the start of a session: check `mempalace_status` and the
-  L0/L1 context from `mempalace wakeup` to orient yourself.
+- **Wake up** at the start of a session: there is no `mempalace_wakeup` MCP
+  tool — call `mempalace_status` for the palace overview and use
+  `mempalace_search` to recall the specific context you need. The
+  `mempalace wake-up` CLI command (with a hyphen) prints the same L0/L1
+  layers for manual operator use.
 - **File important facts**: use `mempalace_add_drawer` to store decisions,
   preferences, milestones, and key facts the user wants to be remembered.
 - **Mine projects**: run `mempalace mine <dir>` to ingest a project directory
@@ -67,6 +70,13 @@ parameters are listed first; optional parameters are suffixed with `?`.
 
     mempalace_diary_write(agent_name, entry, topic?, wing?)              -- write a diary entry
     mempalace_diary_read(agent_name, last_n?, wing?)                     -- read recent entries
+
+`mempalace_diary_read` always filters by the requesting `agent_name`, both
+when a `wing` is supplied and on the cross-wing path; it never returns
+diary entries authored by a different agent. Callers that need another
+agent's entries must look elsewhere — the diary is intentionally
+agent-private to keep `mempalace_diary_write` a safe place for per-agent
+notes.
 
 ## CLI Commands (fallback when MCP is unavailable)
 
