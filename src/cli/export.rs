@@ -90,10 +90,21 @@ mod tests {
         run(&connection, output_dir.path(), None, false)
             .await
             .expect("run must succeed on empty palace");
-        // Pair assertion: no files must have been created.
+        // Pair assertion: nothing must be written at the output root for an empty
+        // palace. The exporter writes `<wing>/<room>.md` and `index.md` at the
+        // root, so checking for a non-existent `wings/` directory was a no-op
+        // that would have passed even if the exporter erroneously wrote files.
+        let mut entries = output_dir
+            .path()
+            .read_dir()
+            .expect("read_dir on temp output dir must succeed");
         assert!(
-            !output_dir.path().join("wings").exists(),
-            "no output subdirectory must be created for empty palace"
+            entries.next().is_none(),
+            "empty palace must not produce any output files"
+        );
+        assert!(
+            !output_dir.path().join("index.md").exists(),
+            "empty palace must not produce an index.md"
         );
     }
 
@@ -167,10 +178,20 @@ mod tests {
         )
         .await
         .expect("run with wing filter on empty palace must succeed");
-        // No files must be written for an empty result set.
+        // No files must be written for an empty result set. Assert directly on
+        // the output root rather than a wing name the exporter would never have
+        // created, so the test fails if the exporter writes anything.
+        let mut entries = output_dir
+            .path()
+            .read_dir()
+            .expect("read_dir on temp output dir must succeed");
         assert!(
-            !output_dir.path().join("nonexistent_wing").exists(),
-            "empty palace with wing filter must not create any directories"
+            entries.next().is_none(),
+            "empty palace with wing filter must not produce any output files"
+        );
+        assert!(
+            !output_dir.path().join("index.md").exists(),
+            "empty palace with wing filter must not produce an index.md"
         );
     }
 
