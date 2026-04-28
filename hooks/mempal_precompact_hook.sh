@@ -18,11 +18,14 @@
 #     }]
 #   }
 #
-# For Codex CLI, add to .codex/hooks.json:
+# For Codex CLI, add to .codex/hooks.json. The MEMPAL_HARNESS=codex env var is
+# required so src/cli/hook.rs sees the correct harness — without it the script
+# defaults to "claude-code" and the harness-scoped logic mislabels Codex
+# sessions as Claude Code:
 #
 #   "PreCompact": [{
 #     "type": "command",
-#     "command": "/absolute/path/to/hooks/mempal_precompact_hook.sh",
+#     "command": "env MEMPAL_HARNESS=codex /absolute/path/to/hooks/mempal_precompact_hook.sh",
 #     "timeout": 120
 #   }]
 #
