@@ -199,28 +199,21 @@ async fn diary_ingest_file(
         let drawer_id = diary_ingest_drawer_id(wing, &date_prefix, index);
         let source_path = file_path.to_string_lossy();
 
-        if force {
-            diary_ingest_file_purge_drawer(connection, &drawer_id).await?;
-        }
-
-        let inserted = add_drawer(
-            connection,
-            &DrawerParams {
-                id: &drawer_id,
-                wing,
-                // Must match the room filter used by `tool_diary_read` in
-                // src/mcp/tools.rs (`WHERE room = 'diary'`); the previous
-                // value `"daily"` made ingested entries invisible to readers.
-                room: "diary",
-                content: &content,
-                source_file: source_path.as_ref(),
-                chunk_index: index,
-                added_by: agent,
-                ingest_mode: "diary",
-                source_mtime: None,
-            },
-        )
-        .await?;
+        let params = DrawerParams {
+            id: &drawer_id,
+            wing,
+            // Must match the room filter used by `tool_diary_read` in
+            // src/mcp/tools.rs (`WHERE room = 'diary'`); the previous
+            // value `"daily"` made ingested entries invisible to readers.
+            room: "diary",
+            content: &content,
+            source_file: source_path.as_ref(),
+            chunk_index: index,
+            added_by: agent,
+            ingest_mode: "diary",
+            source_mtime: None,
+        };
+        let inserted = diary_ingest_file_replace(connection, &drawer_id, &params, force).await?;
 
         if inserted {
             created += 1;
@@ -259,6 +252,42 @@ async fn diary_ingest_file_purge_drawer(connection: &Connection, drawer_id: &str
         .execute("DELETE FROM drawer_words WHERE drawer_id = ?", (drawer_id,))
         .await?;
     Ok(())
+}
+
+/// Replace one diary section atomically when `force` is set; otherwise fall through
+/// to a plain `add_drawer` call.
+///
+/// Wraps the force-purge + `add_drawer` pair in a single `BEGIN`/`COMMIT` so
+/// a failed insert restores the prior row instead of leaving the palace with
+/// a hole and the cursor advanced past the missing section. Called by
+/// [`diary_ingest_file`] to keep that function within the 70-line limit.
+async fn diary_ingest_file_replace(
+    connection: &Connection,
+    drawer_id: &str,
+    params: &DrawerParams<'_>,
+    force: bool,
+) -> Result<bool> {
+    if !force {
+        // Plain INSERT OR IGNORE; no transaction needed because the call is
+        // already a single atomic statement.
+        return add_drawer(connection, params).await;
+    }
+
+    connection.execute("BEGIN", ()).await?;
+    if let Err(error) = diary_ingest_file_purge_drawer(connection, drawer_id).await {
+        let _ = connection.execute("ROLLBACK", ()).await;
+        return Err(error);
+    }
+    match add_drawer(connection, params).await {
+        Ok(value) => {
+            connection.execute("COMMIT", ()).await?;
+            Ok(value)
+        }
+        Err(error) => {
+            let _ = connection.execute("ROLLBACK", ()).await;
+            Err(error)
+        }
+    }
 }
 
 /// Split diary text on `## ` H2 headers.
