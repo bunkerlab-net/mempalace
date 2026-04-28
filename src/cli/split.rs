@@ -1212,6 +1212,21 @@ mod tests {
             mega_file_path.with_extension("mega_backup").exists(),
             "backup must exist after non-dry-run with no output_dir"
         );
+        // Two-session mega → at least two `.txt` session files in the parent;
+        // each is named `<stem>__<ts>_<subject>.txt` so we count `.txt` files
+        // that aren't the original mega.txt (which was renamed) or anything
+        // unrelated. Asserting the count rather than each generated name
+        // keeps the test resilient to subject-extraction changes.
+        let parent_session_files: Vec<_> = fs::read_dir(temp_directory.path())
+            .expect("read parent dir")
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "txt"))
+            .collect();
+        assert!(
+            parent_session_files.len() >= 2,
+            "expected at least 2 session .txt files next to the mega file, got {}",
+            parent_session_files.len()
+        );
     }
 
     #[test]
@@ -1253,6 +1268,31 @@ mod tests {
         assert!(
             !stray_backup_in_scan_dir.exists(),
             "backup must not land in the directory argument when output_dir is None"
+        );
+
+        // The two split sessions must materialize as `.txt` files in the mega
+        // file's parent (mega_dir) and not in the scan_dir argument. Counting
+        // `.txt` entries in each dir verifies the splitter picked the right
+        // output directory — without this check the test would pass even if
+        // the splitter stored sessions in the scan dir alongside the
+        // (correctly placed) backup.
+        let mega_dir_txt_count = fs::read_dir(mega_dir.path())
+            .expect("read mega_dir")
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "txt"))
+            .count();
+        assert!(
+            mega_dir_txt_count >= 2,
+            "expected ≥2 session .txt files in mega_dir (path.parent()), got {mega_dir_txt_count}"
+        );
+        let scan_dir_txt_count = fs::read_dir(scan_dir.path())
+            .expect("read scan_dir")
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "txt"))
+            .count();
+        assert_eq!(
+            scan_dir_txt_count, 0,
+            "no session .txt files may land in the directory argument when output_dir is None"
         );
     }
 
