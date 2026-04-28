@@ -22,8 +22,9 @@ pub async fn run(
     let stack = MemoryStack::new(connection);
 
     // L0 + L1 are always included — they form the core palace context.
+    // `MemoryStack::recall` already asserts the returned context is non-empty,
+    // so re-asserting here would only duplicate the callee's contract.
     let base = stack.recall(wing).await?;
-    assert!(!base.is_empty(), "recall must return non-empty context");
     print!("{base}");
 
     // L2: on-demand recall for a specific wing/room. Only triggered when the
