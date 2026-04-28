@@ -384,7 +384,11 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
                 "type": "object",
                 "properties": {
                     "word": {"type": "string", "description": "Name or word to confirm"},
-                    "entity_type": {"type": "string", "description": "Entity class: person, place, concept, or unknown"},
+                    "entity_type": {
+                        "type": "string",
+                        "enum": ["person", "place", "concept", "unknown"],
+                        "description": "Entity class: person, place, concept, or unknown"
+                    },
                     "relationship": {"type": "string", "description": "Relationship label for people (e.g. colleague, friend) — optional"},
                     "context": {"type": "string", "description": "Context tag for people (e.g. work, personal) — optional"}
                 },
