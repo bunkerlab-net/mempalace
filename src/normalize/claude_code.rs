@@ -69,14 +69,28 @@ static NOISE_LINE_RES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         .collect()
 });
 
+/// Canonical Claude Code hook names that produce TUI chrome lines.
+///
+/// `HOOK_LINE_RE` and the `strip_noise` test set both consume this list so a
+/// new hook only needs to be added in one place.
+const HOOK_NAMES: &[&str] = &[
+    "Stop",
+    "PreCompact",
+    "PreToolUse",
+    "PostToolUse",
+    "UserPromptSubmit",
+    "Notification",
+    "SessionStart",
+    "SessionEnd",
+];
+
 // "Ran 2 Stop hook", "Ran 1 PreCompact hook", etc. — Claude Code TUI chrome.
 // Explicit hook names; prose like "our CI has a stop hook" stays intact.
 #[allow(clippy::expect_used)]
 static HOOK_LINE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"(?m)^(?:> )?Ran \d+ (?:Stop|PreCompact|PreToolUse|PostToolUse|UserPromptSubmit|Notification|SessionStart|SessionEnd) hooks?.*\n?",
-    )
-    .expect("hook line regex is a compile-time literal and cannot fail")
+    let alternation = HOOK_NAMES.join("|");
+    let pattern = format!(r"(?m)^(?:> )?Ran \d+ (?:{alternation}) hooks?.*\n?");
+    Regex::new(&pattern).expect("hook line regex assembled from compile-time literals cannot fail")
 });
 
 // "… +N lines" collapsed-output marker.
@@ -576,22 +590,21 @@ mod tests {
 
     #[test]
     fn strip_noise_removes_all_hook_type_lines() {
-        // Every hook type named in HOOK_LINE_RE must be stripped.
-        let hook_lines = [
-            "Ran 1 Stop hook",
-            "Ran 3 PreCompact hooks",
-            "Ran 1 PreToolUse hook",
-            "Ran 2 PostToolUse hooks",
-            "Ran 1 UserPromptSubmit hook",
-            "Ran 1 Notification hook",
-            "Ran 1 SessionStart hook",
-            "Ran 1 SessionEnd hook",
-        ];
-        for hook_line in hook_lines {
+        // Drive the test from the canonical HOOK_NAMES list so every hook
+        // added to that constant is automatically exercised — a hardcoded
+        // table would silently drift away from `HOOK_LINE_RE`.
+        for (index, hook_name) in HOOK_NAMES.iter().enumerate() {
+            // Alternate between singular and plural forms so the `hooks?`
+            // alternation in the regex is exercised in both shapes.
+            let hook_line = if index % 2 == 0 {
+                format!("Ran 1 {hook_name} hook")
+            } else {
+                format!("Ran 3 {hook_name} hooks")
+            };
             let text = format!("start\n{hook_line}\nend");
             let result = strip_noise(&text);
             assert!(
-                !result.contains(hook_line),
+                !result.contains(&hook_line),
                 "hook line '{hook_line}' must be removed"
             );
             assert!(result.contains("start"), "text before hook must survive");
