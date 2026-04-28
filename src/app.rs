@@ -452,16 +452,22 @@ async fn run_mine(
     match mode.as_str() {
         "projects" => {
             let (_db, connection, palace_path) = open_palace(palace_override).await?;
+            // Bare relative paths like `palace.db` give parent() == Some("")
+            // rather than None, so filter the empty case before falling back
+            // to "." — otherwise acquire_mine_lock asserts on `is_dir()`.
             let lock_dir = palace_path
                 .parent()
+                .filter(|path| !path.as_os_str().is_empty())
                 .unwrap_or_else(|| std::path::Path::new("."));
             let _mine_guard = palace::miner::acquire_mine_lock(lock_dir)?;
             palace::miner::mine(&connection, &directory, &opts).await?;
         }
         "convos" => {
             let (_db, connection, palace_path) = open_palace(palace_override).await?;
+            // Same empty-parent guard as the projects branch above.
             let lock_dir = palace_path
                 .parent()
+                .filter(|path| !path.as_os_str().is_empty())
                 .unwrap_or_else(|| std::path::Path::new("."));
             let _mine_guard = palace::miner::acquire_mine_lock(lock_dir)?;
             palace::convo_miner::mine_convos(&connection, &directory, &extract_mode, &opts).await?;
