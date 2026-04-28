@@ -165,7 +165,12 @@ async fn regenerate_closets_fetch_drawers(
         let room: String = row.get(3).unwrap_or_default();
         let source_file: String = row.get(4).unwrap_or_default();
 
-        if id.is_empty() || content.is_empty() {
+        // Reject rows missing any field that would later break closet boost
+        // grouping. An empty `source_file` would group every such row under
+        // the empty-string key in `search_closet_boost`, collapsing distinct
+        // drawers into a single bucket; better to skip them upstream than
+        // to ever pass `""` to `upsert_closet_lines`.
+        if id.is_empty() || content.is_empty() || source_file.is_empty() {
             continue;
         }
         drawers.push(DrawerRow {
@@ -177,9 +182,13 @@ async fn regenerate_closets_fetch_drawers(
         });
     }
 
-    // Postcondition: every returned row has a non-empty id and content.
+    // Postcondition: every returned row has a non-empty id, content, and
+    // `source_file` — the latter is the key used by `upsert_closet_lines`
+    // and `search_closet_boost`, so an empty value would silently corrupt
+    // boost lookup downstream.
     debug_assert!(drawers.iter().all(|drawer| !drawer.id.is_empty()));
     debug_assert!(drawers.iter().all(|drawer| !drawer.content.is_empty()));
+    debug_assert!(drawers.iter().all(|drawer| !drawer.source_file.is_empty()));
 
     Ok(drawers)
 }
@@ -524,15 +533,18 @@ mod tests {
         // Dry-run must not write anything and must increment skipped_dry_run.
         let (_db, connection) = crate::test_helpers::test_db().await;
 
-        // Seed one drawer.
+        // Seed one drawer. `source_file` must be non-empty for the fetch to
+        // include the row (an empty source_file would collapse closet boost
+        // grouping in production and is filtered out at the fetch stage).
         connection
             .execute(
-                "INSERT INTO drawers (id, wing, room, content, added_by) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO drawers (id, wing, room, content, source_file, added_by) VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     "d1",
                     "personal",
                     "notes",
                     "Alice said hello three times. Alice Alice.",
+                    "alice.md",
                     "test",
                 ),
             )
@@ -693,10 +705,12 @@ mod tests {
 
         // Insert a drawer with non-empty id but empty content (content = whitespace only
         // normalizes to empty at the app layer; use a truly empty string via raw SQL).
+        // `source_file` is set so the fetch-stage source_file filter does not also
+        // exclude the row — we want to verify the empty-content path specifically.
         connection
             .execute(
-                "INSERT INTO drawers (id, wing, room, content, added_by) VALUES (?, ?, ?, ?, ?)",
-                ("d_empty_content", "test", "notes", "", "test"),
+                "INSERT INTO drawers (id, wing, room, content, source_file, added_by) VALUES (?, ?, ?, ?, ?, ?)",
+                ("d_empty_content", "test", "notes", "", "empty.md", "test"),
             )
             .await
             .expect("seed drawer with empty content must succeed");
@@ -704,8 +718,15 @@ mod tests {
         // Also insert a normal drawer so we can distinguish "skipped" from "none".
         connection
             .execute(
-                "INSERT INTO drawers (id, wing, room, content, added_by) VALUES (?, ?, ?, ?, ?)",
-                ("d_normal", "test", "notes", "Normal content here.", "test"),
+                "INSERT INTO drawers (id, wing, room, content, source_file, added_by) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    "d_normal",
+                    "test",
+                    "notes",
+                    "Normal content here.",
+                    "normal.md",
+                    "test",
+                ),
             )
             .await
             .expect("seed normal drawer must succeed");
@@ -719,6 +740,48 @@ mod tests {
         assert_eq!(
             stats.skipped_dry_run, 1,
             "only one drawer (non-empty content) must be counted"
+        );
+    }
+
+    #[tokio::test]
+    async fn regenerate_closets_skips_drawer_with_empty_source_file() {
+        // A drawer with empty source_file would collapse closet-boost grouping
+        // (every empty-source row falls into the same boost bucket) and must be
+        // filtered out at the fetch stage so it never reaches
+        // upsert_closet_lines. Pair this with a normal row so we can distinguish
+        // "filtered" from "none".
+        let (_db, connection) = crate::test_helpers::test_db().await;
+
+        connection
+            .execute(
+                "INSERT INTO drawers (id, wing, room, content, source_file, added_by) VALUES (?, ?, ?, ?, ?, ?)",
+                ("d_no_source", "test", "notes", "Has content but no source.", "", "test"),
+            )
+            .await
+            .expect("seed drawer with empty source_file must succeed");
+
+        connection
+            .execute(
+                "INSERT INTO drawers (id, wing, room, content, source_file, added_by) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    "d_with_source",
+                    "test",
+                    "notes",
+                    "Has content and source.",
+                    "with.md",
+                    "test",
+                ),
+            )
+            .await
+            .expect("seed drawer with source_file must succeed");
+
+        let stats = regenerate_closets(&connection, None, 0, true, &FailProvider)
+            .await
+            .expect("regenerate_closets must succeed");
+
+        assert_eq!(
+            stats.skipped_dry_run, 1,
+            "only the row with a non-empty source_file must be processed"
         );
     }
 
