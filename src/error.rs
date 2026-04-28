@@ -2,6 +2,34 @@
 
 use std::path::PathBuf;
 
+/// Fine-grained error codes for RFC-002 source adapters.
+///
+/// These wrap into [`Error::SourceAdapter`] so adapter errors propagate through
+/// the standard `Result<T>` chain without losing their structural type.
+///
+/// Variants are constructed by third-party adapter implementations, not by
+/// the CLI binary itself, so the `dead_code` lint is suppressed at the enum
+/// level rather than variant-by-variant.
+#[allow(dead_code)]
+#[derive(Debug, thiserror::Error)]
+pub enum SourceAdapterError {
+    /// A `DrawerRecord` field failed schema validation (RFC-002 §5.2).
+    #[error("schema conformance error: {0}")]
+    SchemaConformance(String),
+    /// A declared content transformation produced an invalid result.
+    #[error("transformation violation: {0}")]
+    TransformationViolation(String),
+    /// The adapter requires credentials that were not provided.
+    #[error("authentication required: {0}")]
+    AuthRequired(String),
+    /// The adapter was called after `close()` was invoked.
+    #[error("adapter closed")]
+    AdapterClosed,
+    /// All other adapter-originated failures.
+    #[error("adapter error: {0}")]
+    Other(String),
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("database error: {0}")]
@@ -27,6 +55,10 @@ pub enum Error {
     /// HTTP transport error — connection refused, timeout, non-2xx status.
     #[error("http error: {0}")]
     Http(String),
+
+    /// A source adapter returned a structured failure (RFC-002).
+    #[error("source adapter error: {0}")]
+    SourceAdapter(#[from] SourceAdapterError),
 
     #[error("config not found: {0}")]
     ConfigNotFound(PathBuf),
@@ -64,6 +96,52 @@ mod tests {
         assert!(
             display.contains("connection refused"),
             "must include message"
+        );
+    }
+
+    #[test]
+    fn source_adapter_error_schema_conformance_displays_correctly() {
+        // SchemaConformance must prefix the message to aid diagnosis.
+        let error = SourceAdapterError::SchemaConformance("field 'author' missing".to_string());
+        let display = error.to_string();
+        assert!(
+            display.starts_with("schema conformance error:"),
+            "must use variant prefix"
+        );
+        assert!(
+            display.contains("field 'author' missing"),
+            "must include message"
+        );
+    }
+
+    #[test]
+    fn source_adapter_error_converts_to_main_error() {
+        // SourceAdapterError must convert into Error via the From impl.
+        let source_error = SourceAdapterError::AuthRequired("token expired".to_string());
+        let main_error: Error = source_error.into();
+        let display = main_error.to_string();
+        assert!(
+            display.starts_with("source adapter error:"),
+            "must use Error variant prefix"
+        );
+        assert!(
+            display.contains("token expired"),
+            "must propagate inner message"
+        );
+    }
+
+    #[test]
+    fn source_adapter_error_adapter_closed_has_fixed_message() {
+        // AdapterClosed has no payload so its message is always the same.
+        let error = SourceAdapterError::AdapterClosed;
+        let display = error.to_string();
+        assert_eq!(
+            display, "adapter closed",
+            "AdapterClosed must produce a fixed message"
+        );
+        assert!(
+            !display.contains('{'),
+            "AdapterClosed must not have a format placeholder"
         );
     }
 

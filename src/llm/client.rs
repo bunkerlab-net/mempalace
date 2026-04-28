@@ -42,14 +42,6 @@ const _: () = assert!(CHECK_TIMEOUT_SECS > 0);
 pub struct LlmResponse {
     /// The raw text returned by the model (typically JSON for entity refinement).
     pub text: String,
-    /// Model identifier reported by or passed to the provider.
-    // Read by callers that log or display the model used; currently only `text` is consumed.
-    #[allow(dead_code)]
-    pub model: String,
-    /// Short provider name (e.g. `"ollama"`, `"anthropic"`).
-    // Read by callers that log or display the provider used; currently only `text` is consumed.
-    #[allow(dead_code)]
-    pub provider: String,
 }
 
 /// Common interface for all LLM providers.
@@ -170,11 +162,7 @@ impl LlmProvider for OllamaProvider {
                 self.model
             )));
         }
-        Ok(LlmResponse {
-            text,
-            model: self.model.clone(),
-            provider: self.name().to_string(),
-        })
+        Ok(LlmResponse { text })
     }
 }
 
@@ -311,11 +299,7 @@ impl LlmProvider for OpenAICompatProvider {
                 self.model
             )));
         }
-        Ok(LlmResponse {
-            text,
-            model: self.model.clone(),
-            provider: self.name().to_string(),
-        })
+        Ok(LlmResponse { text })
     }
 }
 
@@ -414,11 +398,7 @@ impl LlmProvider for AnthropicProvider {
                 self.model
             )));
         }
-        Ok(LlmResponse {
-            text,
-            model: self.model.clone(),
-            provider: self.name().to_string(),
-        })
+        Ok(LlmResponse { text })
     }
 }
 
@@ -761,12 +741,16 @@ mod tests {
     /// after serving one request. Used to test provider code without a real LLM server.
     fn serve_once(body: &str) -> u16 {
         use std::io::{Read, Write};
-        use std::net::TcpListener;
+        use std::net::{Shutdown, TcpListener};
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("must bind to random port");
         let port = listener.local_addr().expect("must get local addr").port();
+        // `Connection: close` tells ureq to not attempt keep-alive — without
+        // it, an instrumented build (e.g. `cargo llvm-cov`) sometimes raced
+        // ureq's reuse logic against the server's socket close and surfaced
+        // EINVAL from the read side.
         let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
             body.len(),
             body,
         );
@@ -777,6 +761,9 @@ mod tests {
                 let mut buf = vec![0u8; 65536];
                 let _ = stream.read(&mut buf);
                 let _ = stream.write_all(response.as_bytes());
+                // Shutdown the write side so ureq sees a clean EOF rather than
+                // waiting for the OS to close the socket when the thread exits.
+                let _ = stream.shutdown(Shutdown::Write);
             }
         });
         port
@@ -942,7 +929,6 @@ mod tests {
             .classify("system prompt", "user prompt", false)
             .expect("must succeed with mock server");
         assert_eq!(result.text, "classified!");
-        assert_eq!(result.model, "gemma3:4b");
     }
 
     #[test]
@@ -1034,7 +1020,6 @@ mod tests {
             .classify("system prompt", "user prompt", false)
             .expect("must succeed with mock server");
         assert_eq!(result.text, "classified!");
-        assert_eq!(result.model, "gpt-4o");
     }
 
     #[test]
@@ -1099,7 +1084,6 @@ mod tests {
             .classify("system prompt", "user prompt", false)
             .expect("must succeed with mock server");
         assert_eq!(result.text, "classified!");
-        assert_eq!(result.model, "claude-haiku-4-5-20251001");
     }
 
     #[test]

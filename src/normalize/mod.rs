@@ -346,6 +346,81 @@ mod tests {
     }
 
     #[test]
+    fn messages_to_transcript_assistant_only_message() {
+        // An assistant-only message (no preceding user turn) must still be
+        // rendered — the non-"user" branch in messages_to_transcript.
+        let messages = vec![("assistant", "standalone response")];
+        let result = messages_to_transcript(&messages);
+        assert!(
+            result.contains("standalone response"),
+            "assistant-only message must appear"
+        );
+        assert!(
+            !result.contains('>'),
+            "assistant message must not have > prefix"
+        );
+    }
+
+    #[test]
+    fn messages_to_transcript_consecutive_user_messages() {
+        // Two consecutive user messages with no assistant response in between
+        // must each be rendered with a > prefix on their own line.
+        let messages = vec![
+            ("user", "first question"),
+            ("user", "second question"),
+            ("assistant", "answer"),
+        ];
+        let result = messages_to_transcript(&messages);
+        assert!(
+            result.contains("> first question"),
+            "first user turn must have > prefix"
+        );
+        assert!(
+            result.contains("> second question"),
+            "second user turn must have > prefix"
+        );
+        assert!(result.contains("answer"), "assistant answer must appear");
+    }
+
+    #[test]
+    fn messages_to_transcript_multiple_exchanges() {
+        // A multi-exchange conversation must render all turns in order. Use byte
+        // offsets to compare relative position; presence checks alone wouldn't
+        // catch a regression that emitted turns out of order.
+        let messages = vec![
+            ("user", "ping"),
+            ("assistant", "pong"),
+            ("user", "done"),
+            ("assistant", "ack"),
+        ];
+        let result = messages_to_transcript(&messages);
+        let user_one = result
+            .find("> ping")
+            .expect("first user turn must be present");
+        let assistant_one = result
+            .find("pong")
+            .expect("first assistant turn must appear");
+        let user_two = result
+            .find("> done")
+            .expect("second user turn must be present");
+        let assistant_two = result
+            .find("ack")
+            .expect("second assistant turn must appear");
+        assert!(
+            user_one < assistant_one,
+            "first user turn must precede first assistant turn"
+        );
+        assert!(
+            assistant_one < user_two,
+            "first assistant turn must precede second user turn"
+        );
+        assert!(
+            user_two < assistant_two,
+            "second user turn must precede second assistant turn"
+        );
+    }
+
+    #[test]
     fn normalize_file_too_large_returns_error() {
         // Files exceeding the 500 MB safety limit must be rejected. Create a sparse
         // file (no disk space consumed) whose metadata reports a size above SIZE_MAX.

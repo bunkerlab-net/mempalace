@@ -1,0 +1,13 @@
+{
+  "id": "mempalace",
+  "name": "MemPalace",
+  "tagline": "Store everything, find anything. Local, free, no API key.",
+  "description": "A local-first memory palace for AI assistants. Stores conversation context, project knowledge, and code insights in an embedded SQLite database. Provides wake-up context, semantic search, and a knowledge graph — all without cloud services.",
+  "author": "bunkerlab-net",
+  "version": "0.1.0",
+  "license": "MIT",
+  "homepage": "https://github.com/bunkerlab-net/mempalace",
+  "categories": ["productivity", "memory"],
+  "tags": ["memory", "context", "knowledge-graph", "sqlite", "local", "mcp"],
+  "min_claude_code_version": "1.0.0"
+}

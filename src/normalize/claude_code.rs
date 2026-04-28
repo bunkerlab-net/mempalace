@@ -69,14 +69,28 @@ static NOISE_LINE_RES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         .collect()
 });
 
+/// Canonical Claude Code hook names that produce TUI chrome lines.
+///
+/// `HOOK_LINE_RE` and the `strip_noise` test set both consume this list so a
+/// new hook only needs to be added in one place.
+const HOOK_NAMES: &[&str] = &[
+    "Stop",
+    "PreCompact",
+    "PreToolUse",
+    "PostToolUse",
+    "UserPromptSubmit",
+    "Notification",
+    "SessionStart",
+    "SessionEnd",
+];
+
 // "Ran 2 Stop hook", "Ran 1 PreCompact hook", etc. — Claude Code TUI chrome.
 // Explicit hook names; prose like "our CI has a stop hook" stays intact.
 #[allow(clippy::expect_used)]
 static HOOK_LINE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"(?m)^(?:> )?Ran \d+ (?:Stop|PreCompact|PreToolUse|PostToolUse|UserPromptSubmit|Notification|SessionStart|SessionEnd) hooks?.*\n?",
-    )
-    .expect("hook line regex is a compile-time literal and cannot fail")
+    let alternation = HOOK_NAMES.join("|");
+    let pattern = format!(r"(?m)^(?:> )?Ran \d+ (?:{alternation}) hooks?.*\n?");
+    Regex::new(&pattern).expect("hook line regex assembled from compile-time literals cannot fail")
 });
 
 // "… +N lines" collapsed-output marker.
@@ -88,10 +102,17 @@ static COLLAPSED_LINES_RE: LazyLock<Regex> = LazyLock::new(|| {
 
 // "[N tokens] (ctrl+o to expand)" inline chrome.
 // Narrow pattern — a bare "(ctrl+o to expand)" in user prose stays intact.
+// Two alternations: a line-anchored form that swallows an optional `> `
+// blockquote prefix and the trailing newline (so quoted markers leave no
+// stray `>` behind), and the original inline form for markers that appear
+// mid-line. Order matters: the line-anchored alternative must come first
+// so it consumes the prefix before the inline rule sees the bracket.
 #[allow(clippy::expect_used)]
 static TOKEN_MARKER_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\s*\[\d+\s+tokens?\]\s*\(ctrl\+o to expand\)")
-        .expect("token marker regex is a compile-time literal and cannot fail")
+    Regex::new(
+        r"(?m)^(?:> )?\s*\[\d+\s+tokens?\]\s*\(ctrl\+o to expand\)\s*\n?|\s*\[\d+\s+tokens?\]\s*\(ctrl\+o to expand\)",
+    )
+    .expect("token marker regex is a compile-time literal and cannot fail")
 });
 
 // Collapse runs of blank lines created by the removals.
@@ -317,6 +338,27 @@ mod tests {
     }
 
     #[test]
+    fn strip_noise_removes_blockquote_prefixed_token_marker() {
+        // A token marker quoted via Claude Code's `> ` blockquote chrome
+        // must come out cleanly with no stray `>` left on the line.
+        let text = "before\n> [512 tokens] (ctrl+o to expand)\nafter";
+        let result = strip_noise(text);
+        assert!(
+            !result.contains("ctrl+o to expand"),
+            "blockquoted token marker must be removed"
+        );
+        // Look only for newline-anchored sigils so the assertion still allows
+        // legitimate inline `> ` sequences (e.g. comparison operators) while
+        // still catching a stranded blockquote-only line on the marker's line.
+        assert!(
+            !result.contains("\n>\n") && !result.contains("\n> \n"),
+            "no stray `>` blockquote sigil may survive on the marker's line"
+        );
+        assert!(result.contains("before"), "preceding line must survive");
+        assert!(result.contains("after"), "following line must survive");
+    }
+
+    #[test]
     fn strip_noise_removes_noise_line_prefix() {
         let text = "useful text\nCURRENT TIME: 2026-04-14T12:00:00Z\nmore text";
         let result = strip_noise(text);
@@ -377,5 +419,235 @@ mod tests {
             !result.contains("internal"),
             "noise tag body stripped from assistant turn"
         );
+    }
+
+    #[test]
+    fn strip_noise_removes_blockquote_prefixed_tag() {
+        // Tags preceded by "> " (blockquote) must also be stripped.
+        // This covers the `(?:> )?` group in the NOISE_TAG_RES patterns.
+        let text = "before\n> <system-reminder>secret</system-reminder>\nafter";
+        let result = strip_noise(text);
+        assert!(
+            !result.contains("system-reminder"),
+            "blockquote-prefixed tag must be removed"
+        );
+        assert!(
+            !result.contains("secret"),
+            "blockquote tag body must be removed"
+        );
+        assert!(
+            result.contains("before"),
+            "text before tag must be preserved"
+        );
+        assert!(result.contains("after"), "text after tag must be preserved");
+    }
+
+    #[test]
+    fn strip_noise_removes_blockquote_prefixed_noise_line() {
+        // Noise lines preceded by "> " must be stripped via the NOISE_LINE_RES patterns.
+        // Use distinct sentinels before and after so the substring checks cannot
+        // be satisfied by a single match leaking into the wrong half.
+        let text = "before-useful\n> CURRENT TIME: 2026-01-01T00:00:00Z\nafter-useful";
+        let result = strip_noise(text);
+        assert!(
+            !result.contains("CURRENT TIME:"),
+            "blockquote noise line must be removed"
+        );
+        assert!(
+            result.contains("before-useful"),
+            "first-line content must be preserved"
+        );
+        assert!(
+            result.contains("after-useful"),
+            "text after noise line must be preserved"
+        );
+        // Pair assertion: ordering must be preserved — the first-line sentinel
+        // appears before the trailing one.
+        let first = result
+            .find("before-useful")
+            .expect("before-useful must be present");
+        let second = result
+            .find("after-useful")
+            .expect("after-useful must be present");
+        assert!(first < second, "line order must be preserved after strip");
+    }
+
+    #[test]
+    fn strip_noise_removes_blockquote_prefixed_hook_line() {
+        // Hook lines preceded by "> " must be stripped via the HOOK_LINE_RE pattern.
+        let text = "output\n> Ran 1 PreCompact hook\nresult";
+        let result = strip_noise(text);
+        assert!(
+            !result.contains("PreCompact"),
+            "blockquote hook line must be removed"
+        );
+        assert!(
+            result.contains("output"),
+            "text before hook must be preserved"
+        );
+        assert!(
+            result.contains("result"),
+            "text after hook must be preserved"
+        );
+    }
+
+    #[test]
+    fn strip_noise_removes_blockquote_prefixed_collapsed_lines() {
+        // Collapsed-output markers preceded by "> " must be stripped.
+        let text = "before\n> … +100 lines\nafter";
+        let result = strip_noise(text);
+        assert!(
+            !result.contains("100 lines"),
+            "blockquote collapsed marker must be removed"
+        );
+        assert!(
+            result.contains("before"),
+            "text before marker must be preserved"
+        );
+        assert!(
+            result.contains("after"),
+            "text after marker must be preserved"
+        );
+    }
+
+    #[test]
+    fn strip_noise_collapses_excess_blank_lines() {
+        // Four or more consecutive newlines must be collapsed to three.
+        let text = "first\n\n\n\n\nfifth";
+        let result = strip_noise(text);
+        // After collapse the result must not contain 4+ consecutive newlines.
+        assert!(
+            !result.contains("\n\n\n\n"),
+            "excess blank lines must be collapsed"
+        );
+        assert!(
+            result.contains("first"),
+            "text before blanks must be preserved"
+        );
+        assert!(
+            result.contains("fifth"),
+            "text after blanks must be preserved"
+        );
+    }
+
+    #[test]
+    fn strip_noise_empty_input_returns_empty() {
+        // Empty string input must return an empty string immediately (early return path).
+        let result = strip_noise("");
+        assert!(result.is_empty(), "empty input must produce empty output");
+        assert_eq!(result.len(), 0, "empty output must have zero length");
+    }
+
+    #[test]
+    fn try_parse_unknown_message_type_is_skipped() {
+        // Messages with unrecognized types must be silently skipped, so a JSONL
+        // file with only one valid message type returns None (< 2 messages).
+        let jsonl = r#"{"type":"tool_result","message":{"content":"irrelevant"}}
+{"type":"human","message":{"content":"real question"}}"#;
+        // Only one recognized type → fewer than 2 messages → None.
+        let result = try_parse(jsonl);
+        assert!(
+            result.is_none(),
+            "single recognized type after skipping unknown must return None"
+        );
+    }
+
+    #[test]
+    fn try_parse_skips_empty_content_after_strip() {
+        // A message whose content becomes empty after strip_noise must be skipped.
+        // The pure-noise message reduces to empty and must not count toward the 2-message minimum.
+        let jsonl = "{\"type\":\"human\",\"message\":{\"content\":\"<system-reminder>noise only</system-reminder>\"}}\n\
+            {\"type\":\"assistant\",\"message\":{\"content\":\"real reply\"}}";
+        // The human turn becomes empty after stripping, leaving only 1 message.
+        let result = try_parse(jsonl);
+        assert!(
+            result.is_none(),
+            "all-noise human turn must be skipped, leaving < 2 messages"
+        );
+    }
+
+    #[test]
+    fn extract_content_object_value_returns_text_field() {
+        // The serde_json::Value::Object branch in extract_content must return the
+        // value of the "text" key. Exercised via try_parse with object-form content.
+        // We construct a JSONL line where message.content is a JSON object with a "text" key.
+        let jsonl = r#"{"type":"human","message":{"content":{"type":"text","text":"object form content"}}}
+{"type":"assistant","message":{"content":"reply"}}"#;
+        let result = try_parse(jsonl).expect("object content form must parse");
+        assert!(
+            result.contains("> object form content"),
+            "object-form text must be extracted"
+        );
+        assert!(result.contains("reply"), "assistant reply must be present");
+    }
+
+    #[test]
+    fn extract_content_array_with_non_text_type_object_skips_item() {
+        // Array items that are objects but have a type other than "text" must be
+        // filtered out (the `None` branch in the filter_map).
+        // A single non-text item leaves the content empty → message skipped.
+        let jsonl = r#"{"type":"human","message":{"content":[{"type":"tool_use","tool_name":"bash"}]}}
+{"type":"human","message":{"content":"fallback user message"}}
+{"type":"assistant","message":{"content":"reply"}}"#;
+        let result = try_parse(jsonl).expect("must parse since two valid messages exist");
+        // The tool_use item must not appear in output.
+        assert!(
+            !result.contains("tool_use"),
+            "non-text array item must be filtered"
+        );
+        assert!(
+            result.contains("fallback user message"),
+            "valid user message must appear"
+        );
+    }
+
+    #[test]
+    fn strip_noise_removes_all_named_noise_tags() {
+        // Drive the test from the canonical NOISE_TAG_NAMES list so any tag added
+        // there is automatically exercised — a hardcoded list would silently drift.
+        for tag_name in NOISE_TAG_NAMES {
+            let text = format!("before\n<{tag_name}>body</{tag_name}>\nafter");
+            let result = strip_noise(&text);
+            assert!(
+                !result.contains(tag_name),
+                "tag '{tag_name}' must be removed"
+            );
+            assert!(
+                !result.contains("body"),
+                "body of '{tag_name}' must be removed"
+            );
+            assert!(
+                result.contains("before"),
+                "text before '{tag_name}' must survive"
+            );
+            assert!(
+                result.contains("after"),
+                "text after '{tag_name}' must survive"
+            );
+        }
+    }
+
+    #[test]
+    fn strip_noise_removes_all_hook_type_lines() {
+        // Drive the test from the canonical HOOK_NAMES list so every hook
+        // added to that constant is automatically exercised — a hardcoded
+        // table would silently drift away from `HOOK_LINE_RE`.
+        for (index, hook_name) in HOOK_NAMES.iter().enumerate() {
+            // Alternate between singular and plural forms so the `hooks?`
+            // alternation in the regex is exercised in both shapes.
+            let hook_line = if index % 2 == 0 {
+                format!("Ran 1 {hook_name} hook")
+            } else {
+                format!("Ran 3 {hook_name} hooks")
+            };
+            let text = format!("start\n{hook_line}\nend");
+            let result = strip_noise(&text);
+            assert!(
+                !result.contains(&hook_line),
+                "hook line '{hook_line}' must be removed"
+            );
+            assert!(result.contains("start"), "text before hook must survive");
+            assert!(result.contains("end"), "text after hook must survive");
+        }
     }
 }

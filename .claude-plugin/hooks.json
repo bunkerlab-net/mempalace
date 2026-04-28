@@ -1,0 +1,24 @@
+{
+  "Stop": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "mempalace hook --hook stop --harness claude-code",
+          "timeout": 30
+        }
+      ]
+    }
+  ],
+  "PreCompact": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "mempalace hook --hook precompact --harness claude-code",
+          "timeout": 120
+        }
+      ]
+    }
+  ]
+}

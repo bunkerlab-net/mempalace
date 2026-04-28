@@ -16,6 +16,7 @@ use crate::error::Result;
 use crate::llm::{LlmProvider, collect_corpus_text, get_provider, refine_entities};
 use crate::palace::entities::DetectedEntity;
 use crate::palace::entity_confirm::confirm_entities;
+use crate::palace::entity_detect;
 use crate::palace::known_entities::add_to_known_entities;
 use crate::palace::project_scanner::{
     DetectedDict, ProjectInfo, merge_detected, scan, to_detected_dict,
@@ -63,7 +64,18 @@ impl Default for LlmOpts {
 ///
 /// Discovers entities, optionally refines via LLM, confirms with the user,
 /// detects rooms, then writes `entities.json` and `mempalace.yaml`.
-pub fn run(directory: &Path, yes: bool, no_gitignore: bool, llm_opts: &LlmOpts) -> Result<()> {
+/// If `lang` is non-empty those BCP-47 codes replace the global
+/// `entity_languages` setting. After writing the config, `mempalace.yaml`
+/// and `entities.json` are appended to the directory's `.gitignore` when
+/// the directory is inside a git worktree and the files aren't already
+/// listed.
+pub fn run(
+    directory: &Path,
+    yes: bool,
+    no_gitignore: bool,
+    lang: &[String],
+    llm_opts: &LlmOpts,
+) -> Result<()> {
     let directory = directory.canonicalize().map_err(|error| {
         crate::error::Error::Other(format!(
             "directory not found: {}: {error}",
@@ -77,7 +89,7 @@ pub fn run(directory: &Path, yes: bool, no_gitignore: bool, llm_opts: &LlmOpts) 
     assert!(!directory.as_os_str().is_empty());
 
     // Phase 1: discover entities from manifest files and git history.
-    let (projects, detected) = run_discover_entities(&directory);
+    let (projects, detected) = run_discover_entities(&directory, lang);
 
     // Phase 1.5: optionally refine entities with the LLM.
     let detected = run_refine_entities(detected, &directory, llm_opts)?;
@@ -98,7 +110,13 @@ pub fn run(directory: &Path, yes: bool, no_gitignore: bool, llm_opts: &LlmOpts) 
     // Write mempalace.yaml before entities.json so a failure in run_write_config
     // does not leave an orphaned entities.json on disk without a valid config.
     run_write_config(&wing_name, rooms, &directory)?;
-    run_confirm_and_save(&detected, yes, &directory)
+    run_confirm_and_save(&detected, yes, &directory)?;
+
+    if !lang.is_empty() {
+        run_persist_lang(lang);
+    }
+    run_gitignore_protect(&directory);
+    Ok(())
 }
 
 // ===================== PRIVATE HELPERS =====================
@@ -108,7 +126,7 @@ pub fn run(directory: &Path, yes: bool, no_gitignore: bool, llm_opts: &LlmOpts) 
 /// Returns the raw `ProjectInfo` list (for wing-name derivation) and the merged
 /// `DetectedDict`. Never fails — returns empty collections when the directory has
 /// no recognized signals. Called by [`run`].
-fn run_discover_entities(directory: &Path) -> (Vec<ProjectInfo>, DetectedDict) {
+fn run_discover_entities(directory: &Path, lang: &[String]) -> (Vec<ProjectInfo>, DetectedDict) {
     assert!(directory.is_dir());
     assert!(!directory.as_os_str().is_empty());
 
@@ -124,6 +142,11 @@ fn run_discover_entities(directory: &Path) -> (Vec<ProjectInfo>, DetectedDict) {
     let has_real_signal = !projects.is_empty() || !people.is_empty();
     let detected = merge_detected(real_signal, session_signal, has_real_signal);
 
+    // Phase 1b: supplement with prose-based entity detection. Use the CLI-provided
+    // languages so prose detection respects --lang during init; defaults to English
+    // when the caller passed no languages.
+    let detected = run_discover_entities_prose(directory, detected, lang);
+
     // Pair assertion: entity lists are bounded.
     debug_assert!(
         detected.people.len() < 1_000_000,
@@ -135,6 +158,48 @@ fn run_discover_entities(directory: &Path) -> (Vec<ProjectInfo>, DetectedDict) {
     );
 
     (projects, detected)
+}
+
+/// Called by `run_discover_entities` to add prose-detected entity candidates.
+///
+/// Scans up to 10 prose/code files in `directory`, runs `detect_entities` with
+/// English patterns, then merges any new candidates into `current`. Returns
+/// `current` unchanged if no prose files are found.
+fn run_discover_entities_prose(
+    directory: &Path,
+    current: DetectedDict,
+    lang: &[String],
+) -> DetectedDict {
+    let prose_files = entity_detect::scan_for_detection(directory, 10);
+    if prose_files.is_empty() {
+        return current;
+    }
+    let prose_refs: Vec<&std::path::Path> = prose_files
+        .iter()
+        .map(std::path::PathBuf::as_path)
+        .collect();
+    // Borrow the caller's languages as &str slices; default to English when empty
+    // so existing single-language callers keep working without configuration.
+    let lang_refs: Vec<&str> = lang.iter().map(String::as_str).collect();
+    let languages: &[&str] = if lang_refs.is_empty() {
+        &["en"]
+    } else {
+        &lang_refs
+    };
+    let result = entity_detect::detect_entities(&prose_refs, 10, languages);
+
+    assert!(
+        result.people.len() + result.projects.len() + result.uncertain.len()
+            <= prose_refs.len() * 1000,
+        "prose detection result is unexpectedly large"
+    );
+
+    let prose_signal = DetectedDict {
+        people: result.people,
+        projects: result.projects,
+        uncertain: result.uncertain,
+    };
+    merge_detected(current, prose_signal, false)
 }
 
 /// Optionally refine `detected` using an LLM.
@@ -351,6 +416,93 @@ fn run_derive_wing_name(projects: &[ProjectInfo], directory: &Path) -> String {
     sanitized
 }
 
+/// Persist `lang` codes to the global `MempalaceConfig::entity_languages`.
+///
+/// Called by [`run`] when `--lang` is provided. Failures are non-fatal:
+/// a full-disk or permission error must not abort an otherwise successful
+/// `init`.
+fn run_persist_lang(lang: &[String]) {
+    assert!(!lang.is_empty(), "run_persist_lang: lang must not be empty");
+    let mut config = match crate::config::MempalaceConfig::load() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("  Warning: could not load config to persist --lang: {error}");
+            return;
+        }
+    };
+    config.entity_languages = lang.to_vec();
+    assert!(
+        !config.entity_languages.is_empty(),
+        "entity_languages must be non-empty after assignment"
+    );
+    if let Err(error) = config.save() {
+        eprintln!("  Warning: could not persist --lang to config: {error}");
+    } else {
+        println!("  Entity languages set to: {}", lang.join(", "));
+    }
+}
+
+/// Append `/mempalace.yaml` and `/entities.json` (anchored to repo root) to
+/// the `.gitignore` in `directory` if the directory is the root of a git
+/// worktree and the entries are not already present. The dedup check treats
+/// anchored and unanchored variants (e.g. `mempalace.yaml`) as equivalent so
+/// we never append a duplicate rule.
+///
+/// Called by [`run`] after config is written. Non-fatal: errors are printed
+/// to stderr and do not abort init.
+fn run_gitignore_protect(directory: &Path) {
+    assert!(directory.is_dir(), "run_gitignore_protect: must be a dir");
+    let git_dir = directory.join(".git");
+    if !git_dir.exists() {
+        return;
+    }
+    let gitignore_path = directory.join(".gitignore");
+    let existing = match std::fs::read_to_string(&gitignore_path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            eprintln!("  Warning: could not read .gitignore: {error}");
+            return;
+        }
+    };
+    assert!(
+        existing.len() < 10 * 1024 * 1024,
+        "run_gitignore_protect: .gitignore must be < 10 MB"
+    );
+    // Anchored patterns: these files only exist at the repo root, so a leading
+    // slash makes the rule unambiguous and also lets us deduplicate against
+    // unanchored variants a user may have written previously.
+    let entries = ["/mempalace.yaml", "/entities.json"];
+    let mut appended: Vec<&str> = Vec::with_capacity(entries.len());
+    let mut additions = String::new();
+    for entry in entries {
+        let unanchored = entry.trim_start_matches('/');
+        let already_present = existing.lines().any(|line| {
+            let trimmed = line.trim();
+            trimmed == entry || trimmed == unanchored
+        });
+        if !already_present {
+            additions.push_str(entry);
+            additions.push('\n');
+            appended.push(entry);
+        }
+    }
+    if appended.is_empty() {
+        return;
+    }
+    let separator = if existing.ends_with('\n') || existing.is_empty() {
+        ""
+    } else {
+        "\n"
+    };
+    let new_content = format!("{existing}{separator}{additions}");
+    if let Err(error) = std::fs::write(&gitignore_path, &new_content) {
+        eprintln!("  Warning: could not update .gitignore: {error}");
+    } else {
+        println!("  Added to .gitignore: {}", appended.join(", "));
+    }
+}
+
 /// Print the init summary including detected entities and rooms.
 ///
 /// Called by [`run`] to keep that function within the 70-line limit.
@@ -432,7 +584,7 @@ mod tests {
         // init::run with yes=true must write a mempalace.yaml to the target directory.
         let temp_directory =
             tempfile::tempdir().expect("failed to create temporary directory for init test");
-        run(temp_directory.path(), true, false, &LlmOpts::default())
+        run(temp_directory.path(), true, false, &[], &LlmOpts::default())
             .expect("init::run should succeed for a valid directory with yes=true");
 
         let config_path = temp_directory.path().join("mempalace.yaml");
@@ -451,7 +603,7 @@ mod tests {
     fn init_run_nonexistent_directory_returns_error() {
         // Passing a path that does not exist must return Err.
         let path = std::path::Path::new("/nonexistent/path/that/does/not/exist");
-        let result = run(path, true, false, &LlmOpts::default());
+        let result = run(path, true, false, &[], &LlmOpts::default());
         assert!(result.is_err(), "nonexistent directory must return Err");
         assert!(
             result
@@ -469,7 +621,7 @@ mod tests {
         std::fs::write(temp_directory.path().join("test.rs"), "fn main() {}")
             .expect("failed to write test source file");
 
-        run(temp_directory.path(), true, true, &LlmOpts::default())
+        run(temp_directory.path(), true, true, &[], &LlmOpts::default())
             .expect("init::run should succeed with no_gitignore=true");
 
         let config_path = temp_directory.path().join("mempalace.yaml");
@@ -778,12 +930,235 @@ mod tests {
         .expect("must write session file");
 
         // run_discover_entities should take the is_claude_projects_root=true branch.
-        let (_projects, detected) = run_discover_entities(temp_dir.path());
+        let (_projects, detected) = run_discover_entities(temp_dir.path(), &[]);
         // The session JSONL carries cwd="/Users/robbie/test-proj", so the session
         // scanner must surface "test-proj" in detected.projects.
         assert!(
             detected.projects.iter().any(|e| e.name == "test-proj"),
             "session scanner must detect project name from cwd in session JSONL"
         );
+    }
+
+    #[test]
+    fn gitignore_protect_adds_entries_when_git_repo() {
+        // run_gitignore_protect must append mempalace.yaml and entities.json to
+        // .gitignore when the directory has a .git folder and neither entry is present.
+        let dir = tempfile::tempdir().expect("tempdir must succeed");
+        std::fs::create_dir(dir.path().join(".git")).expect("must create .git dir");
+        std::fs::write(dir.path().join(".gitignore"), "*.log\n").expect("must write .gitignore");
+
+        run_gitignore_protect(dir.path());
+
+        let contents =
+            std::fs::read_to_string(dir.path().join(".gitignore")).expect("must read .gitignore");
+        assert!(
+            contents.contains("mempalace.yaml"),
+            ".gitignore must contain mempalace.yaml"
+        );
+        // Pair assertion: entities.json must also be added.
+        assert!(
+            contents.contains("entities.json"),
+            ".gitignore must contain entities.json"
+        );
+    }
+
+    #[test]
+    fn gitignore_protect_does_not_duplicate_existing_entries() {
+        // run_gitignore_protect must not add entries that are already present.
+        let dir = tempfile::tempdir().expect("tempdir must succeed");
+        std::fs::create_dir(dir.path().join(".git")).expect("must create .git dir");
+        std::fs::write(
+            dir.path().join(".gitignore"),
+            "mempalace.yaml\nentities.json\n",
+        )
+        .expect("must write .gitignore");
+
+        run_gitignore_protect(dir.path());
+
+        let contents =
+            std::fs::read_to_string(dir.path().join(".gitignore")).expect("must read .gitignore");
+        let yaml_count = contents.matches("mempalace.yaml").count();
+        let json_count = contents.matches("entities.json").count();
+        assert_eq!(yaml_count, 1, "mempalace.yaml must appear exactly once");
+        // Pair assertion: entities.json must also appear exactly once.
+        assert_eq!(json_count, 1, "entities.json must appear exactly once");
+    }
+
+    #[test]
+    fn gitignore_protect_dedupes_anchored_existing_entries() {
+        // Regression: when .gitignore already contains the rooted variants
+        // (`/mempalace.yaml`, `/entities.json`), run_gitignore_protect must
+        // recognise them as equivalent to the unanchored names and not append
+        // a redundant rule.
+        let dir = tempfile::tempdir().expect("tempdir must succeed");
+        std::fs::create_dir(dir.path().join(".git")).expect("must create .git dir");
+        std::fs::write(
+            dir.path().join(".gitignore"),
+            "/mempalace.yaml\n/entities.json\n",
+        )
+        .expect("must write .gitignore");
+
+        run_gitignore_protect(dir.path());
+
+        let contents =
+            std::fs::read_to_string(dir.path().join(".gitignore")).expect("must read .gitignore");
+        let yaml_count = contents.matches("mempalace.yaml").count();
+        let json_count = contents.matches("entities.json").count();
+        assert_eq!(
+            yaml_count, 1,
+            "anchored mempalace.yaml must not be duplicated"
+        );
+        // Pair assertion: anchored entities.json must also stay unique.
+        assert_eq!(
+            json_count, 1,
+            "anchored entities.json must not be duplicated"
+        );
+    }
+
+    #[test]
+    fn gitignore_protect_skips_non_git_directory() {
+        // run_gitignore_protect must not create or modify .gitignore when there
+        // is no .git directory (i.e., not a git worktree root).
+        let dir = tempfile::tempdir().expect("tempdir must succeed");
+        // No .git directory — protect must be a no-op.
+        run_gitignore_protect(dir.path());
+        assert!(
+            !dir.path().join(".gitignore").exists(),
+            ".gitignore must not be created for a non-git directory"
+        );
+        // Pair assertion: the .git directory must truly be absent.
+        assert!(!dir.path().join(".git").exists(), ".git must be absent");
+    }
+
+    // --- run_derive_wing_name: empty candidate falls back to "project" ---
+
+    #[test]
+    fn run_derive_wing_name_all_special_chars_falls_back_to_project() {
+        // When the project name consists entirely of special characters that split
+        // to empty segments, the candidate is empty and must fall back to "project".
+        // Covers L393-394.
+        use crate::palace::project_scanner::ProjectInfo;
+        let temp_dir = tempfile::tempdir().expect("must create temp dir for empty-candidate test");
+        let projects = vec![ProjectInfo {
+            // All non-alphanumeric: splits to empty segments after filtering.
+            name: "---".to_string(),
+            repo_root: temp_dir.path().to_path_buf(),
+            manifest: None,
+            has_git: false,
+            total_commits: 0,
+            user_commits: 1,
+            is_mine: true,
+        }];
+        let result = run_derive_wing_name(&projects, temp_dir.path());
+        assert_eq!(
+            result, "project",
+            "all-special-char name must fall back to 'project'"
+        );
+        // Pair assertion: result is always non-empty.
+        assert!(!result.is_empty(), "wing name must never be empty");
+    }
+
+    // --- run_gitignore_protect: no separator needed when .gitignore ends with newline ---
+
+    #[test]
+    fn gitignore_protect_no_separator_when_existing_ends_with_newline() {
+        // When the existing .gitignore already ends with '\n', no separator is added
+        // before the new entries. Covers the separator="" branch on L471-475.
+        let dir = tempfile::tempdir().expect("tempdir must succeed");
+        std::fs::create_dir(dir.path().join(".git")).expect("must create .git dir");
+        // Content ends with '\n' — separator must be "".
+        std::fs::write(dir.path().join(".gitignore"), "*.log\n").expect("must write .gitignore");
+
+        run_gitignore_protect(dir.path());
+
+        let contents =
+            std::fs::read_to_string(dir.path().join(".gitignore")).expect("must read .gitignore");
+        // No double-newline between the original content and the added entries.
+        assert!(
+            !contents.contains("\n\nmempalace.yaml"),
+            ".gitignore must not have double-newline separator"
+        );
+        // Pair assertion: the entries are present.
+        assert!(
+            contents.contains("mempalace.yaml"),
+            "mempalace.yaml must be added"
+        );
+    }
+
+    // --- run_gitignore_protect: separator added when .gitignore does not end with newline ---
+
+    #[test]
+    fn gitignore_protect_adds_separator_when_existing_lacks_trailing_newline() {
+        // When the existing .gitignore does not end with '\n', a newline separator is
+        // added. Covers the separator="\n" branch on L473.
+        let dir = tempfile::tempdir().expect("tempdir must succeed");
+        std::fs::create_dir(dir.path().join(".git")).expect("must create .git dir");
+        // Content does NOT end with '\n'.
+        std::fs::write(dir.path().join(".gitignore"), "*.log").expect("must write .gitignore");
+
+        run_gitignore_protect(dir.path());
+
+        let contents =
+            std::fs::read_to_string(dir.path().join(".gitignore")).expect("must read .gitignore");
+        // The entries must appear after the original content with a newline between them.
+        assert!(
+            contents.starts_with("*.log\n"),
+            ".gitignore must start with original content followed by newline"
+        );
+        // Pair assertion: new entries must be present.
+        assert!(
+            contents.contains("mempalace.yaml"),
+            "mempalace.yaml must be added after separator"
+        );
+    }
+
+    // --- run_persist_lang: save error branch ---
+
+    // Uses `std::os::unix::fs::PermissionsExt` to make the config directory
+    // read-only — Windows has no equivalent permission model, so gate the
+    // test to Unix targets to keep cross-platform builds compiling.
+    #[cfg(unix)]
+    #[test]
+    fn run_persist_lang_does_not_panic_when_save_fails() {
+        // When the config directory is read-only, config.save() returns Err.
+        // run_persist_lang must log the warning and return without panicking.
+        // Covers L426-428.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir must succeed");
+        temp_env::with_var("MEMPALACE_DIR", Some(dir.path()), || {
+            // Make the directory read-only so the write fails.
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o444))
+                .expect("set_permissions must succeed");
+
+            // Must not panic even when save() fails.
+            run_persist_lang(&["en".to_string()]);
+
+            // Restore permissions so tempdir cleanup succeeds.
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755))
+                .expect("restore permissions must succeed");
+        });
+        // Pair assertion: the directory must still exist (we only chmod'd it, not removed).
+        assert!(dir.path().is_dir(), "temp dir must still exist after test");
+    }
+
+    #[test]
+    fn persist_lang_updates_global_config() {
+        // run_persist_lang must write the provided language codes to the global
+        // MempalaceConfig so that subsequent loads return the new value.
+        let dir = tempfile::tempdir().expect("tempdir must succeed");
+        temp_env::with_var("MEMPALACE_DIR", Some(dir.path()), || {
+            run_persist_lang(&["de".to_string(), "fr".to_string()]);
+            let loaded = crate::config::MempalaceConfig::load()
+                .expect("config must load after persist_lang");
+            assert!(
+                loaded.entity_languages.contains(&"de".to_string()),
+                "entity_languages must contain de"
+            );
+            // Pair assertion: fr must also be present.
+            assert!(
+                loaded.entity_languages.contains(&"fr".to_string()),
+                "entity_languages must contain fr"
+            );
+        });
     }
 }

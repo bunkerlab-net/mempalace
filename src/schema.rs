@@ -70,8 +70,14 @@ CREATE TABLE IF NOT EXISTS compressed (
     compression_ratio REAL,
     wing TEXT,
     room TEXT,
+    source_file TEXT,
     filed_at TEXT DEFAULT (datetime('now'))
 );
+
+-- idx_compressed_source is created in ensure_schema after the ALTER TABLE that
+-- adds source_file on upgraded databases. Defining the index here would fail on
+-- databases predating the source_file column because execute_batch parses
+-- referenced columns before the migration runs.
 
 -- Explicit cross-wing tunnels created by agents when they notice a connection
 -- between two specific rooms in different wings/projects.  Stored in SQLite
@@ -141,6 +147,24 @@ pub async fn ensure_schema(connection: &Connection) -> Result<()> {
             .execute("ALTER TABLE triples ADD COLUMN adapter_name TEXT", ())
             .await,
     )?;
+
+    // Migration: add source_file to compressed for per-file closet operations.
+    // Fresh databases get it from the DDL; older databases need ALTER TABLE.
+    ignore_duplicate_column(
+        connection
+            .execute("ALTER TABLE compressed ADD COLUMN source_file TEXT", ())
+            .await,
+    )?;
+
+    // Create the index now that source_file is guaranteed to exist on the
+    // compressed table. Defining this in the SCHEMA batch would crash an
+    // upgrade because the column is added by the ALTER TABLE just above.
+    connection
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_compressed_source ON compressed(source_file)",
+            (),
+        )
+        .await?;
 
     // Pair assertion: verify all six core tables were created.
     let rows = crate::db::query_all(

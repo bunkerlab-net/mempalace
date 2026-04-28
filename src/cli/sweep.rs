@@ -8,6 +8,7 @@ use std::path::Path;
 use turso::Connection;
 
 use crate::error::Result;
+use crate::palace::entity_registry::EntityRegistry;
 use crate::palace::sweeper;
 
 /// Run the `sweep` subcommand.
@@ -24,22 +25,38 @@ pub async fn run(connection: &Connection, target: &Path, wing: &str) -> Result<(
     assert!(!wing.is_empty(), "sweep: wing must not be empty");
 
     if target.is_file() {
+        // Read content before sweep for entity learning — best-effort, non-UTF8 files produce empty string.
+        let file_content = std::fs::read_to_string(target).unwrap_or_default();
         let result = sweeper::sweep(connection, target, wing).await?;
         println!(
-            "  Swept {}: +{} new, {} already present.",
+            "  Swept {}: +{} new / {} present",
             target.display(),
             result.drawers_added,
             result.drawers_already_present,
         );
+        // Learn new entities from freshly swept content; skip if nothing changed.
+        if result.drawers_added > 0 && !file_content.is_empty() {
+            run_learn_from_file(&file_content);
+        }
     } else if target.is_dir() {
         let result = sweeper::sweep_directory(connection, target, wing).await?;
+        if result.files_attempted == 0 {
+            return Err(crate::error::Error::Other(format!(
+                "sweep: no .jsonl files found in {}",
+                target.display()
+            )));
+        }
+        let files_skipped = result
+            .files_attempted
+            .saturating_sub(result.files_succeeded);
         println!(
-            "  Swept {}/{} files from {}: +{} new, {} already present.",
-            result.files_succeeded,
-            result.files_attempted,
+            "  Swept {}: +{} new / {} present / {} skipped  ({}/{} files)",
             target.display(),
             result.drawers_added,
             result.drawers_already_present,
+            files_skipped,
+            result.files_succeeded,
+            result.files_attempted,
         );
     } else {
         return Err(crate::error::Error::Other(format!(
@@ -49,6 +66,33 @@ pub async fn run(connection: &Connection, target: &Path, wing: &str) -> Result<(
     }
 
     Ok(())
+}
+
+/// Scan swept file content for new entity candidates and update the local registry.
+///
+/// Called by [`run`] after a file sweep that added at least one drawer. Best-effort:
+/// a failed registry write does not abort the sweep. Loads configured entity languages
+/// from config; falls back to English. The registry ignores duplicates so repeated calls are safe.
+fn run_learn_from_file(content: &str) {
+    assert!(
+        !content.is_empty(),
+        "run_learn_from_file: content must not be empty"
+    );
+    let languages: Vec<String> = crate::config::MempalaceConfig::load()
+        .map_or_else(|_| vec!["en".to_string()], |config| config.entity_languages);
+    assert!(
+        !languages.is_empty(),
+        "run_learn_from_file: language list must not be empty"
+    );
+    let language_refs: Vec<&str> = languages.iter().map(String::as_str).collect();
+    let mut registry = EntityRegistry::load();
+    // Registry summary is always non-empty — confirms the load succeeded.
+    assert!(
+        !registry.summary().is_empty(),
+        "run_learn_from_file: registry must load successfully"
+    );
+    // Best-effort: a failed write does not abort the parent sweep.
+    let _ = registry.learn_from_text(content, 0.7, &language_refs);
 }
 
 #[cfg(test)]
@@ -118,6 +162,25 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn run_empty_directory_returns_error() {
+        // Empty directory branch: run must return Err when no .jsonl files exist.
+        // This distinguishes a misconfigured target from a silent no-op.
+        let dir = tempdir().expect("must create temp dir");
+        let (_database, connection) = crate::test_helpers::test_db().await;
+        let result = run(&connection, dir.path(), "test_wing").await;
+        assert!(
+            result.is_err(),
+            "run must return Err for a directory with no .jsonl files"
+        );
+        // Pair assertion: the error message must mention the target path.
+        let error_string = result.err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(
+            error_string.contains("no .jsonl"),
+            "error message must mention missing .jsonl files"
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn run_special_file_returns_error() {
@@ -133,5 +196,23 @@ mod tests {
             result.is_err(),
             "run must return Err for a special-file target"
         );
+    }
+
+    #[test]
+    fn learn_from_file_does_not_panic_on_valid_content() {
+        // run_learn_from_file must complete without panicking given any non-empty content.
+        // The registry file is only written when new entities are discovered, so we
+        // verify the function completed by confirming the registry still loads cleanly.
+        let dir = tempfile::tempdir().expect("tempdir must succeed");
+        temp_env::with_var("MEMPALACE_DIR", Some(dir.path()), || {
+            run_learn_from_file("Alice called about the project meeting next week.");
+            // Pair assertion: entity registry must load successfully after the call
+            // (falls back to empty default if no file was written — that is correct).
+            let registry = crate::palace::entity_registry::EntityRegistry::load();
+            assert!(
+                !registry.summary().is_empty(),
+                "registry must be loadable after learn_from_file"
+            );
+        });
     }
 }

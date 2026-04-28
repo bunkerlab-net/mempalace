@@ -19,10 +19,12 @@ async fn app_run_init_creates_config_with_yes_flag() {
         tempfile::tempdir().expect("failed to create temporary directory for init test");
 
     let cli_instance = Cli {
+        palace: None,
         command: Command::Init {
             directory: temp_directory.path().to_path_buf(),
             yes: true,
             no_gitignore: false,
+            lang: vec![],
             llm: false,
             llm_provider: "ollama".to_string(),
             llm_model: "gemma3:4b".to_string(),
@@ -62,6 +64,7 @@ async fn app_run_split_with_no_mega_files_returns_ok() {
     .expect("failed to write single-session test file");
 
     let cli_instance = Cli {
+        palace: None,
         command: Command::Split {
             directory: temp_directory.path().to_path_buf(),
             output_dir: None,
@@ -94,6 +97,7 @@ async fn app_run_status_with_no_palace_returns_ok() {
         .to_string();
 
     let cli_instance = Cli {
+        palace: None,
         command: Command::Status,
     };
 
@@ -134,6 +138,7 @@ async fn app_run_mine_with_projects_mode_and_db() {
     .expect("failed to write mempalace.yaml for mine test");
 
     let cli_instance = Cli {
+        palace: None,
         command: Command::Mine {
             directory: temp_directory.path().to_path_buf(),
             mode: "projects".to_string(),
@@ -143,6 +148,7 @@ async fn app_run_mine_with_projects_mode_and_db() {
             limit: 0,
             dry_run: false,
             no_gitignore: false,
+            include_ignored: vec![],
         },
     };
 
@@ -191,6 +197,7 @@ async fn app_run_mine_with_convos_mode_and_db() {
     .expect("failed to write test conversation file");
 
     let cli_instance = Cli {
+        palace: None,
         command: Command::Mine {
             directory: temp_directory.path().to_path_buf(),
             mode: "convos".to_string(),
@@ -200,6 +207,7 @@ async fn app_run_mine_with_convos_mode_and_db() {
             limit: 0,
             dry_run: false,
             no_gitignore: false,
+            include_ignored: vec![],
         },
     };
 
@@ -240,6 +248,7 @@ async fn app_run_search_with_palace() {
         .to_string();
 
     let cli_instance = Cli {
+        palace: None,
         command: Command::Search {
             query: "test query".to_string(),
             wing: None,
@@ -285,7 +294,13 @@ async fn app_run_wakeup_with_palace() {
         .to_string();
 
     let cli_instance = Cli {
-        command: Command::WakeUp { wing: None },
+        palace: None,
+        command: Command::WakeUp {
+            wing: None,
+            room: None,
+            query: None,
+            results: 20,
+        },
     };
 
     temp_env::async_with_vars(
@@ -315,6 +330,98 @@ async fn app_run_wakeup_with_palace() {
 }
 
 #[tokio::test]
+async fn app_run_wakeup_with_wing_exercises_l2_recall() {
+    // Command::WakeUp with --wing set must execute the L2 on-demand recall path.
+    let palace_directory = tempfile::tempdir()
+        .expect("failed to create temporary palace directory for wakeup-l2 test");
+    let palace_db_path = palace_directory.path().join("palace.db");
+    let palace_db_path_string = palace_db_path
+        .to_str()
+        .expect("palace database path must be valid UTF-8")
+        .to_string();
+
+    let cli_instance = Cli {
+        palace: None,
+        command: Command::WakeUp {
+            wing: Some("test_wing".to_string()),
+            room: None,
+            query: None,
+            results: 5,
+        },
+    };
+
+    temp_env::async_with_vars(
+        [
+            (
+                "MEMPALACE_DIR",
+                Some(palace_directory.path().to_str().expect("valid UTF-8")),
+            ),
+            (
+                "MEMPALACE_PALACE_PATH",
+                Some(palace_db_path_string.as_str()),
+            ),
+        ],
+        async {
+            mempalace::app::run(cli_instance)
+                .await
+                .expect("app::run with Command::WakeUp --wing should succeed");
+        },
+    )
+    .await;
+
+    assert!(
+        palace_db_path.exists(),
+        "palace.db must exist after wakeup l2 test"
+    );
+}
+
+#[tokio::test]
+async fn app_run_wakeup_with_query_exercises_l3_search() {
+    // Command::WakeUp with --query set must execute the L3 deep-search path.
+    let palace_directory = tempfile::tempdir()
+        .expect("failed to create temporary palace directory for wakeup-l3 test");
+    let palace_db_path = palace_directory.path().join("palace.db");
+    let palace_db_path_string = palace_db_path
+        .to_str()
+        .expect("palace database path must be valid UTF-8")
+        .to_string();
+
+    let cli_instance = Cli {
+        palace: None,
+        command: Command::WakeUp {
+            wing: None,
+            room: None,
+            query: Some("architecture".to_string()),
+            results: 5,
+        },
+    };
+
+    temp_env::async_with_vars(
+        [
+            (
+                "MEMPALACE_DIR",
+                Some(palace_directory.path().to_str().expect("valid UTF-8")),
+            ),
+            (
+                "MEMPALACE_PALACE_PATH",
+                Some(palace_db_path_string.as_str()),
+            ),
+        ],
+        async {
+            mempalace::app::run(cli_instance)
+                .await
+                .expect("app::run with Command::WakeUp --query should succeed");
+        },
+    )
+    .await;
+
+    assert!(
+        palace_db_path.exists(),
+        "palace.db must exist after wakeup l3 test"
+    );
+}
+
+#[tokio::test]
 async fn app_run_compress_with_palace() {
     // Command::Compress must open the palace and process drawers (no-op on empty).
     let palace_directory =
@@ -326,6 +433,7 @@ async fn app_run_compress_with_palace() {
         .to_string();
 
     let cli_instance = Cli {
+        palace: None,
         command: Command::Compress {
             wing: None,
             dry_run: true,
@@ -385,7 +493,8 @@ async fn app_run_repair_with_palace() {
     }
 
     let cli_instance = Cli {
-        command: Command::Repair,
+        palace: None,
+        command: Command::Repair { skip_confirm: true },
     };
 
     temp_env::async_with_vars(

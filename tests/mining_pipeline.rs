@@ -47,6 +47,7 @@ async fn scan_and_mine_creates_searchable_drawers() {
         limit: 0,
         dry_run: false,
         respect_gitignore: false,
+        include_ignored_paths: vec![],
     };
     mempalace::palace::miner::mine(&connection, directory.path(), &mine_params)
         .await
@@ -93,6 +94,7 @@ async fn mine_skips_already_mined_files() {
         limit: 0,
         dry_run: false,
         respect_gitignore: false,
+        include_ignored_paths: vec![],
     };
 
     // First mine.

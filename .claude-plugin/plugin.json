@@ -1,0 +1,19 @@
+{
+  "name": "mempalace",
+  "display_name": "MemPalace",
+  "version": "0.1.0",
+  "description": "Local-first AI memory palace for AI assistants",
+  "author": "bunkerlab-net",
+  "homepage": "https://github.com/bunkerlab-net/mempalace",
+  "license": "MIT",
+  "binary": "mempalace",
+  "mcp_command": ["mempalace", "mcp"],
+  "skills": ["skills/mempalace/SKILL.md"],
+  "commands": [
+    "commands/help.md",
+    "commands/init.md",
+    "commands/mine.md",
+    "commands/search.md",
+    "commands/status.md"
+  ]
+}

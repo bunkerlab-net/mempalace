@@ -1,10 +1,12 @@
 use std::collections::{HashMap, HashSet};
-use std::fs;
+use std::fs::File;
+use std::io::Read as _;
 use std::path::Path;
 use std::sync::LazyLock;
 
 use regex::Regex;
 
+use crate::i18n::{EntityPatterns, get_entity_patterns};
 use crate::palace::entities::DetectedEntity;
 
 // Regex statics are compile-time literals; .expect() cannot fail at runtime.
@@ -29,13 +31,8 @@ static MULTI_RE: LazyLock<Regex> = LazyLock::new(|| {
     )
 });
 
-// Regex pattern is a compile-time literal and cannot fail to compile at runtime.
-#[allow(clippy::expect_used)]
-// Matches gendered and plural pronouns to score person-like proximity.
-static PRONOUN_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(she|her|hers|he|him|his|they|them|their)\b")
-        .expect("pronoun regex is a compile-time literal and cannot fail to compile")
-});
+/// Maximum bytes read per file during entity detection to bound memory usage.
+const BYTES_PER_FILE_MAX: usize = 5000;
 
 /// Detection results grouped by type.
 pub struct DetectionResult {
@@ -44,38 +41,25 @@ pub struct DetectionResult {
     pub uncertain: Vec<DetectedEntity>,
 }
 
-/// Scan files and detect entity candidates.
-pub fn detect_entities(file_paths: &[&Path], files_max: usize) -> DetectionResult {
+/// Scan files and detect entity candidates using the specified locale languages.
+///
+/// Language codes are BCP 47 tags (e.g., `"en"`, `"de"`, `"pt-br"`). Stopwords
+/// and pronoun patterns are merged across all requested locales so multi-language
+/// content is handled correctly without false-positive candidates.
+pub fn detect_entities(
+    file_paths: &[&Path],
+    files_max: usize,
+    languages: &[&str],
+) -> DetectionResult {
     assert!(files_max > 0, "detect_entities: files_max must be positive");
-    let mut all_text = String::new();
-    let mut all_lines = Vec::new();
-    let bytes_per_file_max = 5000;
+    assert!(
+        !languages.is_empty(),
+        "detect_entities: languages must not be empty"
+    );
 
-    for (i, path) in file_paths.iter().enumerate() {
-        if i >= files_max {
-            break;
-        }
-        if let Ok(content) = fs::read_to_string(path) {
-            let truncated = if content.len() > bytes_per_file_max {
-                // Walk backward from the byte limit to find a valid UTF-8 char
-                // boundary.  Slicing at a raw byte offset can land mid-codepoint
-                // for multi-byte characters (emoji, CJK, accented letters) and panic.
-                let mut end = bytes_per_file_max;
-                while end > 0 && !content.is_char_boundary(end) {
-                    end -= 1;
-                }
-                &content[..end]
-            } else {
-                &content
-            };
-            all_text.push_str(truncated);
-            all_text.push('\n');
-            all_lines.extend(truncated.lines().map(String::from));
-        }
-    }
+    let (all_text, all_lines) = detect_entities_load_text(file_paths, files_max);
 
-    // Guard against the case where no files were readable: extract_candidates
-    // has an assert!(!text.is_empty()) that would panic on empty input.
+    // Guard: extract_candidates asserts non-empty text, so return early here.
     if all_text.is_empty() {
         return DetectionResult {
             people: vec![],
@@ -83,7 +67,11 @@ pub fn detect_entities(file_paths: &[&Path], files_max: usize) -> DetectionResul
             uncertain: vec![],
         };
     }
-    let candidates = extract_candidates(&all_text);
+
+    let patterns = get_entity_patterns(languages);
+    let pronoun_re = detect_entities_build_pronoun_re(&patterns);
+    let candidates = extract_candidates(&all_text, &patterns);
+
     if candidates.is_empty() {
         return DetectionResult {
             people: vec![],
@@ -100,9 +88,8 @@ pub fn detect_entities(file_paths: &[&Path], files_max: usize) -> DetectionResul
     sorted_candidates.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     for (name, frequency) in sorted_candidates {
-        let scores = score_entity(&name, &all_text, &all_lines);
+        let scores = score_entity(&name, &all_text, &all_lines, &pronoun_re, &patterns);
         let entity = classify_entity(&name, frequency, &scores);
-
         match entity.entity_type.as_str() {
             "person" => people.push(entity),
             "project" => projects.push(entity),
@@ -111,12 +98,86 @@ pub fn detect_entities(file_paths: &[&Path], files_max: usize) -> DetectionResul
     }
 
     detect_entities_sort_and_truncate(&mut people, &mut projects, &mut uncertain);
-
     DetectionResult {
         people,
         projects,
         uncertain,
     }
+}
+
+/// Called by `detect_entities` to load and concatenate file content.
+///
+/// Reads up to `files_max` files from `file_paths`, truncating each at 5 000 bytes
+/// on a valid UTF-8 boundary to keep memory bounded for large files.
+/// Returns `(combined_text, lines)`.
+fn detect_entities_load_text(file_paths: &[&Path], files_max: usize) -> (String, Vec<String>) {
+    assert!(
+        files_max > 0,
+        "detect_entities_load_text: files_max must be positive"
+    );
+
+    let mut all_text = String::new();
+    let mut all_lines = Vec::new();
+
+    for (index, path) in file_paths.iter().enumerate() {
+        if index >= files_max {
+            break;
+        }
+        // Stream up to BYTES_PER_FILE_MAX bytes only — fs::read_to_string would
+        // first allocate the entire file before truncating, defeating the cap
+        // on huge files.
+        let Ok(file) = File::open(path) else {
+            continue;
+        };
+        // +4 lets us detect that the file exceeded the cap and lets us walk back
+        // to a UTF-8 boundary without losing bytes in the truncated case.
+        let mut buffer = Vec::with_capacity(BYTES_PER_FILE_MAX + 4);
+        if file
+            .take((BYTES_PER_FILE_MAX as u64) + 4)
+            .read_to_end(&mut buffer)
+            .is_err()
+        {
+            continue;
+        }
+        let read_len = buffer.len().min(BYTES_PER_FILE_MAX);
+        let mut end = read_len;
+        // Walk backward to a valid UTF-8 boundary so non-ASCII content does not
+        // produce a partial character at the cap.
+        while end > 0 {
+            if std::str::from_utf8(&buffer[..end]).is_ok() {
+                break;
+            }
+            end -= 1;
+        }
+        let Ok(text) = std::str::from_utf8(&buffer[..end]) else {
+            continue;
+        };
+        all_text.push_str(text);
+        all_text.push('\n');
+        all_lines.extend(text.lines().map(String::from));
+    }
+
+    (all_text, all_lines)
+}
+
+/// Called by `detect_entities` to build the pronoun proximity regex from locale patterns.
+///
+/// Joins all pronoun patterns from `EntityPatterns` into a single alternation.
+/// Falls back to hard-coded English pronouns when the locale list is empty.
+fn detect_entities_build_pronoun_re(patterns: &EntityPatterns) -> Regex {
+    // Locale-specific patterns already contain `\b` boundaries.
+    let joined = if patterns.pronoun_patterns.is_empty() {
+        r"(?i)\b(she|her|hers|he|him|his|they|them|their)\b".to_string()
+    } else {
+        format!("(?i)({})", patterns.pronoun_patterns.join("|"))
+    };
+    // The fallback pattern is a compile-time literal and cannot fail.
+    // Runtime patterns from locales are validated JSON — failures are silent.
+    #[allow(clippy::expect_used)]
+    Regex::new(&joined).unwrap_or_else(|_| {
+        Regex::new(r"(?i)\b(she|her|hers|he|him|his|they|them|their)\b")
+            .expect("English pronoun fallback regex is a compile-time literal")
+    })
 }
 
 /// Called by `detect_entities` to keep that function within the 70-line limit.
@@ -203,31 +264,102 @@ fn extract_candidates_stop_words() -> HashSet<&'static str> {
     stops
 }
 
+/// Return `true` when `pattern` references characters outside the ASCII range.
+///
+/// Used by [`extract_candidates`] to skip locale `candidate_patterns` that
+/// would overlap with `SINGLE_RE` (the ASCII path). A pattern containing
+/// any non-ASCII byte — literal accented letters or unicode escapes
+/// (`\u{0900}`, `\\u0900`) — adds coverage `SINGLE_RE` cannot provide and
+/// is worth running; an all-ASCII pattern duplicates `SINGLE_RE` matches
+/// and would double-count every Latin candidate.
+fn pattern_targets_non_ascii(pattern: &str) -> bool {
+    !pattern.is_ascii() || pattern.contains("\\u")
+}
+
 /// Extract capitalized-word candidates from `text`, filtered by stop words and a
 /// minimum frequency of 3 occurrences.  Returns a map of candidate name to count.
-fn extract_candidates(text: &str) -> HashMap<String, usize> {
+///
+/// `patterns` provides locale-specific stopwords (merged from requested languages)
+/// and supplemental multi-word patterns for non-Latin scripts. Locale stopwords
+/// are checked alongside the base English stop list from `extract_candidates_stop_words`.
+fn extract_candidates(text: &str, patterns: &EntityPatterns) -> HashMap<String, usize> {
     assert!(
         !text.is_empty(),
         "extract_candidates: text must not be empty"
     );
-    let stops = extract_candidates_stop_words();
+    let base_stops = extract_candidates_stop_words();
+    let locale_stops = &patterns.stopwords;
 
     let mut counts: HashMap<String, usize> = HashMap::new();
 
+    // Phrase-level stopword check: joined multi-word locale stopwords (e.g. Hindi
+    // "के लिए") would otherwise slip past the per-token check below because none
+    // of the constituent tokens is itself listed as a stopword.
+    let phrase_is_stopped = |phrase: &str| -> bool {
+        let lower_phrase = phrase.to_lowercase();
+        if locale_stops.contains(&lower_phrase) {
+            return true;
+        }
+        phrase.split_whitespace().any(|token| {
+            let lower = token.to_lowercase();
+            base_stops.contains(lower.as_str()) || locale_stops.contains(&lower)
+        })
+    };
+
     for cap in SINGLE_RE.captures_iter(text) {
         let word = &cap[1];
-        if word.len() > 1 && !stops.contains(word.to_lowercase().as_str()) {
+        let lower = word.to_lowercase();
+        if word.len() > 1 && !base_stops.contains(lower.as_str()) && !locale_stops.contains(&lower)
+        {
             *counts.entry(word.to_string()).or_insert(0) += 1;
+        }
+    }
+
+    // Locale-specific single-word patterns capture non-Latin scripts
+    // (Devanagari, CJK, Cyrillic, etc.) whose characters fall outside
+    // SINGLE_RE's ASCII range. Patterns that contain only ASCII characters
+    // (e.g. English `[A-Z][a-z]{1,19}`) overlap with SINGLE_RE and would
+    // double-count every Latin name; guard with `pattern_targets_non_ascii`
+    // so each locale's `candidate_pattern` only runs when it actually adds
+    // coverage SINGLE_RE cannot provide.
+    for pattern in &patterns.candidate_patterns {
+        if !pattern_targets_non_ascii(pattern) {
+            continue;
+        }
+        if let Ok(re) = Regex::new(pattern) {
+            for cap in re.captures_iter(text) {
+                // Some locale patterns lack an explicit capture group (e.g. CJK
+                // surnames concatenated with a unicode range); fall back to the
+                // whole match when group 1 is absent.
+                let word = cap.get(1).map_or_else(|| &cap[0], |m| m.as_str());
+                let lower = word.to_lowercase();
+                if word.chars().count() > 1
+                    && !base_stops.contains(lower.as_str())
+                    && !locale_stops.contains(&lower)
+                {
+                    *counts.entry(word.to_string()).or_insert(0) += 1;
+                }
+            }
         }
     }
 
     for cap in MULTI_RE.captures_iter(text) {
         let phrase = &cap[1];
-        if !phrase
-            .split_whitespace()
-            .any(|w| stops.contains(w.to_lowercase().as_str()))
-        {
+        if !phrase_is_stopped(phrase) {
             *counts.entry(phrase.to_string()).or_insert(0) += 1;
+        }
+    }
+
+    // Locale-specific multi-word patterns supplement MULTI_RE for non-Latin scripts
+    // whose word boundaries are not captured by the base ASCII regex.
+    for pattern in &patterns.multi_word_patterns {
+        if let Ok(re) = Regex::new(pattern) {
+            for cap in re.captures_iter(text) {
+                let phrase = &cap[1];
+                if !phrase_is_stopped(phrase) {
+                    *counts.entry(phrase.to_string()).or_insert(0) += 1;
+                }
+            }
         }
     }
 
@@ -250,12 +382,35 @@ struct EntityScores {
     person_category_count: usize,
 }
 
+/// Distinct person-signal categories that contribute to corroboration.
+///
+/// Returned as a `HashSet` rather than a count so the locale-signal helper and
+/// the hardcoded English checks can be unioned without double-counting overlaps
+/// (e.g. both English and a locale firing on the verb arm).
+#[derive(Hash, Eq, PartialEq, Copy, Clone)]
+enum PersonCategory {
+    Verb,
+    Dialogue,
+    Pronoun,
+    DirectAddress,
+}
+
 /// Score person-related signals: verb patterns, dialogue markers, pronouns, direct address.
-/// Returns `(score, category_count)` where `category_count` is the number of distinct
-/// signal categories that fired (verb, dialogue, pronoun, addressed — max 4).
-fn score_entity_person(name: &str, escaped: &str, text: &str, lines: &[String]) -> (i32, usize) {
+///
+/// `pronoun_re` is the compiled locale pronoun regex built from `EntityPatterns`.
+/// Returns `(score, categories)` where `categories` is the set of distinct
+/// signal kinds that fired across both the hardcoded English checks and the
+/// locale templates — caller computes the count from the union.
+fn score_entity_person(
+    name: &str,
+    escaped: &str,
+    text: &str,
+    lines: &[String],
+    pronoun_re: &Regex,
+    patterns: &EntityPatterns,
+) -> (i32, HashSet<PersonCategory>) {
     let mut score = 0i32;
-    let mut category_count: usize = 0;
+    let mut categories: HashSet<PersonCategory> = HashSet::new();
 
     let person_verbs = [
         "said", "asked", "told", "replied", "laughed", "smiled", "cried", "felt", "thinks?",
@@ -272,7 +427,7 @@ fn score_entity_person(name: &str, escaped: &str, text: &str, lines: &[String]) 
         }
     }
     if verb_hit {
-        category_count += 1;
+        categories.insert(PersonCategory::Verb);
     }
 
     let dialogue_pats = [
@@ -291,13 +446,13 @@ fn score_entity_person(name: &str, escaped: &str, text: &str, lines: &[String]) 
         }
     }
     if dialogue_hit {
-        category_count += 1;
+        categories.insert(PersonCategory::Dialogue);
     }
 
-    let pronoun_hits = score_entity_person_pronoun_score(name, lines);
+    let pronoun_hits = score_entity_person_pronoun_score(name, lines, pronoun_re);
     if pronoun_hits > 0 {
         score += pronoun_hits * 2;
-        category_count += 1;
+        categories.insert(PersonCategory::Pronoun);
     }
 
     if let Ok(re) = Regex::new(&format!(
@@ -306,19 +461,25 @@ fn score_entity_person(name: &str, escaped: &str, text: &str, lines: &[String]) 
         let count = re.find_iter(text).count();
         if count > 0 {
             score += i32::try_from(count).unwrap_or(i32::MAX) * 4;
-            category_count += 1;
+            categories.insert(PersonCategory::DirectAddress);
         }
     }
 
-    (score, category_count)
+    let (locale_score, locale_categories) =
+        score_entity_person_locale_signals(escaped, text, patterns);
+    // Union ensures a locale verb hit and an English verb hit count as one
+    // verb category, not two. Without this, the >=2 corroboration check could
+    // pass on what is really a single signal kind seen twice.
+    categories.extend(locale_categories);
+    (score + locale_score, categories)
 }
 
 /// Called by `score_entity_person` to keep that function within the 70-line limit.
 ///
-/// Scan `lines` for lines containing `name` and count how many have a gendered or
-/// plural pronoun within a ±2-line window, indicating a person-like antecedent.
+/// Scan `lines` for lines containing `name` and count how many have a pronoun from
+/// `pronoun_re` within a ±2-line window, indicating a person-like antecedent.
 /// Returns the raw hit count (caller multiplies by weight).
-fn score_entity_person_pronoun_score(name: &str, lines: &[String]) -> i32 {
+fn score_entity_person_pronoun_score(name: &str, lines: &[String], pronoun_re: &Regex) -> i32 {
     assert!(!name.is_empty(), "name must not be empty");
 
     let name_lower = name.to_lowercase();
@@ -328,12 +489,12 @@ fn score_entity_person_pronoun_score(name: &str, lines: &[String]) -> i32 {
     let escaped = regex::escape(&name_lower);
     let name_re = Regex::new(&format!(r"(?i)\b{escaped}\b")).ok();
     let mut pronoun_hits = 0i32;
-    for (i, line) in lines.iter().enumerate() {
+    for (index, line) in lines.iter().enumerate() {
         if name_re.as_ref().is_some_and(|re| re.is_match(line)) {
-            let start = i.saturating_sub(2);
-            let end = (i + 3).min(lines.len());
+            let start = index.saturating_sub(2);
+            let end = (index + 3).min(lines.len());
             let window: String = lines[start..end].join(" ");
-            if PRONOUN_RE.is_match(&window) {
+            if pronoun_re.is_match(&window) {
                 pronoun_hits += 1;
             }
         }
@@ -345,8 +506,78 @@ fn score_entity_person_pronoun_score(name: &str, lines: &[String]) -> i32 {
     pronoun_hits
 }
 
+/// Called by `score_entity_person` to apply locale-specific verb, dialogue, and direct-address signals.
+///
+/// Each template substitutes `{name}` with `escaped` before compilation.
+/// Verb hits weight 2×, dialogue 3×, direct-address 4× — matching the hardcoded English weights.
+/// Returns `(score, categories)` so the caller can union them with the English
+/// signal set and avoid double-counting overlapping signal kinds.
+fn score_entity_person_locale_signals(
+    escaped: &str,
+    text: &str,
+    patterns: &EntityPatterns,
+) -> (i32, HashSet<PersonCategory>) {
+    assert!(
+        !escaped.is_empty(),
+        "score_entity_person_locale_signals: escaped must not be empty"
+    );
+
+    let mut score = 0i32;
+    let mut categories: HashSet<PersonCategory> = HashSet::new();
+
+    let mut verb_hit = false;
+    for template in &patterns.person_verb_patterns {
+        let pat = template.replace("{name}", escaped);
+        if let Ok(re) = Regex::new(&format!("(?i){pat}")) {
+            let count = re.find_iter(text).count();
+            if count > 0 {
+                score += i32::try_from(count).unwrap_or(i32::MAX) * 2;
+                verb_hit = true;
+            }
+        }
+    }
+    if verb_hit {
+        categories.insert(PersonCategory::Verb);
+    }
+
+    let mut dialogue_hit = false;
+    for template in &patterns.dialogue_patterns {
+        let pat = template.replace("{name}", escaped);
+        if let Ok(re) = Regex::new(&format!("(?im){pat}")) {
+            let count = re.find_iter(text).count();
+            if count > 0 {
+                score += i32::try_from(count).unwrap_or(i32::MAX) * 3;
+                dialogue_hit = true;
+            }
+        }
+    }
+    if dialogue_hit {
+        categories.insert(PersonCategory::Dialogue);
+    }
+
+    let mut address_hit = false;
+    for template in &patterns.direct_address_patterns {
+        let pat = template.replace("{name}", escaped);
+        if let Ok(re) = Regex::new(&format!("(?i){pat}")) {
+            let count = re.find_iter(text).count();
+            if count > 0 {
+                score += i32::try_from(count).unwrap_or(i32::MAX) * 4;
+                address_hit = true;
+            }
+        }
+    }
+    if address_hit {
+        categories.insert(PersonCategory::DirectAddress);
+    }
+
+    // Postcondition: at most 3 distinct locale categories (verb, dialogue, direct-address).
+    debug_assert!(categories.len() <= 3);
+
+    (score, categories)
+}
+
 /// Score project-related signals for `escaped` against `text`: build/deploy verbs and versioned references.
-fn score_entity_project(escaped: &str, text: &str) -> i32 {
+fn score_entity_project(escaped: &str, text: &str, patterns: &EntityPatterns) -> i32 {
     let mut score = 0i32;
 
     let project_pats = [
@@ -377,22 +608,41 @@ fn score_entity_project(escaped: &str, text: &str) -> i32 {
         }
     }
 
+    // Locale-specific project verb templates supplement the hardcoded English verbs above.
+    for template in &patterns.project_verb_patterns {
+        let pat = template.replace("{name}", escaped);
+        if let Ok(re) = Regex::new(&format!("(?i){pat}")) {
+            let count = re.find_iter(text).count();
+            if count > 0 {
+                score += i32::try_from(count).unwrap_or(i32::MAX) * 2;
+            }
+        }
+    }
+
     score
 }
 
 /// Compute person and project signal scores for `name` against `text` and `lines`.
 ///
+/// `pronoun_re` is the locale pronoun regex from `detect_entities_build_pronoun_re`.
 /// Returns an [`EntityScores`] combining the outputs of `score_entity_person`
 /// and `score_entity_project`.
-fn score_entity(name: &str, text: &str, lines: &[String]) -> EntityScores {
+fn score_entity(
+    name: &str,
+    text: &str,
+    lines: &[String],
+    pronoun_re: &Regex,
+    patterns: &EntityPatterns,
+) -> EntityScores {
     assert!(!name.is_empty(), "score_entity: name must not be empty");
     let escaped = regex::escape(name);
 
-    let (person_score, person_category_count) = score_entity_person(name, &escaped, text, lines);
+    let (person_score, person_categories) =
+        score_entity_person(name, &escaped, text, lines, pronoun_re, patterns);
     EntityScores {
         person_score,
-        project_score: score_entity_project(&escaped, text),
-        person_category_count,
+        project_score: score_entity_project(&escaped, text, patterns),
+        person_category_count: person_categories.len(),
     }
 }
 
@@ -550,12 +800,19 @@ mod tests {
     use std::io::Write as _;
     use tempfile;
 
+    /// Return a compiled English pronoun regex for use in tests that call `score_entity`
+    /// directly.  Production code builds this via `detect_entities_build_pronoun_re`.
+    fn test_pronoun_re() -> Regex {
+        Regex::new(r"(?i)\b(she|her|hers|he|him|his|they|them|their)\b")
+            .expect("hardcoded English pronoun regex cannot fail to compile")
+    }
+
     #[test]
     fn extract_candidates_finds_capitalized_names() {
         // "Alice" appears 5 times — well above the frequency threshold of 3.
         let text =
             "Alice went to the store. Alice bought milk. Alice came home. Alice cooked. Alice ate.";
-        let candidates = extract_candidates(text);
+        let candidates = extract_candidates(text, &get_entity_patterns(&["en"]));
         assert!(
             candidates.contains_key("Alice"),
             "Alice should be detected as a candidate"
@@ -570,7 +827,7 @@ mod tests {
     fn extract_candidates_ignores_low_frequency() {
         // "Bartholomew" appears only once — below the threshold of 3.
         let text = "Bartholomew visited the library. Xander Xander Xander was there.";
-        let candidates = extract_candidates(text);
+        let candidates = extract_candidates(text, &get_entity_patterns(&["en"]));
         assert!(
             !candidates.contains_key("Bartholomew"),
             "Single-occurrence names should be filtered out"
@@ -586,7 +843,7 @@ mod tests {
         // "John Smith" repeated 3 times should be detected as a multi-word candidate.
         let text =
             "John Smith led the team. John Smith reviewed the code. John Smith merged the PR.";
-        let candidates = extract_candidates(text);
+        let candidates = extract_candidates(text, &get_entity_patterns(&["en"]));
         assert!(
             candidates.contains_key("John Smith"),
             "Multi-word names should be detected"
@@ -606,7 +863,7 @@ mod tests {
         // even at high frequency.
         let text =
             "The quick fox. The lazy dog. The bright sun. This is great. This is fine. This works.";
-        let candidates = extract_candidates(text);
+        let candidates = extract_candidates(text, &get_entity_patterns(&["en"]));
         assert!(
             !candidates.contains_key("The"),
             "Stop word 'The' should be filtered"
@@ -622,7 +879,13 @@ mod tests {
         let name = "Alice";
         let text = "Alice said hello. Alice asked a question. Alice told a story.";
         let lines: Vec<String> = text.lines().map(String::from).collect();
-        let scores = score_entity(name, text, &lines);
+        let scores = score_entity(
+            name,
+            text,
+            &lines,
+            &test_pronoun_re(),
+            &get_entity_patterns(&["en"]),
+        );
         assert!(
             scores.person_score > 0,
             "Person score should be positive when speech verbs are present"
@@ -638,7 +901,13 @@ mod tests {
         let text =
             "building Mempalace from scratch. deploying Mempalace to prod. shipping Mempalace v2.";
         let lines: Vec<String> = text.lines().map(String::from).collect();
-        let scores = score_entity("Mempalace", text, &lines);
+        let scores = score_entity(
+            "Mempalace",
+            text,
+            &lines,
+            &test_pronoun_re(),
+            &get_entity_patterns(&["en"]),
+        );
         assert!(
             scores.project_score > 0,
             "Project score should be positive when build verbs are present"
@@ -705,7 +974,7 @@ mod tests {
             .expect("write should succeed");
 
         let paths: Vec<&Path> = vec![file_path.as_path()];
-        let result = detect_entities(&paths, 10);
+        let result = detect_entities(&paths, 10, &["en"]);
 
         // At least one category should be non-empty since "Alice" appears 5 times
         // with person-verb signals.
@@ -779,7 +1048,7 @@ Clara said the migration is complete. He agreed.\n";
             detect_entities_with_project_entities_setup_files();
 
         let paths: Vec<&Path> = vec![file_path_one.as_path(), file_path_two.as_path()];
-        let result = detect_entities(&paths, 10);
+        let result = detect_entities(&paths, 10, &["en"]);
 
         // Postcondition: detection found entities across multiple categories.
         let entities_total = result.people.len() + result.projects.len() + result.uncertain.len();
@@ -838,7 +1107,7 @@ Clara said the migration is complete. He agreed.\n";
         // all_text is non-empty after accumulation. With a single empty file,
         // all_text is "\n" which is non-empty but has no capitalized words.
         let paths: Vec<&Path> = vec![file_path.as_path()];
-        let result = detect_entities(&paths, 10);
+        let result = detect_entities(&paths, 10, &["en"]);
 
         assert!(result.people.is_empty(), "No people from empty file");
         assert!(result.projects.is_empty(), "No projects from empty file");
@@ -898,6 +1167,714 @@ Clara said the migration is complete. He agreed.\n";
         assert!(
             extensions.contains(&"rs"),
             "code files must be included when prose count is below threshold; found: {extensions:?}"
+        );
+    }
+
+    // ── detect_entities — empty path list produces empty result ───────────────
+
+    #[test]
+    fn detect_entities_no_paths_returns_empty_result() {
+        // When no file paths are provided the all_text accumulator stays empty,
+        // and detect_entities must return three empty vecs without panicking.
+        let paths: Vec<&Path> = vec![];
+        let result = detect_entities(&paths, 1, &["en"]);
+        assert!(result.people.is_empty(), "no paths must yield no people");
+        assert!(
+            result.projects.is_empty(),
+            "no paths must yield no projects"
+        );
+        assert!(
+            result.uncertain.is_empty(),
+            "no paths must yield no uncertain"
+        );
+    }
+
+    // ── detect_entities_load_text — large file truncated at UTF-8 boundary ───
+
+    #[test]
+    fn detect_entities_load_text_truncates_large_file_at_utf8_boundary() {
+        // A file larger than BYTES_PER_FILE_MAX (5000 bytes) must be truncated at a
+        // valid UTF-8 character boundary so no panic occurs on multi-byte chars.
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let file_path = dir.path().join("large.txt");
+
+        // Build content that is well over 5000 bytes with multi-byte UTF-8 chars.
+        // "é" is 2 bytes (0xC3 0xA9), so 3000 repetitions = 6000 bytes.
+        let content = "é".repeat(3000);
+        std::fs::write(&file_path, content.as_bytes()).expect("write should succeed");
+
+        let (text, _lines) = detect_entities_load_text(&[file_path.as_path()], 1);
+
+        // The returned text must be a valid UTF-8 string (no truncation mid-char).
+        assert!(!text.is_empty(), "truncated text must not be empty");
+        assert!(
+            text.len() <= BYTES_PER_FILE_MAX + 4,
+            "truncated text must not significantly exceed the byte cap"
+        );
+        // All bytes must form valid UTF-8 — String::from_utf8 would panic on bad bytes.
+        assert!(
+            text.is_ascii() || !text.chars().any(|c| c == char::REPLACEMENT_CHARACTER),
+            "truncated text must be valid UTF-8 with no replacement characters"
+        );
+    }
+
+    // ── detect_entities_build_pronoun_re — empty patterns uses English fallback ─
+
+    #[test]
+    fn detect_entities_build_pronoun_re_falls_back_to_english_when_empty() {
+        // When EntityPatterns has an empty pronoun_patterns vec the function must
+        // return the hard-coded English pronoun regex without panicking.
+        let patterns = EntityPatterns {
+            candidate_patterns: vec![],
+            multi_word_patterns: vec![],
+            person_verb_patterns: vec![],
+            pronoun_patterns: vec![],
+            dialogue_patterns: vec![],
+            direct_address_patterns: vec![],
+            project_verb_patterns: vec![],
+            stopwords: std::collections::HashSet::new(),
+        };
+        let pronoun_re = detect_entities_build_pronoun_re(&patterns);
+        // The English fallback must match at least one English pronoun.
+        assert!(
+            pronoun_re.is_match("she went to the store"),
+            "English fallback pronoun regex must match 'she'"
+        );
+        assert!(
+            pronoun_re.is_match("he said hello"),
+            "English fallback pronoun regex must match 'he'"
+        );
+    }
+
+    // ── classify_entity — total == 0 (uncertain with frequency confidence) ────
+
+    #[test]
+    fn classify_entity_returns_uncertain_when_both_scores_are_zero() {
+        // When person_score == project_score == 0, the entity is uncertain with
+        // confidence capped at 0.4 from frequency / 50.
+        let scores = EntityScores {
+            person_score: 0,
+            project_score: 0,
+            person_category_count: 0,
+        };
+        // frequency=10 → confidence = min(0.4, 10/50) = 0.2
+        let entity = classify_entity("Zephyr", 10, &scores);
+        assert_eq!(
+            entity.entity_type, "uncertain",
+            "zero scores must yield uncertain"
+        );
+        assert!(
+            (entity.confidence - 0.2).abs() < 1e-9,
+            "confidence must be frequency/50 = 0.2, got {}",
+            entity.confidence
+        );
+        assert_eq!(entity.name, "Zephyr", "name must be preserved");
+    }
+
+    #[test]
+    fn classify_entity_uncertain_confidence_capped_at_0_4_for_high_frequency() {
+        // Very high frequency (≥ 20) must be capped at 0.4 confidence when both scores are zero.
+        let scores = EntityScores {
+            person_score: 0,
+            project_score: 0,
+            person_category_count: 0,
+        };
+        // frequency=100 → raw = 100/50 = 2.0, capped at 0.4
+        let entity = classify_entity("Zephyr", 100, &scores);
+        assert_eq!(
+            entity.entity_type, "uncertain",
+            "zero scores must yield uncertain"
+        );
+        assert!(
+            (entity.confidence - 0.4).abs() < 1e-9,
+            "high-frequency uncertain confidence must be capped at 0.4, got {}",
+            entity.confidence
+        );
+    }
+
+    // ── classify_entity_build — high person_ratio but NOT corroborated ────────
+
+    #[test]
+    fn classify_entity_build_high_ratio_without_corroboration_is_uncertain() {
+        // person_ratio >= 0.7 but has_two=false → uncertain with confidence 0.4.
+        let entity = classify_entity_build("Nova", 5, 0.8, false, 10);
+        assert_eq!(
+            entity.entity_type, "uncertain",
+            "high person_ratio without two signal categories must be uncertain"
+        );
+        assert!(
+            (entity.confidence - 0.4).abs() < 1e-9,
+            "uncorroborated person must have confidence 0.4, got {}",
+            entity.confidence
+        );
+        assert_eq!(entity.name, "Nova", "name must be preserved");
+    }
+
+    #[test]
+    fn classify_entity_build_high_ratio_with_low_score_is_uncertain() {
+        // person_ratio >= 0.7, has_two=true but person_score < 5 → uncertain.
+        let entity = classify_entity_build("Nova", 5, 0.8, true, 3);
+        assert_eq!(
+            entity.entity_type, "uncertain",
+            "corroborated but low-score person must be uncertain"
+        );
+        assert!(
+            (entity.confidence - 0.4).abs() < 1e-9,
+            "low-score person must have confidence 0.4, got {}",
+            entity.confidence
+        );
+    }
+
+    // ── classify_entity_build — mid-range ratio → uncertain with 0.5 ─────────
+
+    #[test]
+    fn classify_entity_build_mid_range_ratio_produces_uncertain_with_0_5() {
+        // 0.3 < person_ratio < 0.7 falls through to the else branch → uncertain, conf=0.5.
+        let entity = classify_entity_build("Hybrid", 8, 0.5, true, 15);
+        assert_eq!(
+            entity.entity_type, "uncertain",
+            "mid-range person_ratio must yield uncertain"
+        );
+        assert!(
+            (entity.confidence - 0.5).abs() < 1e-9,
+            "mid-range uncertain must have confidence 0.5, got {}",
+            entity.confidence
+        );
+        assert_eq!(entity.name, "Hybrid", "name must be preserved");
+    }
+
+    // ── score_entity_person_pronoun_score — pronoun in window ─────────────────
+
+    #[test]
+    fn score_entity_person_pronoun_score_returns_positive_for_nearby_pronouns() {
+        // Lines where "Alice" appears near a pronoun (within ±2 lines) must
+        // increment the pronoun hit count.
+        let lines = vec![
+            "She was running late.".to_string(),
+            "Alice finally arrived at the office.".to_string(),
+            "She apologised to the team.".to_string(),
+        ];
+        let pronoun_re = test_pronoun_re();
+        let hits = score_entity_person_pronoun_score("Alice", &lines, &pronoun_re);
+        assert!(hits > 0, "nearby pronoun must produce a positive hit count");
+        // lines.len() fits in i32 for any realistic test input; test helper has 3 lines.
+        #[allow(clippy::cast_possible_truncation)]
+        #[allow(clippy::cast_possible_wrap)]
+        let lines_len_i32 = lines.len() as i32;
+        assert!(
+            hits <= lines_len_i32,
+            "hit count cannot exceed number of lines"
+        );
+    }
+
+    #[test]
+    fn score_entity_person_pronoun_score_returns_zero_when_no_pronouns_nearby() {
+        // Lines with the name but no pronouns in any ±2-line window must score 0.
+        let lines = vec![
+            "Zelda walked to the market.".to_string(),
+            "Zelda bought fresh bread.".to_string(),
+            "Zelda returned home quickly.".to_string(),
+        ];
+        let pronoun_re = test_pronoun_re();
+        let hits = score_entity_person_pronoun_score("Zelda", &lines, &pronoun_re);
+        assert_eq!(hits, 0, "no pronouns in window must yield zero hits");
+    }
+
+    // ── detect_entities_sort_and_truncate — result caps enforced ──────────────
+
+    #[test]
+    fn detect_entities_sort_and_truncate_caps_each_category() {
+        // Generate more than the per-category caps to confirm truncation occurs.
+        // people cap = 15, projects cap = 10, uncertain cap = 8.
+        let make_entity = |name: &str, confidence: f64, frequency: usize| DetectedEntity {
+            name: name.to_string(),
+            entity_type: "person".to_string(),
+            confidence,
+            frequency,
+            signals: vec![],
+        };
+
+        let mut people: Vec<DetectedEntity> = (0..20)
+            .map(|i| make_entity(&format!("Person{i}"), 0.9 - f64::from(i) * 0.01, 10))
+            .collect();
+        let mut projects: Vec<DetectedEntity> = (0..12)
+            .map(|i| DetectedEntity {
+                name: format!("Project{i}"),
+                entity_type: "project".to_string(),
+                confidence: 0.8,
+                frequency: 5,
+                signals: vec![],
+            })
+            .collect();
+        let mut uncertain: Vec<DetectedEntity> = (0..10)
+            .map(|i| DetectedEntity {
+                name: format!("Uncertain{i}"),
+                entity_type: "uncertain".to_string(),
+                confidence: 0.5,
+                frequency: 3 + i,
+                signals: vec![],
+            })
+            .collect();
+
+        detect_entities_sort_and_truncate(&mut people, &mut projects, &mut uncertain);
+
+        assert!(
+            people.len() <= 15,
+            "people must be capped at 15, got {}",
+            people.len()
+        );
+        assert!(
+            projects.len() <= 10,
+            "projects must be capped at 10, got {}",
+            projects.len()
+        );
+        assert!(
+            uncertain.len() <= 8,
+            "uncertain must be capped at 8, got {}",
+            uncertain.len()
+        );
+    }
+
+    // ── extract_candidates — text with only stop words produces no candidates ──
+
+    #[test]
+    fn extract_candidates_all_stop_words_produces_no_candidates() {
+        // Text consisting entirely of stop words at high frequency must yield no candidates.
+        // "The" and "This" are both stop words; even at 5+ occurrences they must be
+        // filtered before the frequency threshold is applied.
+        let text = "The The The The The This This This This This";
+        let candidates = extract_candidates(text, &get_entity_patterns(&["en"]));
+        assert!(
+            candidates.is_empty(),
+            "pure stop-word text must produce no candidates, got: {candidates:?}"
+        );
+    }
+
+    // ── extract_candidates — multi-word phrase containing stop word is filtered ─
+
+    #[test]
+    fn extract_candidates_multi_word_containing_stop_word_is_filtered() {
+        // A multi-word phrase where any token is a stop word must be filtered out
+        // even if it appears many times.  "The Moon" contains "The" (stop word).
+        let text =
+            "The Moon shines. The Moon rises. The Moon sets. The Moon glows. The Moon turns.";
+        let candidates = extract_candidates(text, &get_entity_patterns(&["en"]));
+        assert!(
+            !candidates.contains_key("The Moon"),
+            "multi-word phrase containing a stop word must be filtered"
+        );
+        // "Moon" may appear as a single-word candidate depending on the stop list.
+        // The important assertion is that "The Moon" is absent.
+    }
+
+    // ── extract_candidates — Hindi multi-word stopwords filtered by phrase check ─
+    //
+    // Covers issue #61: phrase-level stopword filtering for multi-word entries
+    // such as "के लिए" whose constituent tokens are not individually stopwords.
+
+    #[test]
+    fn extract_candidates_hindi_multi_word_stopword_is_filtered_by_phrase_check() {
+        // Hindi locale defines multi-word stopwords such as "के लिए" whose
+        // constituent tokens are not individually listed as stopwords, so only
+        // the phrase-level path inside phrase_is_stopped can suppress them.
+        // A multi_word_patterns entry targeting Devanagari bigrams is supplied
+        // so MULTI_RE (ASCII-only) does not need to capture the Devanagari phrase.
+        let mut stopwords = std::collections::HashSet::new();
+        stopwords.insert("के लिए".to_string());
+        let patterns = EntityPatterns {
+            candidate_patterns: vec![],
+            // Captures any two consecutive Devanagari-script words.
+            multi_word_patterns: vec![r"([\u{0900}-\u{097F}]+\s+[\u{0900}-\u{097F}]+)".to_string()],
+            person_verb_patterns: vec![],
+            pronoun_patterns: vec![],
+            dialogue_patterns: vec![],
+            direct_address_patterns: vec![],
+            project_verb_patterns: vec![],
+            stopwords,
+        };
+        // "के लिए" appears 4 times — above the frequency threshold of 3; without
+        // the phrase-level check it would survive as a candidate.
+        let text = "a के लिए b. a के लिए b. a के लिए b. a के लिए b.";
+        let candidates = extract_candidates(text, &patterns);
+        assert!(
+            !candidates.contains_key("के लिए"),
+            "Hindi multi-word stopword 'के लिए' must be suppressed by phrase-level check"
+        );
+    }
+
+    // ── extract_candidates — non-ASCII candidate_patterns wired correctly ────
+    //
+    // Covers issue #62: candidate_patterns targeting non-Latin scripts must be
+    // applied by extract_candidates (guarded by pattern_targets_non_ascii so
+    // ASCII-only patterns do not double-count Latin candidates).
+
+    #[test]
+    fn extract_candidates_non_ascii_candidate_pattern_captures_devanagari_name() {
+        // A candidate_patterns entry whose pattern contains \u (Devanagari block
+        // range) passes pattern_targets_non_ascii and must capture single-word
+        // Devanagari candidates that the ASCII SINGLE_RE cannot see.
+        // "राम" repeats 4 times, which exceeds the minimum frequency of 3.
+        let patterns = EntityPatterns {
+            // [\u{0900}-\u{097F}]{2,20} targets the Devanagari Unicode block.
+            candidate_patterns: vec![r"([\u{0900}-\u{097F}]{2,20})".to_string()],
+            multi_word_patterns: vec![],
+            person_verb_patterns: vec![],
+            pronoun_patterns: vec![],
+            dialogue_patterns: vec![],
+            direct_address_patterns: vec![],
+            project_verb_patterns: vec![],
+            stopwords: std::collections::HashSet::new(),
+        };
+        let text = "राम आया। राम गया। राम बोला। राम सोया।";
+        let candidates = extract_candidates(text, &patterns);
+        assert!(
+            candidates.contains_key("राम"),
+            "Devanagari name 'राम' must be detected via non-ASCII candidate_patterns entry"
+        );
+    }
+
+    // ── detect_entities_load_text — files_max respected ──────────────────────
+
+    #[test]
+    fn detect_entities_load_text_respects_files_max() {
+        // When files_max=1 and two files are provided, only the first file must be
+        // read; the loop must break at index==files_max and the second file is skipped.
+        let temp_directory = tempfile::tempdir().expect("tempdir should be created");
+        let file_path_one = temp_directory.path().join("first.txt");
+        let file_path_two = temp_directory.path().join("second.txt");
+        std::fs::write(&file_path_one, "first file content\n")
+            .expect("write first file should succeed");
+        std::fs::write(&file_path_two, "second file content\n")
+            .expect("write second file should succeed");
+
+        let (text, lines) =
+            detect_entities_load_text(&[file_path_one.as_path(), file_path_two.as_path()], 1);
+
+        // Only the first file should be represented — "first file content" present,
+        // "second file content" absent.
+        assert!(
+            text.contains("first file content"),
+            "first file must be included in text"
+        );
+        assert!(
+            !text.contains("second file content"),
+            "second file must be excluded when files_max=1"
+        );
+        assert!(
+            !lines.is_empty(),
+            "lines must be populated from the first file"
+        );
+    }
+
+    // ── score_entity_person_locale_signals — locale patterns fire ────────────
+
+    #[test]
+    fn score_entity_person_locale_signals_fires_verb_pattern() {
+        // The German locale has person_verb_patterns such as `\b{name}\s+sagte\b`.
+        // Providing German text with a matching verb must produce a positive score
+        // and surface the Verb category in the returned set.
+        let patterns = get_entity_patterns(&["de"]);
+        let escaped = regex::escape("Klaus");
+        let text = "Klaus sagte, dass er kommt. Klaus sagte es noch einmal.";
+        let (score, categories) = score_entity_person_locale_signals(&escaped, text, &patterns);
+        assert!(
+            score > 0,
+            "German verb pattern must yield positive score; got {score}"
+        );
+        assert!(
+            categories.contains(&PersonCategory::Verb),
+            "German verb hit must surface the Verb category"
+        );
+    }
+
+    #[test]
+    fn score_entity_person_locale_signals_fires_dialogue_pattern() {
+        // The German locale has dialogue_patterns including `^{name}:\s`.
+        // A line beginning with the name followed by colon must fire the dialogue arm.
+        let patterns = get_entity_patterns(&["de"]);
+        let escaped = regex::escape("Klaus");
+        // Line starts with "Klaus: " which matches `^{name}:\s`.
+        let text = "Klaus: Ich bin hier. Alle hörten zu.";
+        let (score, categories) = score_entity_person_locale_signals(&escaped, text, &patterns);
+        assert!(
+            score > 0,
+            "German dialogue pattern must yield positive score; got {score}"
+        );
+        assert!(
+            categories.contains(&PersonCategory::Dialogue),
+            "German dialogue hit must surface the Dialogue category"
+        );
+    }
+
+    #[test]
+    fn score_entity_person_locale_signals_fires_direct_address_pattern() {
+        // The German locale has a direct_address_pattern including `\bhallo\s+{name}\b`.
+        // Text containing "hallo Klaus" must fire the direct-address arm.
+        let patterns = get_entity_patterns(&["de"]);
+        let escaped = regex::escape("Klaus");
+        let text = "hallo Klaus, wie geht es dir?";
+        let (score, categories) = score_entity_person_locale_signals(&escaped, text, &patterns);
+        assert!(
+            score > 0,
+            "German direct-address pattern must yield positive score; got {score}"
+        );
+        assert!(
+            categories.contains(&PersonCategory::DirectAddress),
+            "German direct-address hit must surface the DirectAddress category"
+        );
+    }
+
+    #[test]
+    fn score_entity_person_locale_signals_no_match_returns_zero() {
+        // Text with no German person signals must return (0, empty set).
+        let patterns = get_entity_patterns(&["de"]);
+        let escaped = regex::escape("Klaus");
+        let text = "The weather is fine today and nothing unusual happened.";
+        let (score, categories) = score_entity_person_locale_signals(&escaped, text, &patterns);
+        assert_eq!(score, 0, "no matching pattern must yield score 0");
+        assert!(
+            categories.is_empty(),
+            "no matching pattern must yield an empty category set"
+        );
+    }
+
+    // ── score_entity_project — versioned reference fires ─────────────────────
+
+    #[test]
+    fn score_entity_project_versioned_reference_adds_score() {
+        // The hyphenated-version pattern `\b{escaped}[-v]\w+` must fire for "Vortex-v3".
+        // We use an empty EntityPatterns (no locale project_verb_patterns) so only
+        // the hardcoded versioned-reference pattern contributes to the score.
+        let patterns = EntityPatterns {
+            candidate_patterns: vec![],
+            multi_word_patterns: vec![],
+            person_verb_patterns: vec![],
+            pronoun_patterns: vec![],
+            dialogue_patterns: vec![],
+            direct_address_patterns: vec![],
+            project_verb_patterns: vec![],
+            stopwords: std::collections::HashSet::new(),
+        };
+        let escaped = regex::escape("Vortex");
+        let text = "The Vortex-v3 release candidate was deployed last night. Vortex-v3 rocks.";
+        let score = score_entity_project(&escaped, text, &patterns);
+        assert!(
+            score > 0,
+            "versioned reference must contribute positive project score; got {score}"
+        );
+    }
+
+    #[test]
+    fn score_entity_project_locale_verb_patterns_add_score() {
+        // German project_verb_patterns include `\bgebaut\s+{name}\b`.
+        // Text containing "gebaut Falcon" must increase the project score.
+        let patterns = get_entity_patterns(&["de"]);
+        let escaped = regex::escape("Falcon");
+        let text = "gebaut Falcon dauerte lange. gebaut Falcon war schwer.";
+        let score = score_entity_project(&escaped, text, &patterns);
+        assert!(
+            score > 0,
+            "German project verb pattern must contribute positive score; got {score}"
+        );
+    }
+
+    // ── score_entity_person_locale_signals — Hindi (Devanagari) ──────────────
+    //
+    // Mirrors the German test set above; confirms locale loading, regex
+    // compilation, and PersonCategory bookkeeping all work for Devanagari
+    // names. The regex crate's default Unicode word-boundary handling is what
+    // lets `\b{name}\b` match Devanagari runs surrounded by spaces or
+    // punctuation; if a future change disabled Unicode mode these tests
+    // would catch the regression before it shipped.
+
+    #[test]
+    fn score_entity_person_locale_signals_fires_verb_pattern_hindi() {
+        // The Hindi locale has person_verb_patterns such as
+        // `\b{name}\s+ने\s+कहा\b` ("X said"). Text containing the phrase
+        // twice must yield a positive score and surface the Verb category.
+        let patterns = get_entity_patterns(&["hi"]);
+        let escaped = regex::escape("राम");
+        let text = "राम ने कहा कि वह आ रहा है। राम ने कहा फिर से।";
+        let (score, categories) = score_entity_person_locale_signals(&escaped, text, &patterns);
+        assert!(
+            score > 0,
+            "Hindi verb pattern must yield positive score; got {score}"
+        );
+        assert!(
+            categories.contains(&PersonCategory::Verb),
+            "Hindi verb hit must surface the Verb category"
+        );
+    }
+
+    #[test]
+    fn score_entity_person_locale_signals_fires_dialogue_pattern_hindi() {
+        // The Hindi locale inherits dialogue_patterns including `^{name}:\s`.
+        // A line beginning with the Devanagari name followed by colon must
+        // fire the dialogue arm under the (?im) multi-line flag.
+        let patterns = get_entity_patterns(&["hi"]);
+        let escaped = regex::escape("राम");
+        let text = "राम: मैं यहाँ हूँ। सब सुन रहे थे।";
+        let (score, categories) = score_entity_person_locale_signals(&escaped, text, &patterns);
+        assert!(
+            score > 0,
+            "Hindi dialogue pattern must yield positive score; got {score}"
+        );
+        assert!(
+            categories.contains(&PersonCategory::Dialogue),
+            "Hindi dialogue hit must surface the Dialogue category"
+        );
+    }
+
+    #[test]
+    fn score_entity_person_locale_signals_fires_direct_address_pattern_hindi() {
+        // The Hindi locale's direct_address_pattern includes
+        // `\bनमस्ते\s+{name}\b`. Text containing "नमस्ते राम" must fire the
+        // direct-address arm — the hardcoded English `hey/thanks/hi`
+        // pattern will not match a Devanagari greeting, so this test
+        // proves the locale template is reaching the scoring path.
+        let patterns = get_entity_patterns(&["hi"]);
+        let escaped = regex::escape("राम");
+        let text = "नमस्ते राम, आप कैसे हैं?";
+        let (score, categories) = score_entity_person_locale_signals(&escaped, text, &patterns);
+        assert!(
+            score > 0,
+            "Hindi direct-address pattern must yield positive score; got {score}"
+        );
+        assert!(
+            categories.contains(&PersonCategory::DirectAddress),
+            "Hindi direct-address hit must surface the DirectAddress category"
+        );
+    }
+
+    #[test]
+    fn score_entity_person_locale_signals_no_match_returns_zero_hindi() {
+        // English-only text with no Hindi signals must return (0, empty set)
+        // even when the Hindi locale is active, confirming the patterns do
+        // not spuriously match unrelated content.
+        let patterns = get_entity_patterns(&["hi"]);
+        let escaped = regex::escape("राम");
+        let text = "The weather is fine today and nothing unusual happened.";
+        let (score, categories) = score_entity_person_locale_signals(&escaped, text, &patterns);
+        assert_eq!(score, 0, "no matching pattern must yield score 0");
+        assert!(
+            categories.is_empty(),
+            "no matching pattern must yield an empty category set"
+        );
+    }
+
+    #[test]
+    fn score_entity_project_locale_verb_patterns_add_score_hindi() {
+        // Hindi project_verb_patterns include `\b{name}\s+बनाया\b` ("X built").
+        // The project name precedes the verb in Hindi (subject-object-verb
+        // order), inverted from the German `\bgebaut\s+{name}\b` pattern.
+        // Text repeating "Falcon बनाया" must increase the project score.
+        let patterns = get_entity_patterns(&["hi"]);
+        let escaped = regex::escape("Falcon");
+        let text = "Falcon बनाया था कल। Falcon बनाया वाकई कठिन था।";
+        let score = score_entity_project(&escaped, text, &patterns);
+        assert!(
+            score > 0,
+            "Hindi project verb pattern must contribute positive score; got {score}"
+        );
+    }
+
+    // ── scan_for_detection — early-exit when prose meets max_files ───────────
+
+    #[test]
+    fn scan_for_detection_stops_early_when_prose_count_reaches_max_files() {
+        // The `if prose_files.len() >= max_files { break }` guard fires when the prose
+        // count reaches max_files after processing a directory's entries, preventing
+        // further subdirectories from being visited.  We create two subdirectories each
+        // containing SCAN_PROSE_THRESHOLD (5) prose files so the first subdir alone
+        // fills max_files=5 and the break fires before the second subdir is queued.
+        // The final result must not exceed max_files regardless of the directory layout.
+        let temp_directory = tempfile::tempdir()
+            .expect("failed to create temporary directory for scan early-exit test");
+        let sub_one = temp_directory.path().join("sub_one");
+        let sub_two = temp_directory.path().join("sub_two");
+        std::fs::create_dir(&sub_one).expect("create sub_one");
+        std::fs::create_dir(&sub_two).expect("create sub_two");
+
+        // Five prose files in sub_one — enough to fill max_files=5 in a single pass.
+        for name in &["a.md", "b.md", "c.md", "d.md", "e.md"] {
+            std::fs::write(sub_one.join(name), "# content").expect("write prose file");
+        }
+        // Three more prose files in sub_two — these must not be reached after the break.
+        for name in &["f.md", "g.md", "h.md"] {
+            std::fs::write(sub_two.join(name), "# overflow prose").expect("write overflow");
+        }
+
+        let result = scan_for_detection(temp_directory.path(), 5);
+
+        // Result must not exceed max_files regardless of total files on disk.
+        assert!(
+            result.len() <= 5,
+            "result must not exceed max_files=5; got {}",
+            result.len()
+        );
+        // At least one prose file must be present.
+        assert!(
+            !result.is_empty(),
+            "at least one prose file must be returned"
+        );
+    }
+
+    // ── detect_entities_build_pronoun_re — non-empty patterns path ────────────
+
+    #[test]
+    fn detect_entities_build_pronoun_re_uses_provided_patterns_when_non_empty() {
+        // When EntityPatterns has non-empty pronoun_patterns the function must build
+        // the joined regex rather than falling back to the English literal.
+        let patterns = EntityPatterns {
+            candidate_patterns: vec![],
+            multi_word_patterns: vec![],
+            person_verb_patterns: vec![],
+            pronoun_patterns: vec![r"\ber\b".to_string(), r"\bsie\b".to_string()],
+            dialogue_patterns: vec![],
+            direct_address_patterns: vec![],
+            project_verb_patterns: vec![],
+            stopwords: std::collections::HashSet::new(),
+        };
+        let pronoun_re = detect_entities_build_pronoun_re(&patterns);
+        assert!(
+            pronoun_re.is_match("er kam spät"),
+            "custom pronoun regex must match 'er'"
+        );
+        assert!(
+            pronoun_re.is_match("sie lachte"),
+            "custom pronoun regex must match 'sie'"
+        );
+    }
+
+    // ── detect_entities — candidates empty path ────────────────────────────────
+
+    #[test]
+    fn detect_entities_returns_empty_when_no_candidates_pass_threshold() {
+        // Text with only single-occurrence capitalized words must produce zero candidates
+        // (threshold = 3) and detect_entities must return empty vecs via the early-exit path.
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let file_path = dir.path().join("sparse.txt");
+        // Each name appears exactly once — below the frequency threshold of 3.
+        std::fs::write(
+            &file_path,
+            "Bartholomew visited. Xiomara arrived. Nebuchadnezzar left.",
+        )
+        .expect("write should succeed");
+
+        let paths: Vec<&Path> = vec![file_path.as_path()];
+        let result = detect_entities(&paths, 10, &["en"]);
+
+        assert!(
+            result.people.is_empty(),
+            "no candidates above threshold must yield no people"
+        );
+        assert!(
+            result.projects.is_empty(),
+            "no candidates above threshold must yield no projects"
+        );
+        assert!(
+            result.uncertain.is_empty(),
+            "no candidates above threshold must yield no uncertain"
         );
     }
 }

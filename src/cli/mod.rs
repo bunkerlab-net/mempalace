@@ -1,7 +1,14 @@
 //! CLI command definitions and handlers for the `mempalace` binary.
 
+pub mod closet_llm;
 pub mod compress;
+pub mod dedup;
+pub mod diary_ingest;
+pub mod export;
+pub mod hook;
 pub mod init;
+pub mod instructions;
+pub mod onboarding;
 pub mod repair;
 pub mod search;
 pub mod split;
@@ -20,6 +27,10 @@ use clap::{Parser, Subcommand};
     about = "A memory palace for AI assistants"
 )]
 pub struct Cli {
+    /// Path to the palace database file (overrides `MEMPALACE_PALACE_PATH` and config)
+    #[arg(long, global = true)]
+    pub palace: Option<PathBuf>,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -38,6 +49,10 @@ pub enum Command {
         /// Disable .gitignore filtering (include all files regardless of gitignore rules)
         #[arg(long)]
         no_gitignore: bool,
+
+        /// BCP-47 language codes for entity detection (comma-separated; default: en)
+        #[arg(long, value_delimiter = ',')]
+        lang: Vec<String>,
 
         /// Enable LLM-assisted entity refinement
         #[arg(long)]
@@ -70,7 +85,7 @@ pub enum Command {
         mode: String,
 
         /// Extraction mode for convos: exchange or general
-        #[arg(long, default_value = "exchange")]
+        #[arg(long, default_value = "exchange", alias = "extract")]
         extract_mode: String,
 
         /// Override the wing name (default: from mempalace.yaml or directory name)
@@ -92,6 +107,10 @@ pub enum Command {
         /// Disable .gitignore filtering (include all files regardless of gitignore rules)
         #[arg(long)]
         no_gitignore: bool,
+
+        /// Paths to include even when gitignore filtering is active (repeatable)
+        #[arg(long)]
+        include_ignored: Vec<PathBuf>,
     },
 
     /// Search the palace
@@ -108,15 +127,27 @@ pub enum Command {
         room: Option<String>,
 
         /// Number of results
-        #[arg(long, default_value = "10")]
+        #[arg(long, default_value = "5")]
         results: usize,
     },
 
-    /// Generate wake-up context (L0 + L1)
+    /// Generate wake-up context (L0 + L1; L2 when --wing/--room is given; L3 with --query)
     WakeUp {
-        /// Filter by wing
+        /// Filter by wing (also enables L2 on-demand recall for that wing)
         #[arg(long)]
         wing: Option<String>,
+
+        /// Filter by room within the wing (requires --wing; enables L2 room-scoped recall)
+        #[arg(long)]
+        room: Option<String>,
+
+        /// Run a keyword search query and append L3 deep-search results
+        #[arg(long)]
+        query: Option<String>,
+
+        /// Number of results for L2 recall and L3 search
+        #[arg(long, default_value = "20", value_parser = parse_results_nonzero)]
+        results: usize,
     },
 
     /// Compress drawers using AAAK dialect
@@ -173,9 +204,185 @@ pub enum Command {
     /// Show palace overview and stats
     Status,
 
+    /// Detect and remove near-duplicate drawers using Jaccard similarity
+    Dedup {
+        /// Only deduplicate drawers in this wing
+        #[arg(long)]
+        wing: Option<String>,
+
+        /// Jaccard similarity threshold; pairs above this are considered duplicates
+        #[arg(long, default_value = "0.85")]
+        threshold: f64,
+
+        /// Show what would be deleted without actually deleting
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Print stats only without deleting
+        #[arg(long)]
+        stats: bool,
+    },
+
     /// Rebuild the inverted index (repair corrupted palace)
-    Repair,
+    Repair {
+        /// Skip the confirmation prompt (non-interactive / CI mode)
+        #[arg(long, short = 'y')]
+        skip_confirm: bool,
+    },
 
     /// Run as MCP server (JSON-RPC over stdio)
-    Mcp,
+    Mcp {
+        /// Print the `claude mcp add` install command and exit without starting the server
+        #[arg(long)]
+        setup: bool,
+    },
+
+    /// Export palace drawers to markdown files on disk
+    Export {
+        /// Output directory (default: ./palace-export)
+        #[arg(long, default_value = "palace-export")]
+        output: std::path::PathBuf,
+
+        /// Filter by wing
+        #[arg(long)]
+        wing: Option<String>,
+
+        /// Preview what would be exported without writing files
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Print packaged skill instructions for a named `MemPalace` command
+    Instructions {
+        /// Instruction name: help, init, mine, search, or status
+        name: String,
+    },
+
+    /// First-run interactive setup wizard — seeds your entity registry
+    Onboard {
+        /// Directory to scan for additional entity candidates (default: current dir)
+        #[arg(long, short = 'd', default_value = ".")]
+        directory: PathBuf,
+    },
+
+    /// Run a hook handler (session-start, stop, or precompact)
+    Hook {
+        /// Hook name: session-start, stop, or precompact
+        #[arg(long)]
+        hook: String,
+
+        /// Harness name: claude-code or codex
+        #[arg(long, default_value = "claude-code")]
+        harness: String,
+    },
+
+    /// Ingest on-disk markdown diary files (`YYYY-MM-DD*.md`) into the palace
+    DiaryIngest {
+        /// Path to the directory containing diary markdown files
+        directory: PathBuf,
+
+        /// Wing to file diary drawers under
+        #[arg(long, default_value = "diary")]
+        wing: String,
+
+        /// Agent name recorded on each drawer
+        #[arg(long, default_value = "mempalace")]
+        agent: String,
+
+        /// Re-ingest all sections even if already filed
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Regenerate compressed closets using a configured LLM for richer topic extraction
+    ClosetLlm {
+        /// Limit regeneration to a specific wing (default: all wings)
+        #[arg(long)]
+        wing: Option<String>,
+
+        /// Only process the first N drawers; 0 means all
+        #[arg(long, default_value = "0")]
+        sample: usize,
+
+        /// Preview work without calling the LLM or writing to the palace
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Enable LLM (required)
+        #[arg(long)]
+        llm: bool,
+
+        /// LLM provider: ollama, openai-compat, or anthropic
+        #[arg(long, default_value = "ollama")]
+        llm_provider: String,
+
+        /// LLM model name (e.g. llama3:8b, gpt-4o-mini, claude-haiku-4-5-20251001)
+        #[arg(long, default_value = "llama3:8b")]
+        llm_model: String,
+
+        /// LLM API endpoint URL (required for openai-compat, optional for others)
+        #[arg(long)]
+        llm_endpoint: Option<String>,
+
+        /// LLM API key (for anthropic or authenticated openai-compat endpoints)
+        #[arg(long)]
+        llm_api_key: Option<String>,
+    },
+}
+
+/// Parse `--results` for `WakeUp`, rejecting zero as invalid.
+fn parse_results_nonzero(raw: &str) -> Result<usize, String> {
+    let count: usize = raw
+        .parse()
+        .map_err(|_| format!("'{raw}' is not a valid number of results"))?;
+    if count == 0 {
+        return Err("--results must be at least 1".to_string());
+    }
+    Ok(count)
+}
+
+#[cfg(test)]
+// Test code — .expect() with a descriptive message is acceptable; panics are the correct failure mode.
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::parse_results_nonzero;
+
+    #[test]
+    fn parse_results_nonzero_accepts_positive_number() {
+        // A valid positive string must parse to its numeric value without error.
+        let result = parse_results_nonzero("5");
+        assert!(result.is_ok(), "positive number '5' must be accepted");
+        assert_eq!(
+            result.expect("already asserted Ok"),
+            5,
+            "parsed value must equal 5"
+        );
+    }
+
+    #[test]
+    fn parse_results_nonzero_rejects_zero() {
+        // Zero is explicitly forbidden — the flag requires at least one result.
+        let result = parse_results_nonzero("0");
+        assert!(
+            result.is_err(),
+            "zero must be rejected by parse_results_nonzero"
+        );
+        let error_message = result.err().unwrap_or_default();
+        assert!(
+            error_message.contains("at least 1"),
+            "error message must mention 'at least 1'; got: {error_message}"
+        );
+    }
+
+    #[test]
+    fn parse_results_nonzero_rejects_non_numeric_input() {
+        // Non-numeric strings must produce a parse error with the raw input echoed.
+        let result = parse_results_nonzero("abc");
+        assert!(result.is_err(), "non-numeric input must be rejected");
+        let error_message = result.err().unwrap_or_default();
+        assert!(
+            error_message.contains("abc"),
+            "error message must echo the invalid input; got: {error_message}"
+        );
+    }
 }

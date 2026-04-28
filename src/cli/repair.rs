@@ -6,16 +6,66 @@ use turso::Connection;
 
 use crate::db::query_all;
 use crate::error::Result;
-use crate::palace::drawer;
 
-/// Backup the palace database and rebuild the inverted word index.
+/// Backup the palace database, scan for inconsistencies, and rebuild the inverted word index.
 pub async fn run(connection: &Connection, palace_path: &Path) -> Result<()> {
     run_create_backup(connection, palace_path).await?;
+    run_scan(connection).await?;
     run_rebuild_index(connection).await
 }
 
+/// Scan for index inconsistencies and report them.
+///
+/// Reports two classes of problem:
+///   - Drawers with no `drawer_words` entries (content was never indexed).
+///   - Orphaned `drawer_words` rows pointing to non-existent drawers.
+///
+/// Both classes are fixed by the rebuild step that follows, so this function
+/// is informational only — it does not modify the database.
+pub(crate) async fn run_scan(connection: &Connection) -> Result<()> {
+    // Single round-trip: ask SQLite to count both classes of inconsistency at once
+    // rather than fetching the full unindexed id list just to take its length.
+    let rows = query_all(
+        connection,
+        "SELECT \
+           (SELECT count(*) FROM drawers WHERE id NOT IN (SELECT DISTINCT drawer_id FROM drawer_words)) AS unindexed_count, \
+           (SELECT count(*) FROM drawer_words WHERE drawer_id NOT IN (SELECT id FROM drawers)) AS orphan_count",
+        (),
+    )
+    .await?;
+
+    let row = rows.first();
+    let unindexed_count: i64 = row
+        .and_then(|row| row.get_value(0).ok())
+        .and_then(|cell| cell.as_integer().copied())
+        .unwrap_or(0);
+    let orphan_count: i64 = row
+        .and_then(|row| row.get_value(1).ok())
+        .and_then(|cell| cell.as_integer().copied())
+        .unwrap_or(0);
+
+    if unindexed_count > 0 {
+        println!(
+            "Scan found {unindexed_count} drawer(s) with no index entries — will be re-indexed"
+        );
+    }
+    if orphan_count > 0 {
+        println!(
+            "Scan found {orphan_count} orphaned index row(s) — will be cleared during rebuild"
+        );
+    }
+    if unindexed_count == 0 && orphan_count == 0 {
+        println!("Scan: no inconsistencies found");
+    }
+
+    // Postconditions: counts are non-negative.
+    debug_assert!(unindexed_count >= 0, "unindexed count must be non-negative");
+    debug_assert!(orphan_count >= 0, "orphan count must be non-negative");
+    Ok(())
+}
+
 /// Checkpoint the WAL and copy the palace database (plus sidecar files) to `.db.bak`.
-async fn run_create_backup(connection: &Connection, palace_path: &Path) -> Result<()> {
+pub(crate) async fn run_create_backup(connection: &Connection, palace_path: &Path) -> Result<()> {
     // Checkpoint WAL to ensure backup is self-contained.
     // wal_checkpoint returns rows (busy, log, checkpointed) — must use query_all.
     query_all(connection, "PRAGMA wal_checkpoint(TRUNCATE)", ()).await?;
@@ -47,52 +97,18 @@ async fn run_create_backup(connection: &Connection, palace_path: &Path) -> Resul
     Ok(())
 }
 
-/// Clear and rebuild the inverted word index within a transaction.
+/// Clear and rebuild the inverted word index via the palace library.
 ///
-/// BEGIN IMMEDIATE is taken before the SELECT so the snapshot is protected
-/// by the same exclusive lock that performs the delete and rebuild.
+/// Delegates the transaction and index work to `palace::repair::rebuild_index`,
+/// which wraps everything in a `BEGIN IMMEDIATE` transaction. The CLI layer adds
+/// the completion message.
 async fn run_rebuild_index(connection: &Connection) -> Result<()> {
-    connection.execute("BEGIN IMMEDIATE", ()).await?;
-
-    if let Err(e) = async {
-        let rows = query_all(connection, "SELECT id, content FROM drawers", ()).await?;
-        let total = rows.len();
-        println!("Found {total} drawers to re-index");
-
-        // Collect id+content before clearing index (borrow lifetime).
-        // Propagate column errors rather than silently producing empty IDs.
-        let drawers: Vec<(String, String)> = rows
-            .iter()
-            .map(|row| -> Result<(String, String)> {
-                let id: String = row.get(0)?;
-                let content: String = row.get(1)?;
-                Ok((id, content))
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        connection.execute("DELETE FROM drawer_words", ()).await?;
-        println!("Cleared existing index");
-
-        // Rebuild.
-        for (i, (id, content)) in drawers.iter().enumerate() {
-            drawer::index_words(connection, id, content).await?;
-            if (i + 1) % 100 == 0 || i + 1 == total {
-                println!("  [{}/{}] re-indexed", i + 1, total);
-            }
-        }
-        println!("\nRepair complete: {total} drawers re-indexed");
-        Ok::<(), crate::error::Error>(())
-    }
-    .await
-    {
-        // Attempt rollback and preserve the original error.
-        if let Err(rollback_err) = connection.execute("ROLLBACK", ()).await {
-            eprintln!("Rollback failed: {rollback_err}");
-        }
-        return Err(e);
-    }
-
-    connection.execute("COMMIT", ()).await?;
+    let total = crate::palace::repair::rebuild_index(connection).await?;
+    assert!(
+        total < usize::MAX,
+        "run_rebuild_index: reindexed count must be within usize range"
+    );
+    println!("\nRepair complete: {total} drawers re-indexed");
     Ok(())
 }
 
@@ -185,6 +201,89 @@ mod tests {
         assert!(
             database_path.exists(),
             "original database file must remain after repair"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_scan_reports_unindexed_and_orphan_counts() {
+        // run_scan must print (not error) when it finds drawers with no index entries
+        // and orphaned index rows. We exercise both the `unindexed_count > 0` branch
+        // (lines 46-50) and the `orphan_count > 0` branch (lines 51-55).
+        let (_database, connection) = crate::test_helpers::test_db().await;
+
+        // Insert a drawer that has no matching drawer_words rows → unindexed.
+        connection
+            .execute(
+                "INSERT INTO drawers (id, wing, room, content) VALUES ('unindexed_drawer_001', 'test_wing', 'general', 'some content')",
+                (),
+            )
+            .await
+            .expect("INSERT into drawers must succeed for unindexed-drawer setup");
+
+        // Insert a drawer_words row pointing to a non-existent drawer → orphan.
+        connection
+            .execute(
+                "INSERT INTO drawer_words (word, drawer_id, count) VALUES ('orphan_word', 'nonexistent_drawer_999', 1)",
+                (),
+            )
+            .await
+            .expect("INSERT into drawer_words must succeed for orphan setup");
+
+        // run_scan is informational only — it must not return an error even when
+        // inconsistencies are present.
+        let result = run_scan(&connection).await;
+        assert!(
+            result.is_ok(),
+            "run_scan must not error when inconsistencies exist"
+        );
+        // Confirm the setup rows are still present (run_scan does not modify the DB).
+        let orphan_check = crate::db::query_all(
+            &connection,
+            "SELECT count(*) FROM drawer_words WHERE drawer_id = 'nonexistent_drawer_999'",
+            (),
+        )
+        .await
+        .expect("verification query must succeed");
+        assert!(
+            !orphan_check.is_empty(),
+            "orphan verification query must return a row"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_create_backup_copies_wal_and_shm_when_present() {
+        // run_create_backup must copy .db-wal and .db-shm sidecar files when they
+        // exist alongside the palace database (lines 85-92 in run_create_backup).
+        let temp_directory = tempfile::tempdir()
+            .expect("failed to create temporary directory for WAL/SHM backup test");
+        let database_path = temp_directory.path().join("palace_wal.db");
+        let (_database, connection) = open_file_db(&database_path).await;
+
+        // Create stub WAL and SHM sidecar files so the `if exists` branches fire.
+        let wal_path = database_path.with_extension("db-wal");
+        let shm_path = database_path.with_extension("db-shm");
+        std::fs::write(&wal_path, b"stub-wal-content").expect("failed to write stub WAL file");
+        std::fs::write(&shm_path, b"stub-shm-content").expect("failed to write stub SHM file");
+
+        run_create_backup(&connection, &database_path)
+            .await
+            .expect("run_create_backup must succeed when WAL/SHM files exist");
+
+        // The backup database and both sidecar backups must exist.
+        let backup_path = database_path.with_extension("db.bak");
+        assert!(
+            backup_path.exists(),
+            "run_create_backup must create a .db.bak file"
+        );
+        let backup_wal = temp_directory.path().join("palace_wal.db.bak-wal");
+        let backup_shm = temp_directory.path().join("palace_wal.db.bak-shm");
+        assert!(
+            backup_wal.exists(),
+            "run_create_backup must copy the WAL sidecar to .db.bak-wal"
+        );
+        assert!(
+            backup_shm.exists(),
+            "run_create_backup must copy the SHM sidecar to .db.bak-shm"
         );
     }
 }

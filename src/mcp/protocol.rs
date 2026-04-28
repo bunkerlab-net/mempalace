@@ -330,6 +330,70 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
                 },
                 "required": ["wing", "room"]
             }
+        },
+        {
+            "name": "mempalace_hook_settings",
+            "description": "Get or set hook behavior. silent_save: true = save directly (no MCP clutter), false = legacy blocking. desktop_toast: true = show desktop notification via notify-send. Call with no args to view current settings.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "silent_save": {"type": "boolean", "description": "True = silent direct save, false = blocking MCP calls"},
+                    "desktop_toast": {"type": "boolean", "description": "True = show desktop toast via notify-send"}
+                }
+            }
+        },
+        {
+            "name": "mempalace_memories_filed_away",
+            "description": "Check if a recent palace checkpoint was saved by the stop hook. Returns message count and timestamp of the last silent save.",
+            "inputSchema": {"type": "object", "properties": {}}
+        },
+        {
+            "name": "mempalace_reconnect",
+            "description": "Confirm palace database connectivity and return the current drawer count. Use after external scripts modified the palace directly.",
+            "inputSchema": {"type": "object", "properties": {}}
+        },
+        {
+            "name": "mempalace_check_facts",
+            "description": "Check text for entity confusion and KG contradictions. Returns a list of issues: similar_name (possible typo), relationship_mismatch (KG disagrees), stale_fact (closed KG fact).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Text to check for factual issues"}
+                },
+                "required": ["text"]
+            }
+        },
+        {
+            "name": "mempalace_research_entity",
+            "description": "Look up a word in the local entity registry and optionally query Wikipedia to classify it as a person, place, or concept. Local registry is always checked first; Wikipedia is only queried when allow_network is true.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "word": {"type": "string", "description": "Name or word to research"},
+                    "context": {"type": "string", "description": "Surrounding sentence — improves disambiguation for common-word names (optional)"},
+                    "allow_network": {"type": "boolean", "description": "Query Wikipedia when word is not in local registry (default false — local only)"},
+                    "auto_confirm": {"type": "boolean", "description": "Auto-confirm the Wikipedia result without a second call to mempalace_confirm_entity (default false)"}
+                },
+                "required": ["word"]
+            }
+        },
+        {
+            "name": "mempalace_confirm_entity",
+            "description": "Confirm a previously researched word as a specific entity type and optionally promote it to the people registry. Use after mempalace_research_entity returns an unconfirmed result.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "word": {"type": "string", "description": "Name or word to confirm"},
+                    "entity_type": {
+                        "type": "string",
+                        "enum": ["person", "place", "concept", "unknown"],
+                        "description": "Entity class: person, place, concept, or unknown"
+                    },
+                    "relationship": {"type": "string", "description": "Relationship label for people (e.g. colleague, friend) — optional"},
+                    "context": {"type": "string", "description": "Context tag for people (e.g. work, personal) — optional"}
+                },
+                "required": ["word", "entity_type"]
+            }
         }
     ]).as_array()
         .expect("json!([...]) is always Value::Array; as_array() cannot return None here")
@@ -345,10 +409,10 @@ mod tests {
     #[test]
     fn tool_definitions_count() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 26, "expected 26 tool definitions");
+        assert_eq!(tools.len(), 32, "expected 32 tool definitions");
         // Verify the first and last tool names as a structural sanity check.
         assert_eq!(tools[0]["name"], "mempalace_status");
-        assert_eq!(tools[25]["name"], "mempalace_follow_tunnels");
+        assert_eq!(tools[31]["name"], "mempalace_confirm_entity");
     }
 
     #[test]

@@ -10,13 +10,14 @@ categories = ["command-line-utilities", "database"]
 rust-version = "1.88"
 
 [lints.rust]
+dead_code = "deny"
 unsafe_code = "deny"
 warnings = "deny"
 
 [lints.clippy]
 enum_glob_use = "deny"
 expect_used = "deny"
-pedantic = { level = "deny", priority = -1 }
+pedantic = "deny"
 unwrap_used = "deny"
 
 [dependencies]
