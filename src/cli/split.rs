@@ -1214,6 +1214,48 @@ mod tests {
         );
     }
 
+    #[test]
+    fn run_process_file_with_no_output_dir_prefers_file_parent_over_directory_arg() {
+        // Regression: when `output_dir` is None, `run_process_file` must use
+        // `path.parent()` rather than the `directory` argument. Drive the
+        // distinction by placing the mega file in `mega_dir` and passing a
+        // separate `scan_dir` as the directory argument; the backup must
+        // land next to the file (mega_dir), not in scan_dir.
+        let mega_dir =
+            tempfile::tempdir().expect("failed to create mega-file dir for split fallback test");
+        let scan_dir = tempfile::tempdir()
+            .expect("failed to create separate scan dir for split fallback test");
+        // Sanity: the two temp dirs really are distinct.
+        assert_ne!(
+            mega_dir.path(),
+            scan_dir.path(),
+            "scan dir and mega dir must differ to exercise path.parent() vs directory"
+        );
+
+        let mega_file_path = mega_dir.path().join("mega.txt");
+        fs::write(&mega_file_path, make_mega_file(2))
+            .expect("failed to write two-session mega file");
+
+        // Call run_process_file directly so we can pin path and directory to
+        // distinct paths — the public `run` only ever sees files inside the
+        // directory it scans.
+        run_process_file(&mega_file_path, None, scan_dir.path(), false)
+            .expect("run_process_file with output_dir=None must succeed");
+
+        // Backup must be next to the mega file (path.parent()), not the scan dir.
+        let backup_in_mega_dir = mega_file_path.with_extension("mega_backup");
+        assert!(
+            backup_in_mega_dir.exists(),
+            "backup must land next to the mega file (path.parent()), got missing backup at {}",
+            backup_in_mega_dir.display()
+        );
+        let stray_backup_in_scan_dir = scan_dir.path().join("mega.mega_backup");
+        assert!(
+            !stray_backup_in_scan_dir.exists(),
+            "backup must not land in the directory argument when output_dir is None"
+        );
+    }
+
     // --- split_file_write_session: dry_run path ---
 
     #[test]
