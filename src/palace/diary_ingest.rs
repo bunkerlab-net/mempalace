@@ -184,23 +184,33 @@ async fn diary_ingest_file(
     assert!(file_path.exists());
 
     let file_size = file_path.metadata().map_or(0, |meta| meta.len());
+    let file_mtime = diary_ingest_file_mtime(file_path);
+    let key = file_path.to_string_lossy().to_string();
+    let date_prefix = diary_ingest_extract_date(file_path);
+    // Always read `previous_entry_count` from the cursor — even for files now
+    // below `MIN_FILE_BYTES` — so a diary that shrinks below the size floor
+    // (e.g. all sections deleted) still has its prior drawers purged.
+    let previous_entry_count = cursor.get(&key).map_or(0, |state| state.entry_count);
+
     if file_size < MIN_FILE_BYTES {
+        diary_ingest_file_purge_orphans(connection, wing, &date_prefix, 0, previous_entry_count)
+            .await?;
+        cursor.insert(
+            key,
+            FileState {
+                entry_count: 0,
+                size: file_size,
+                mtime: file_mtime,
+            },
+        );
         return Ok(0);
     }
 
-    let file_mtime = diary_ingest_file_mtime(file_path);
-    let key = file_path.to_string_lossy().to_string();
-    // Pull two distinct values from the cursor:
-    //   * `prev_count` — sections to skip on resume (0 when force or mismatch);
-    //   * `previous_entry_count` — total sections recorded on the last run,
-    //     used to purge orphaned drawers when the file has shrunk since.
     let cursor_state = cursor.get(&key);
-    let previous_entry_count = cursor_state.map_or(0, |state| state.entry_count);
     let prev_count = diary_ingest_resume_count(cursor_state, file_size, file_mtime, force);
 
     let text = std::fs::read_to_string(file_path).unwrap_or_default();
     let sections = diary_ingest_parse_sections(&text);
-    let date_prefix = diary_ingest_extract_date(file_path);
 
     let created = diary_ingest_file_apply_sections(
         connection,
@@ -766,6 +776,88 @@ mod tests {
                 assert_eq!(
                     count, 1,
                     "deleting a section must leave exactly one diary drawer"
+                );
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn ingest_diaries_purges_drawers_when_file_shrinks_below_min_bytes() {
+        // A diary file that shrinks below `MIN_FILE_BYTES` (e.g. all sections
+        // deleted, leaving only a date stub) must still trigger the orphan
+        // purge so its prior drawers are cleaned up. The early `Ok(0)`
+        // bypassed the purge before this fix.
+        let diary_dir =
+            tempfile::tempdir().expect("failed to create temp diary dir for tiny-shrink test");
+        let diary_file = diary_dir.path().join("2024-04-02.md");
+        std::fs::write(
+            &diary_file,
+            "## Section\n\nFirst section with enough content to clear the size floor easily.",
+        )
+        .expect("failed to write initial diary file for tiny-shrink test");
+
+        let cursor_home =
+            tempfile::tempdir().expect("failed to create temp cursor home for tiny-shrink test");
+        let cursor_home_path = cursor_home
+            .path()
+            .to_str()
+            .expect("temp cursor home path must be valid UTF-8")
+            .to_string();
+        temp_env::async_with_vars(
+            [("MEMPALACE_DIR", Some(cursor_home_path.as_str()))],
+            async {
+                let (_db, connection) = crate::test_helpers::test_db().await;
+
+                let stats1 = ingest_diaries(
+                    &connection,
+                    diary_dir.path(),
+                    "journal",
+                    "test_agent",
+                    false,
+                )
+                .await
+                .expect("first ingest must succeed");
+                assert_eq!(
+                    stats1.drawers_created, 1,
+                    "first run must create the section drawer"
+                );
+
+                // Shrink the file below MIN_FILE_BYTES. A single short header
+                // is well under 50 bytes, so the size-floor branch fires.
+                std::fs::write(&diary_file, "tiny\n").expect("failed to write tiny diary file");
+                let shrunk_size = std::fs::metadata(&diary_file)
+                    .expect("metadata read must succeed")
+                    .len();
+                assert!(
+                    shrunk_size < MIN_FILE_BYTES,
+                    "test precondition: shrunk file must be below MIN_FILE_BYTES"
+                );
+
+                let _stats2 = ingest_diaries(
+                    &connection,
+                    diary_dir.path(),
+                    "journal",
+                    "test_agent",
+                    false,
+                )
+                .await
+                .expect("second ingest must succeed");
+
+                let rows = crate::db::query_all(
+                    &connection,
+                    "SELECT COUNT(*) FROM drawers WHERE room = 'diary'",
+                    (),
+                )
+                .await
+                .expect("count query must succeed");
+                let count: i64 = rows
+                    .first()
+                    .and_then(|row| row.get(0).ok())
+                    .expect("count query must return one row with one column");
+                assert_eq!(
+                    count, 0,
+                    "shrinking below MIN_FILE_BYTES must purge all prior drawers"
                 );
             },
         )
