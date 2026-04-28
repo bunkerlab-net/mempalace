@@ -276,9 +276,30 @@ fn dedup_jaccard(set_a: &HashSet<String>, set_b: &HashSet<String>) -> f64 {
 /// Without this, dropping a drawer would leave dangling `triples.source_drawer_id`
 /// and `explicit_tunnels.source_drawer_id` / `target_drawer_id` references —
 /// neither table has FK cascades configured.
+///
+/// All five mutations run inside a single `BEGIN`/`COMMIT` so a partial
+/// failure (e.g. the closet `DELETE` errors after the drawer row was
+/// removed) does not leave the palace with a missing drawer but live
+/// references in `compressed`, `triples`, or `explicit_tunnels`. On any
+/// statement error the transaction rolls back and the original error is
+/// propagated.
 async fn dedup_delete_drawer(connection: &Connection, id: &str) -> Result<()> {
     assert!(!id.is_empty(), "dedup_delete_drawer: id must not be empty");
 
+    connection.execute("BEGIN", ()).await?;
+    if let Err(error) = dedup_delete_drawer_inner(connection, id).await {
+        let _ = connection.execute("ROLLBACK", ()).await;
+        return Err(error);
+    }
+    connection.execute("COMMIT", ()).await?;
+    Ok(())
+}
+
+/// Run the five reference-cleanup statements that compose `dedup_delete_drawer`.
+///
+/// Split out so the transaction wrapper can call a single fallible body and
+/// uniformly `ROLLBACK` on any error before propagating.
+async fn dedup_delete_drawer_inner(connection: &Connection, id: &str) -> Result<()> {
     connection
         .execute("DELETE FROM drawers WHERE id = ?", (id,))
         .await?;
