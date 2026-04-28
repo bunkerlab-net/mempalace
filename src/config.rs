@@ -223,6 +223,15 @@ impl MempalaceConfig {
     /// intact or commits the new one — never a truncated middle state.
     pub fn save(&self) -> Result<()> {
         use std::io::Write as _;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        // Per-call unique-suffix counter so concurrent saves cannot clobber
+        // each other's temp file before either gets renamed. PID + a
+        // monotonic atomic is enough for in-process uniqueness; `O_EXCL`
+        // (`create_new`) catches the cross-process collision case by
+        // forcing an error rather than silently overwriting another
+        // save's intermediate file.
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
 
         assert!(
             !self.palace_path.as_os_str().is_empty(),
@@ -232,10 +241,10 @@ impl MempalaceConfig {
         std::fs::create_dir_all(&directory)?;
         let data = serde_json::to_string_pretty(self)?;
 
-        let tmp_path = directory.join("config.json.tmp");
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tmp_path = directory.join(format!("config.json.tmp.{}.{unique}", std::process::id()));
         let mut tmp_file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .write(true)
             .open(&tmp_path)?;
         tmp_file.write_all(data.as_bytes())?;
