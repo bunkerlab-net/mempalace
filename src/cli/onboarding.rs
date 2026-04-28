@@ -907,4 +907,272 @@ mod tests {
         let ambiguous = onboarding_warn_ambiguous(&people);
         assert!(ambiguous.is_empty(), "distinctive name must not be flagged");
     }
+
+    // ── onboarding_generate_entity_codes — collision fallback ─────────────
+
+    #[test]
+    fn entity_codes_numeric_suffix_when_all_prefixes_collide() {
+        // Three identical names exhaust every prefix length, so the third must
+        // fall through to the numeric-suffix branch of the collision resolver.
+        let people = vec![
+            PersonEntry {
+                name: "Al".to_string(),
+                relationship: String::new(),
+                context: String::new(),
+                nickname: String::new(),
+            },
+            PersonEntry {
+                name: "Al".to_string(),
+                relationship: String::new(),
+                context: String::new(),
+                nickname: String::new(),
+            },
+            PersonEntry {
+                name: "Al".to_string(),
+                relationship: String::new(),
+                context: String::new(),
+                nickname: String::new(),
+            },
+        ];
+        let codes = onboarding_generate_entity_codes(&people);
+        assert_eq!(codes.len(), 3);
+        let unique: std::collections::HashSet<&str> =
+            codes.iter().map(|(_, code)| code.as_str()).collect();
+        assert_eq!(unique.len(), 3, "every code must be unique");
+        // The third code falls through to the numeric-suffix branch — it must
+        // include a digit, because the prefix-widening loop runs out of room.
+        assert!(
+            codes
+                .iter()
+                .any(|(_, code)| code.chars().any(char::is_numeric)),
+            "numeric-suffix branch must be exercised"
+        );
+    }
+
+    // ── PersonEntry helper ────────────────────────────────────────────────
+
+    fn person_entry(name: &str, relationship: &str, context: &str, nickname: &str) -> PersonEntry {
+        PersonEntry {
+            name: name.to_string(),
+            relationship: relationship.to_string(),
+            context: context.to_string(),
+            nickname: nickname.to_string(),
+        }
+    }
+
+    // ── onboarding_seed_registry ──────────────────────────────────────────
+
+    #[test]
+    fn seed_registry_writes_people_projects_and_aliases() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        temp_env::with_var("MEMPALACE_DIR", Some(temp.path()), || {
+            let people = vec![
+                person_entry("Alice", "engineer", "work", "Ali"),
+                person_entry("Bob", "friend", "personal", ""),
+            ];
+            let projects = vec!["Mempalace".to_string()];
+            let path =
+                onboarding_seed_registry(&people, &projects).expect("seed registry must succeed");
+            assert!(path.exists(), "registry file must be created");
+            let raw = std::fs::read_to_string(&path).expect("read registry");
+            // Aliases section is only written when at least one person has a
+            // nickname — Alice's "Ali" must therefore land under "aliases".
+            assert!(raw.contains("Alice"), "Alice must be listed");
+            assert!(raw.contains("Bob"), "Bob must be listed");
+            assert!(raw.contains("Mempalace"), "project must be listed");
+            assert!(raw.contains("Ali=Alice"), "alias must be encoded");
+        });
+    }
+
+    #[test]
+    fn seed_registry_with_empty_inputs_writes_empty_registry() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        temp_env::with_var("MEMPALACE_DIR", Some(temp.path()), || {
+            let path =
+                onboarding_seed_registry(&[], &[]).expect("empty seed registry must succeed");
+            // The known-entities writer creates the file even when no
+            // categories were merged, so its parent path must exist.
+            assert!(path.parent().is_some_and(std::path::Path::exists));
+        });
+    }
+
+    // ── onboarding_seed_entity_registry ────────────────────────────────────
+
+    #[test]
+    fn seed_entity_registry_writes_json_at_config_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        temp_env::with_var("MEMPALACE_DIR", Some(temp.path()), || {
+            let people = vec![
+                person_entry("Alice", "engineer", "work", "Ali"),
+                // An empty-name entry must be filtered out before seeding —
+                // the registry seed asserts non-empty trimmed names.
+                person_entry("   ", "", "", ""),
+            ];
+            let projects = vec!["Mempalace".to_string()];
+            onboarding_seed_entity_registry(&people, &projects, "work")
+                .expect("seed entity registry must succeed");
+            let registry = temp.path().join("entity_registry.json");
+            assert!(registry.exists(), "entity_registry.json must be written");
+            let raw = std::fs::read_to_string(&registry).expect("read registry");
+            assert!(raw.contains("\"Alice\""), "Alice must appear in registry");
+            assert!(
+                !raw.contains("\"   \""),
+                "whitespace-only name must be filtered out"
+            );
+        });
+    }
+
+    // ── onboarding_write_aaak_entities_file ────────────────────────────────
+
+    #[test]
+    fn write_aaak_entities_file_renders_people_and_projects() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let people = vec![
+            person_entry("Alice", "engineer", "work", ""),
+            person_entry("Bob", "", "personal", ""),
+        ];
+        let projects = vec!["Mempalace".to_string(), "Mempal".to_string()];
+        let codes = onboarding_generate_entity_codes(&people);
+        onboarding_write_aaak_entities_file(temp.path(), &people, &projects, &codes)
+            .expect("write aaak_entities.md must succeed");
+        let contents = std::fs::read_to_string(temp.path().join("aaak_entities.md"))
+            .expect("read aaak_entities.md");
+        assert!(contents.contains("# AAAK Entity Registry"));
+        assert!(
+            contents.contains("ALI=Alice (engineer)"),
+            "person with relationship must show parens"
+        );
+        assert!(
+            contents.contains("BOB=Bob"),
+            "person without relationship must omit parens"
+        );
+        assert!(contents.contains("## Projects"));
+        assert!(
+            contents.contains("MEMP=Mempalace"),
+            "first project gets the bare 4-char prefix"
+        );
+        assert!(
+            contents.contains("MEMP1=Mempal"),
+            "colliding project must get a numeric suffix"
+        );
+        assert!(contents.contains("## AAAK Quick Reference"));
+    }
+
+    #[test]
+    fn write_aaak_entities_file_skips_projects_section_when_empty() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let people = vec![person_entry("Alice", "", "personal", "")];
+        let codes = onboarding_generate_entity_codes(&people);
+        onboarding_write_aaak_entities_file(temp.path(), &people, &[], &codes)
+            .expect("write aaak_entities.md must succeed");
+        let contents = std::fs::read_to_string(temp.path().join("aaak_entities.md"))
+            .expect("read aaak_entities.md");
+        assert!(
+            !contents.contains("## Projects"),
+            "empty projects must not render a section header"
+        );
+    }
+
+    // ── onboarding_write_critical_facts_file ───────────────────────────────
+
+    #[test]
+    fn write_critical_facts_file_separates_personal_and_work() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let people = vec![
+            person_entry("Alice", "engineer", "work", ""),
+            person_entry("Bob", "sister", "personal", ""),
+        ];
+        let projects = vec!["Mempalace".to_string()];
+        let wings = vec!["family".to_string(), "work".to_string()];
+        let codes = onboarding_generate_entity_codes(&people);
+        onboarding_write_critical_facts_file(
+            temp.path(),
+            &people,
+            &projects,
+            &wings,
+            "combo",
+            &codes,
+        )
+        .expect("write critical_facts.md must succeed");
+        let contents = std::fs::read_to_string(temp.path().join("critical_facts.md"))
+            .expect("read critical_facts.md");
+        assert!(contents.contains("## People (personal)"));
+        assert!(contents.contains("## People (work)"));
+        assert!(contents.contains("## Projects"));
+        assert!(contents.contains("Wings: family, work"));
+        assert!(contents.contains("Mode: combo"));
+        assert!(
+            contents.contains("**Bob** (BOB) — sister"),
+            "personal section must include relationship"
+        );
+        assert!(
+            contents.contains("**Alice** (ALI) — engineer"),
+            "work section must include relationship"
+        );
+    }
+
+    #[test]
+    fn write_critical_facts_file_omits_empty_sections() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let wings = vec!["projects".to_string()];
+        onboarding_write_critical_facts_file(temp.path(), &[], &[], &wings, "work", &[])
+            .expect("write critical_facts.md must succeed");
+        let contents = std::fs::read_to_string(temp.path().join("critical_facts.md"))
+            .expect("read critical_facts.md");
+        assert!(!contents.contains("## People"));
+        assert!(!contents.contains("## Projects"));
+        assert!(contents.contains("Wings: projects"));
+    }
+
+    // ── onboarding_generate_aaak_bootstrap ────────────────────────────────
+
+    #[test]
+    fn generate_aaak_bootstrap_writes_both_files() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        temp_env::with_var("MEMPALACE_DIR", Some(temp.path()), || {
+            let people = vec![person_entry("Alice", "engineer", "work", "")];
+            let projects = vec!["Mempalace".to_string()];
+            let wings = vec!["work".to_string()];
+            onboarding_generate_aaak_bootstrap(&people, &projects, &wings, "work")
+                .expect("generate bootstrap must succeed");
+            assert!(temp.path().join("aaak_entities.md").exists());
+            assert!(temp.path().join("critical_facts.md").exists());
+        });
+    }
+
+    // ── onboarding_scan_directory ─────────────────────────────────────────
+
+    #[test]
+    fn scan_directory_returns_empty_when_directory_has_no_prose() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        // Directory has no .md/.txt/code files, so scan_for_detection returns
+        // an empty list and the early-return in scan_directory fires.
+        let detected = onboarding_scan_directory(temp.path(), &[], &["en"]);
+        assert!(detected.is_empty(), "empty directory yields no candidates");
+    }
+
+    #[test]
+    fn scan_directory_filters_known_people() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        // Seed a markdown file with multiple mentions of two names — Alice is
+        // already known so must be filtered out, while Beatrice should pass
+        // through if confidence meets the minimum threshold.
+        let mut prose = String::new();
+        for _ in 0..6 {
+            prose.push_str(
+                "Alice met Beatrice at the cafe. Beatrice is the new lead. \
+                Alice asked Beatrice about plans. ",
+            );
+        }
+        std::fs::write(temp.path().join("notes.md"), prose).expect("write notes");
+        let known = vec![person_entry("Alice", "", "", "")];
+        let detected = onboarding_scan_directory(temp.path(), &known, &["en"]);
+        // Postcondition: Alice (already known) must not appear in results.
+        assert!(
+            detected
+                .iter()
+                .all(|entity| entity.name.to_lowercase() != "alice"),
+            "known names must be filtered out"
+        );
+    }
 }

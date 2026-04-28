@@ -701,4 +701,170 @@ mod tests {
             "whitespace-only input must not confirm the repair"
         );
     }
+
+    // ── Command::Mcp setup branch ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn run_command_mcp_setup_prints_install_hint_and_skips_palace() {
+        // Command::Mcp { setup: true } prints the install hint and returns Ok
+        // without ever opening a palace — no DB or env setup required.
+        let cli = Cli {
+            palace: None,
+            command: Command::Mcp { setup: true },
+        };
+        let result = run(cli).await;
+        assert!(
+            result.is_ok(),
+            "Command::Mcp {{ setup: true }} must return Ok"
+        );
+    }
+
+    // ── Command::Instructions dispatch ────────────────────────────────────
+
+    #[tokio::test]
+    async fn run_command_instructions_known_name_returns_ok() {
+        // Exercises the Command::Instructions dispatch arm via the top-level run().
+        let cli = Cli {
+            palace: None,
+            command: Command::Instructions {
+                name: "help".to_string(),
+            },
+        };
+        let result = run(cli).await;
+        assert!(
+            result.is_ok(),
+            "Command::Instructions with a known name must return Ok"
+        );
+    }
+
+    // ── run_search dispatch ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn run_command_search_returns_ok_on_empty_palace() {
+        // run_search opens a palace and calls cli::search::run; on an empty
+        // palace the search must succeed and return zero hits without panicking.
+        let temp_directory = tempfile::tempdir()
+            .expect("failed to create temporary directory for Command::Search test");
+        let palace_path = temp_directory.path().join("palace.db");
+        let cli = Cli {
+            palace: Some(palace_path.clone()),
+            command: Command::Search {
+                query: "anything".to_string(),
+                wing: None,
+                room: None,
+                results: 5,
+            },
+        };
+        let result = run(cli).await;
+        assert!(
+            result.is_ok(),
+            "Command::Search on an empty palace must return Ok"
+        );
+        // Pair assertion: the palace was created at the override path.
+        assert!(
+            palace_path.exists(),
+            "palace.db must exist after open_palace"
+        );
+    }
+
+    // ── run_export dispatch ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn run_command_export_dry_run_returns_ok() {
+        // run_export opens a palace and calls cli::export::run in dry-run mode,
+        // which must not write any files — verify the output dir stays empty.
+        let temp_directory = tempfile::tempdir()
+            .expect("failed to create temporary directory for Command::Export test");
+        let palace_path = temp_directory.path().join("palace.db");
+        let output_dir = temp_directory.path().join("export_out");
+        let cli = Cli {
+            palace: Some(palace_path),
+            command: Command::Export {
+                output: output_dir.clone(),
+                wing: None,
+                dry_run: true,
+            },
+        };
+        let result = run(cli).await;
+        assert!(
+            result.is_ok(),
+            "Command::Export dry-run on an empty palace must return Ok"
+        );
+        // Pair assertion: dry-run must not create the output directory.
+        assert!(!output_dir.exists(), "dry-run export must not create files");
+    }
+
+    // ── run_compress dispatch ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn run_command_compress_dry_run_returns_ok() {
+        let temp_directory = tempfile::tempdir()
+            .expect("failed to create temporary directory for Command::Compress test");
+        let palace_path = temp_directory.path().join("palace.db");
+        let cli = Cli {
+            palace: Some(palace_path.clone()),
+            command: Command::Compress {
+                wing: None,
+                dry_run: true,
+                config: None,
+            },
+        };
+        let result = run(cli).await;
+        assert!(
+            result.is_ok(),
+            "Command::Compress dry-run on empty palace must return Ok"
+        );
+        assert!(
+            palace_path.exists(),
+            "palace.db must exist after open_palace"
+        );
+    }
+
+    // ── run_dedup dispatch ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn run_command_dedup_dry_run_returns_ok() {
+        let temp_directory = tempfile::tempdir()
+            .expect("failed to create temporary directory for Command::Dedup test");
+        let palace_path = temp_directory.path().join("palace.db");
+        let cli = Cli {
+            palace: Some(palace_path.clone()),
+            command: Command::Dedup {
+                wing: None,
+                threshold: 0.95,
+                dry_run: true,
+                stats: false,
+            },
+        };
+        let result = run(cli).await;
+        assert!(
+            result.is_ok(),
+            "Command::Dedup dry-run on empty palace must return Ok"
+        );
+        assert!(palace_path.exists());
+    }
+
+    // ── run_wakeup dispatch ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn run_command_wakeup_returns_ok_on_empty_palace() {
+        let temp_directory = tempfile::tempdir()
+            .expect("failed to create temporary directory for Command::WakeUp test");
+        let palace_path = temp_directory.path().join("palace.db");
+        let cli = Cli {
+            palace: Some(palace_path.clone()),
+            command: Command::WakeUp {
+                wing: None,
+                room: None,
+                query: None,
+                results: 5,
+            },
+        };
+        let result = run(cli).await;
+        assert!(
+            result.is_ok(),
+            "Command::WakeUp on an empty palace must return Ok"
+        );
+        assert!(palace_path.exists());
+    }
 }
