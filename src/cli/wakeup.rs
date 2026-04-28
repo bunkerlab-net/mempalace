@@ -4,13 +4,37 @@
 //! With --wing/--room: appends L2 on-demand recall for that location.
 //! With --query:       appends L3 keyword deep-search results.
 
+use std::io::Write;
+
 use turso::Connection;
 
 use crate::error::Result;
 use crate::palace::stack::MemoryStack;
 
 /// Run the wake-up command, printing the requested layers to stdout.
+///
+/// Thin wrapper around [`run_to_writer`] that locks stdout. Tests use
+/// `run_to_writer` directly with a `Vec<u8>` to assert the layered output
+/// without redirecting the global stdout handle.
 pub async fn run(
+    connection: &Connection,
+    wing: Option<&str>,
+    room: Option<&str>,
+    query: Option<&str>,
+    results: usize,
+) -> Result<()> {
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
+    run_to_writer(&mut handle, connection, wing, room, query, results).await
+}
+
+/// Write the L0/L1 (and optional L2/L3) wake-up layers to `out`.
+///
+/// Extracted so tests can capture the rendered text. The caller is
+/// responsible for flushing `out` if line-buffered behavior matters
+/// (the stdout wrapper above flushes on drop).
+pub async fn run_to_writer(
+    out: &mut dyn Write,
     connection: &Connection,
     wing: Option<&str>,
     room: Option<&str>,
@@ -25,7 +49,7 @@ pub async fn run(
     // `MemoryStack::recall` already asserts the returned context is non-empty,
     // so re-asserting here would only duplicate the callee's contract.
     let base = stack.recall(wing).await?;
-    print!("{base}");
+    write!(out, "{base}")?;
 
     // L2: on-demand recall for a specific wing/room. Only triggered when the
     // caller scoped to a wing, because L2 without a filter re-reads all
@@ -33,7 +57,7 @@ pub async fn run(
     if wing.is_some() || room.is_some() {
         let recall = stack.browse(wing, room, results).await?;
         if !recall.is_empty() {
-            println!("\n{recall}");
+            writeln!(out, "\n{recall}")?;
         }
     }
 
@@ -41,7 +65,7 @@ pub async fn run(
     if let Some(query_str) = query {
         let deep = stack.search(query_str, wing, room, results).await?;
         if !deep.is_empty() {
-            println!("\n{deep}");
+            writeln!(out, "\n{deep}")?;
         }
     }
 
@@ -77,13 +101,16 @@ mod tests {
             )
             .await
             .expect("must insert test drawer");
-        // Index words so L3 search can find the drawer.
-        let _ = crate::palace::drawer::index_words(
+        // Index words so L3 search can find the drawer; a setup failure here
+        // would invalidate the L3 assertions, so panic with the underlying
+        // error rather than silently dropping the Result.
+        crate::palace::drawer::index_words(
             &connection,
             "wd-test-001",
             "architecture design patterns overview",
         )
-        .await;
+        .await
+        .expect("index_words must succeed during test setup");
         (db, connection)
     }
 
@@ -98,10 +125,31 @@ mod tests {
 
     #[tokio::test]
     async fn run_with_query_exercises_l3_non_empty_branch() {
-        // L3 search for a matching term must print results when the word index is populated.
+        // L3 search for a matching term must print results when the word
+        // index is populated. Capture output via `run_to_writer` (a
+        // `Vec<u8>` buffer) so we can assert that the L3 block actually
+        // landed in the rendered text — a bare `is_ok()` check would
+        // pass even if the L3 branch silently no-op'd.
         let (_db, connection) = test_db_with_drawer("l3_wing").await;
-        run(&connection, None, None, Some("architecture"), 5)
-            .await
-            .expect("run with matching query must succeed");
+        let mut buffer: Vec<u8> = Vec::new();
+        run_to_writer(
+            &mut buffer,
+            &connection,
+            None,
+            None,
+            Some("architecture"),
+            5,
+        )
+        .await
+        .expect("run with matching query must succeed");
+        let captured = String::from_utf8(buffer).expect("captured output must be UTF-8");
+        assert!(
+            !captured.is_empty(),
+            "wake-up output must include the L0/L1 base block at minimum"
+        );
+        assert!(
+            captured.contains("architecture"),
+            "L3 branch must surface the matching query word in the output: {captured}"
+        );
     }
 }
