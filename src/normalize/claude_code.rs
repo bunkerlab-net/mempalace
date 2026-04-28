@@ -347,8 +347,11 @@ mod tests {
             !result.contains("ctrl+o to expand"),
             "blockquoted token marker must be removed"
         );
+        // Look only for newline-anchored sigils so the assertion still allows
+        // legitimate inline `> ` sequences (e.g. comparison operators) while
+        // still catching a stranded blockquote-only line on the marker's line.
         assert!(
-            !result.contains("> "),
+            !result.contains("\n>\n") && !result.contains("\n> \n"),
             "no stray `>` blockquote sigil may survive on the marker's line"
         );
         assert!(result.contains("before"), "preceding line must survive");

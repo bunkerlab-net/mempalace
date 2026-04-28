@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use sha2::Digest as _;
 use turso::Connection;
 
 use crate::config;
@@ -388,8 +389,12 @@ fn diary_ingest_extract_date(file_path: &Path) -> String {
 
 /// Generate a stable, unique drawer ID for a diary section.
 ///
-/// Format: `diary-{wing_prefix}-{date}-{index}`. Wing is truncated to 20 chars
-/// and sanitized to avoid characters that are invalid in drawer IDs.
+/// Format: `diary-{wing_prefix}-{wing_hash}-{date}-{index}`. The 20-char
+/// sanitized prefix keeps IDs human-readable; the 8-hex-char SHA-256 slug of
+/// the original (unsanitized) wing string disambiguates wings that would
+/// otherwise collapse to the same prefix — e.g. `"work_2024_q1"` and
+/// `"work_2024_q2"` truncate identically at 20 chars, and `"work/notes"` and
+/// `"work_notes"` sanitize identically.
 fn diary_ingest_drawer_id(wing: &str, date: &str, index: usize) -> String {
     assert!(!wing.is_empty());
     assert!(!date.is_empty());
@@ -405,7 +410,17 @@ fn diary_ingest_drawer_id(wing: &str, date: &str, index: usize) -> String {
             }
         })
         .collect();
-    let id = format!("diary-{wing_prefix}-{date}-{index}");
+    let hash = sha2::Sha256::digest(wing.as_bytes());
+    let wing_hash: String = hash.iter().take(4).fold(String::new(), |mut acc, byte| {
+        use std::fmt::Write as _;
+        // 4 bytes → 8 hex chars; collisions across the full 32-bit space are
+        // a non-concern for per-wing diary IDs (a user with >65k wings would
+        // hit far worse problems first).
+        let _ = write!(acc, "{byte:02x}");
+        acc
+    });
+    assert!(wing_hash.len() == 8, "wing hash must be 8 hex chars");
+    let id = format!("diary-{wing_prefix}-{wing_hash}-{date}-{index}");
     assert!(!id.is_empty());
     id
 }
@@ -481,6 +496,28 @@ mod tests {
         assert_eq!(id1, id2, "drawer ID must be deterministic");
         assert!(!id1.is_empty());
         assert!(id1.starts_with("diary-"));
+    }
+
+    #[test]
+    fn drawer_id_disambiguates_wings_that_sanitize_or_truncate_alike() {
+        // `work/notes` and `work_notes` both sanitize to the same wing_prefix;
+        // before the hash slug they would collide. The same is true of two
+        // wings that truncate identically at 20 chars. Both pairs must now
+        // emit distinct IDs because the hash is computed on the original
+        // unsanitized, untruncated wing string.
+        let slash = diary_ingest_drawer_id("work/notes", "2024-01-15", 0);
+        let underscore = diary_ingest_drawer_id("work_notes", "2024-01-15", 0);
+        assert_ne!(
+            slash, underscore,
+            "wings that sanitize identically must still produce distinct IDs"
+        );
+
+        let q1 = diary_ingest_drawer_id("work_2024_quarter_one_long", "2024-01-15", 0);
+        let q2 = diary_ingest_drawer_id("work_2024_quarter_two_long", "2024-01-15", 0);
+        assert_ne!(
+            q1, q2,
+            "wings that truncate identically must still produce distinct IDs"
+        );
     }
 
     #[tokio::test]

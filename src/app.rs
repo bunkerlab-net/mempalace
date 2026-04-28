@@ -338,10 +338,12 @@ async fn run_mcp(palace_override: Option<&std::path::Path>) -> error::Result<()>
 /// `palace_override` takes priority over env vars and config, matching the
 /// `--palace` CLI flag semantics used by `open_palace`.
 async fn run_status(palace_override: Option<&std::path::Path>) -> error::Result<()> {
-    let config = MempalaceConfig::load()?;
+    // Load the config only when we actually need it. With `--palace` set,
+    // requiring a parsable config would surface unrelated config errors on a
+    // status check the user has already pinned to an explicit path.
     let db_path = match palace_override {
         Some(path) => crate::config::expand_tilde(path),
-        None => config.palace_db_path(),
+        None => MempalaceConfig::load()?.palace_db_path(),
     };
 
     if !db_path.exists() {

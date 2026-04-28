@@ -230,7 +230,10 @@ fn onboarding_ask_people_one(mode: &str, index: usize) -> Result<PersonEntry> {
         "personal" => "personal".to_string(),
         "work" => "work".to_string(),
         _ => {
-            let raw = onboarding_readline("  Context (p=personal / w=work)", Some("p"))?;
+            // Lowercase before matching so "W"/"P" are accepted as readily as
+            // "w"/"p"; the prompt makes no claim about case sensitivity.
+            let raw = onboarding_readline("  Context (p=personal / w=work)", Some("p"))?
+                .to_ascii_lowercase();
             if raw.starts_with('w') {
                 "work".to_string()
             } else {
@@ -340,7 +343,15 @@ fn onboarding_maybe_scan(
         return Ok(people);
     }
     let config = crate::config::MempalaceConfig::load().unwrap_or_default();
-    let language_refs: Vec<&str> = config.entity_languages.iter().map(String::as_str).collect();
+    // Fall back to "en" so an empty `entity_languages` (e.g. a hand-edited
+    // config or a future default change) cannot trip the non-empty languages
+    // assertion in `onboarding_scan_directory` and crash an interactive flow.
+    let language_refs: Vec<&str> = if config.entity_languages.is_empty() {
+        vec!["en"]
+    } else {
+        config.entity_languages.iter().map(String::as_str).collect()
+    };
+    assert!(!language_refs.is_empty());
     let detected = onboarding_scan_directory(directory, &people, &language_refs);
     if detected.is_empty() {
         println!("  No additional candidates found.");
@@ -412,10 +423,12 @@ fn onboarding_prompt_detected(
         if people.len() >= PEOPLE_LIMIT {
             break;
         }
+        // Lowercase for tolerance: "P"/"S" should behave like "p"/"s".
         let choice = onboarding_readline(
             &format!("    {} — (p)erson, (s)kip?", entity.name),
             Some("s"),
-        )?;
+        )?
+        .to_ascii_lowercase();
         if !choice.starts_with('p') {
             continue;
         }
@@ -424,7 +437,9 @@ fn onboarding_prompt_detected(
             "personal" => "personal".to_string(),
             "work" => "work".to_string(),
             _ => {
-                let raw = onboarding_readline("    Context (p=personal / w=work)", Some("p"))?;
+                // Same case-insensitive policy as `onboarding_ask_people_one`.
+                let raw = onboarding_readline("    Context (p=personal / w=work)", Some("p"))?
+                    .to_ascii_lowercase();
                 if raw.starts_with('w') {
                     "work".to_string()
                 } else {

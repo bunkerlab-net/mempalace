@@ -428,6 +428,16 @@ impl Dialect {
             (None, lines[0])
         };
 
+        // The encoder produces exactly one (content-only) or two (header +
+        // content) non-empty lines. Anything beyond that means the input has
+        // been hand-edited or concatenated with another AAAK record — fail
+        // fast so the bug surfaces here instead of as silently dropped data.
+        let expected_line_count = if header_opt.is_some() { 2 } else { 1 };
+        assert!(
+            lines.len() == expected_line_count,
+            "decode: aaak must contain only header and content lines"
+        );
+
         // Programmer-error precondition: callers must hand `decode` a
         // well-formed AAAK string. A header-only input (e.g. just
         // `wing|room|date|stem`) would otherwise fall through to
@@ -462,6 +472,14 @@ fn decode_fill_header(header: &str, decoded: &mut DecodedDialect) {
     assert!(
         !parts.is_empty(),
         "decode_fill_header: split must produce at least one part"
+    );
+    // The encoder writes exactly four header positions (`WING|ROOM|DATE|STEM`,
+    // with `?` for empties). A higher count means a stem or wing contained an
+    // unescaped `|` — better to fail loudly than to silently drop the tail.
+    assert!(
+        parts.len() <= 4,
+        "decode_fill_header: expected at most 4 header parts, got {}",
+        parts.len()
     );
 
     // The encoder emits a literal "?" in any of the four header positions
@@ -666,6 +684,30 @@ mod tests {
         // Minimum case: one word yields at least 1 token.
         let tokens = Dialect::count_tokens("hello");
         assert_eq!(tokens, 1, "one word must yield at least 1 token");
+        assert!(tokens > 0);
+    }
+
+    #[test]
+    fn count_tokens_unicode_whitespace() {
+        // `str::split_whitespace` also splits on Unicode separators (em-space
+        // U+2003, non-breaking space U+00A0). A 5-word Unicode-separated
+        // string must produce the same estimate as ASCII spaces would: 5 * 1.3
+        // = 6.5 → 7 (with the half-up rounding `(wc * 13 + 5) / 10`).
+        let text = "alpha\u{2003}beta\u{00a0}gamma\u{2009}delta\u{205f}epsilon";
+        let tokens = Dialect::count_tokens(text);
+        assert_eq!(
+            tokens, 7,
+            "5 unicode-separated words must yield 7 estimated tokens"
+        );
+        assert!(tokens > 0);
+    }
+
+    #[test]
+    fn count_tokens_whitespace_only() {
+        // Whitespace-only input yields 0 words; we floor to 1 token so callers
+        // never see a 0 estimate when budgeting LLM context.
+        let tokens = Dialect::count_tokens("   \t\n  ");
+        assert_eq!(tokens, 1, "whitespace-only input must floor to 1 token");
         assert!(tokens > 0);
     }
 

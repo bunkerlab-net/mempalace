@@ -98,19 +98,18 @@ pub async fn regenerate_closets(
         "regenerate_closets: sample must be <= 1_000_000"
     );
 
-    let drawers = regenerate_closets_fetch_drawers(connection, wing).await?;
-    let limit = if sample > 0 {
-        sample.min(drawers.len())
-    } else {
-        drawers.len()
-    };
+    // Push the sample cap into SQL so we never materialize the entire drawers
+    // table just to throw most rows away. `sample == 0` means "no cap".
+    let sql_limit = if sample > 0 { Some(sample) } else { None };
+    let drawers = regenerate_closets_fetch_drawers(connection, wing, sql_limit).await?;
+    let limit = drawers.len();
 
     // Do not purge upfront: a provider failure mid-batch would otherwise wipe
     // existing closets the user could still rely on. Replacement happens
     // atomically per drawer inside upsert_closet_lines (INSERT OR REPLACE).
 
     let mut stats = RegenerateStats::default();
-    for drawer in drawers.into_iter().take(limit) {
+    for drawer in drawers {
         if dry_run {
             stats.skipped_dry_run += 1;
             continue;
@@ -131,32 +130,17 @@ pub async fn regenerate_closets(
 
 /// Called by `regenerate_closets` to query drawers from the database.
 ///
-/// When `wing` is `Some`, only drawers in that wing are returned.
+/// When `wing` is `Some`, only drawers in that wing are returned. When `limit`
+/// is `Some(n)`, the SQL query caps the result set at `n` rows so the entire
+/// table never has to be materialized client-side just to be truncated.
 /// Rows are ordered by `(filed_at, id)` ascending so processing is deterministic
 /// even when multiple drawers share the same `filed_at` timestamp.
 async fn regenerate_closets_fetch_drawers(
     connection: &Connection,
     wing: Option<&str>,
+    limit: Option<usize>,
 ) -> Result<Vec<DrawerRow>> {
-    let rows = if let Some(wing_filter) = wing {
-        assert!(
-            !wing_filter.is_empty(),
-            "regenerate_closets_fetch_drawers: wing must not be empty"
-        );
-        query_all(
-            connection,
-            "SELECT id, content, wing, room, source_file FROM drawers WHERE wing = ? ORDER BY filed_at, id",
-            (wing_filter,),
-        )
-        .await?
-    } else {
-        query_all(
-            connection,
-            "SELECT id, content, wing, room, source_file FROM drawers ORDER BY filed_at, id",
-            (),
-        )
-        .await?
-    };
+    let rows = regenerate_closets_fetch_drawers_query(connection, wing, limit).await?;
 
     let mut drawers = Vec::with_capacity(rows.len());
     for row in &rows {
@@ -192,6 +176,65 @@ async fn regenerate_closets_fetch_drawers(
     debug_assert!(drawers.iter().all(|drawer| !drawer.source_file.is_empty()));
 
     Ok(drawers)
+}
+
+/// Called by `regenerate_closets_fetch_drawers` to run the parameterized SELECT.
+///
+/// Split out so the parent stays under the 70-line cap; this leaf concentrates
+/// the four-way `(wing?, limit?)` branching that turso requires because each
+/// branch needs a distinct param tuple type.
+async fn regenerate_closets_fetch_drawers_query(
+    connection: &Connection,
+    wing: Option<&str>,
+    limit: Option<usize>,
+) -> Result<Vec<turso::Row>> {
+    // Bind LIMIT as i64 because turso's parameter binding is integer-typed and
+    // SQLite's LIMIT clause expects a signed value. Clamp to i64::MAX so a
+    // pathological `usize` from a 64-bit caller never wraps to a negative.
+    let limit_i64: Option<i64> = limit.map(|count| i64::try_from(count).unwrap_or(i64::MAX));
+
+    match (wing, limit_i64) {
+        (Some(wing_filter), Some(limit_value)) => {
+            assert!(
+                !wing_filter.is_empty(),
+                "regenerate_closets_fetch_drawers_query: wing must not be empty"
+            );
+            query_all(
+                connection,
+                "SELECT id, content, wing, room, source_file FROM drawers WHERE wing = ?1 ORDER BY filed_at, id LIMIT ?2",
+                (wing_filter, limit_value),
+            )
+            .await
+        }
+        (Some(wing_filter), None) => {
+            assert!(
+                !wing_filter.is_empty(),
+                "regenerate_closets_fetch_drawers_query: wing must not be empty"
+            );
+            query_all(
+                connection,
+                "SELECT id, content, wing, room, source_file FROM drawers WHERE wing = ? ORDER BY filed_at, id",
+                (wing_filter,),
+            )
+            .await
+        }
+        (None, Some(limit_value)) => {
+            query_all(
+                connection,
+                "SELECT id, content, wing, room, source_file FROM drawers ORDER BY filed_at, id LIMIT ?1",
+                (limit_value,),
+            )
+            .await
+        }
+        (None, None) => {
+            query_all(
+                connection,
+                "SELECT id, content, wing, room, source_file FROM drawers ORDER BY filed_at, id",
+                (),
+            )
+            .await
+        }
+    }
 }
 
 /// Called by `regenerate_closets` to process one drawer through the LLM and upsert the result.
@@ -235,11 +278,14 @@ async fn regenerate_closets_process_drawer(
         &drawer.source_file, &drawer.wing, &drawer.room,
     );
 
+    // Build a UTF-8-safe preview by chars, not bytes: drawer IDs are ASCII
+    // today but a future schema change could carry multi-byte content, and a
+    // byte slice in the middle of a code point would panic the whole batch.
+    let id_preview: String = drawer.id.chars().take(8).collect();
     let response = provider.classify(SYSTEM_PROMPT, &user_prompt, true)?;
     if response.text.trim().is_empty() {
         return Err(crate::error::Error::Other(format!(
-            "LLM returned empty response for drawer {}",
-            &drawer.id[..8.min(drawer.id.len())]
+            "LLM returned empty response for drawer {id_preview}"
         )));
     }
     let output = regenerate_closets_parse_response(&response.text);
@@ -247,8 +293,7 @@ async fn regenerate_closets_process_drawer(
 
     if compressed.is_empty() {
         return Err(crate::error::Error::Other(format!(
-            "LLM returned empty output for drawer {}",
-            &drawer.id[..8.min(drawer.id.len())]
+            "LLM returned empty output for drawer {id_preview}"
         )));
     }
 
