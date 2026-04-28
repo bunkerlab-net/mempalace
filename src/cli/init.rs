@@ -827,10 +827,14 @@ mod tests {
     #[test]
     fn run_confirm_and_save_writes_entities_json_when_entities_confirmed() {
         // With yes=true and high-confidence people, entities.json must be written.
+        // MEMPALACE_DIR is redirected because add_to_known_entities writes
+        // known_entities.json to config_dir(), which defaults to ~/.local/share/mempalace.
         use crate::palace::entities::DetectedEntity;
         use crate::palace::project_scanner::DetectedDict;
         let temp_dir =
             tempfile::tempdir().expect("must create temp dir for run_confirm_and_save test");
+        let registry_dir =
+            tempfile::tempdir().expect("must create registry dir for run_confirm_and_save test");
         let detected = DetectedDict {
             people: vec![DetectedEntity {
                 name: "Alice".to_string(),
@@ -842,8 +846,10 @@ mod tests {
             projects: vec![],
             uncertain: vec![],
         };
-        run_confirm_and_save(&detected, true, temp_dir.path())
-            .expect("run_confirm_and_save must succeed");
+        temp_env::with_var("MEMPALACE_DIR", Some(registry_dir.path()), || {
+            run_confirm_and_save(&detected, true, temp_dir.path())
+                .expect("run_confirm_and_save must succeed");
+        });
         let entities_path = temp_dir.path().join("entities.json");
         assert!(entities_path.exists(), "entities.json must be written");
         let content =
@@ -853,6 +859,11 @@ mod tests {
             "entities.json must name the confirmed person"
         );
         assert!(!content.is_empty());
+        // Pair assertion: known_entities.json must be in the isolated registry dir.
+        assert!(
+            registry_dir.path().join("known_entities.json").exists(),
+            "known_entities.json must land in the redirected MEMPALACE_DIR"
+        );
     }
 
     #[test]
@@ -885,9 +896,13 @@ mod tests {
     #[test]
     fn run_confirm_and_save_writes_both_people_and_projects() {
         // When both people and projects are confirmed, both categories appear in entities.json.
+        // MEMPALACE_DIR is redirected because add_to_known_entities writes
+        // known_entities.json to config_dir(), which defaults to ~/.local/share/mempalace.
         use crate::palace::entities::DetectedEntity;
         use crate::palace::project_scanner::DetectedDict;
         let temp_dir = tempfile::tempdir().expect("must create temp dir for both-categories test");
+        let registry_dir =
+            tempfile::tempdir().expect("must create registry dir for both-categories test");
         let detected = DetectedDict {
             people: vec![DetectedEntity {
                 name: "Alice".to_string(),
@@ -905,8 +920,10 @@ mod tests {
             }],
             uncertain: vec![],
         };
-        run_confirm_and_save(&detected, true, temp_dir.path())
-            .expect("run_confirm_and_save must succeed");
+        temp_env::with_var("MEMPALACE_DIR", Some(registry_dir.path()), || {
+            run_confirm_and_save(&detected, true, temp_dir.path())
+                .expect("run_confirm_and_save must succeed");
+        });
         let entities_path = temp_dir.path().join("entities.json");
         assert!(entities_path.exists(), "entities.json must be written");
         let content =

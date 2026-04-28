@@ -1470,21 +1470,34 @@ mod tests {
     #[tokio::test]
     async fn run_with_json_returns_err_for_unknown_hook() {
         // An unrecognised hook name must return Err with the name in the message.
-        let result = run_with_json("bad-hook", "claude-code", json!({})).await;
-        assert!(result.is_err());
-        let error_text = result
-            .expect_err("must be Err for unknown hook")
-            .to_string();
+        // MEMPALACE_DIR is redirected because run_with_json creates hook_state before
+        // dispatching, so the unknown-hook error path still touches the filesystem.
+        let dir = tempfile::tempdir().expect("must create temp dir");
+        let error_text = temp_env::async_with_vars(
+            [("MEMPALACE_DIR", Some(dir.path().to_str().expect("utf-8")))],
+            async {
+                run_with_json("bad-hook", "claude-code", json!({}))
+                    .await
+                    .expect_err("must be Err for unknown hook")
+                    .to_string()
+            },
+        )
+        .await;
         assert!(error_text.contains("bad-hook"), "{error_text}");
     }
 
     #[tokio::test]
     async fn run_with_json_dispatches_session_start_successfully() {
         // session-start with a valid claude-code harness must return Ok.
-        let result = run_with_json(
-            "session-start",
-            "claude-code",
-            json!({"session_id": "test-sid"}),
+        // MEMPALACE_DIR is redirected because run_with_json creates hook_state on disk.
+        let dir = tempfile::tempdir().expect("must create temp dir");
+        let result = temp_env::async_with_vars(
+            [("MEMPALACE_DIR", Some(dir.path().to_str().expect("utf-8")))],
+            run_with_json(
+                "session-start",
+                "claude-code",
+                json!({"session_id": "test-sid"}),
+            ),
         )
         .await;
         assert!(result.is_ok(), "session-start must succeed: {result:?}");
@@ -1493,14 +1506,26 @@ mod tests {
     #[tokio::test]
     async fn run_with_json_dispatches_precompact_successfully() {
         // precompact with no transcript must return Ok (logs and exits early).
-        let result = run_with_json("precompact", "claude-code", json!({"session_id": "sid"})).await;
+        // MEMPALACE_DIR is redirected because run_with_json creates hook_state on disk.
+        let dir = tempfile::tempdir().expect("must create temp dir");
+        let result = temp_env::async_with_vars(
+            [("MEMPALACE_DIR", Some(dir.path().to_str().expect("utf-8")))],
+            run_with_json("precompact", "claude-code", json!({"session_id": "sid"})),
+        )
+        .await;
         assert!(result.is_ok(), "precompact must succeed: {result:?}");
     }
 
     #[tokio::test]
     async fn run_with_json_dispatches_stop_successfully() {
         // stop with exchange_count=0 must return Ok (exits at the threshold check).
-        let result = run_with_json("stop", "claude-code", json!({"session_id": "sid"})).await;
+        // MEMPALACE_DIR is redirected because run_with_json creates hook_state on disk.
+        let dir = tempfile::tempdir().expect("must create temp dir");
+        let result = temp_env::async_with_vars(
+            [("MEMPALACE_DIR", Some(dir.path().to_str().expect("utf-8")))],
+            run_with_json("stop", "claude-code", json!({"session_id": "sid"})),
+        )
+        .await;
         assert!(result.is_ok(), "stop must succeed: {result:?}");
     }
 
