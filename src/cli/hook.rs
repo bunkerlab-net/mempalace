@@ -311,13 +311,20 @@ fn hook_stop_save_blocking(
 }
 
 /// Precompact hook: synchronously mine the transcript, then allow compaction.
+///
+/// Note: precompact does **not** call `hook_ingest_transcript` because
+/// `hook_spawn_mine_sync` already mines the same directory synchronously
+/// (the parent of the transcript when `MEMPAL_DIR` is unset, otherwise the
+/// configured override). The previous implementation called both, which
+/// raced two `mempalace mine` processes against the same target — the
+/// background ingest had no way to influence compaction timing, while the
+/// sync mine is the one that must finish before compaction proceeds.
 fn hook_precompact(input: &HookInput, state_dir: &Path) {
     assert!(!input.session_id.is_empty());
     hook_log(
         state_dir,
         &format!("PRE-COMPACT triggered for session {}", input.session_id),
     );
-    hook_ingest_transcript(state_dir, &input.transcript_path);
     hook_spawn_mine_sync(state_dir, input.transcript_path.to_str().unwrap_or(""));
     hook_output(&json!({}));
 }
@@ -543,8 +550,6 @@ fn hook_extract_themes(messages: &[String]) -> Vec<String> {
 }
 
 /// Stopwords for theme extraction — common English function words.
-// TigerStyle exemption: declarative data list, not logic.
-#[allow(clippy::too_many_lines)]
 fn hook_theme_stopwords() -> std::collections::HashSet<&'static str> {
     [
         "the", "and", "for", "are", "but", "not", "you", "all", "any", "can", "had", "her", "was",
