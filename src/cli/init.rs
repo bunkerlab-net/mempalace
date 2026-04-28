@@ -442,9 +442,11 @@ fn run_persist_lang(lang: &[String]) {
     }
 }
 
-/// Append `mempalace.yaml` and `entities.json` to the `.gitignore` in
-/// `directory` if the directory is the root of a git worktree and the
-/// entries are not already present.
+/// Append `/mempalace.yaml` and `/entities.json` (anchored to repo root) to
+/// the `.gitignore` in `directory` if the directory is the root of a git
+/// worktree and the entries are not already present. The dedup check treats
+/// anchored and unanchored variants (e.g. `mempalace.yaml`) as equivalent so
+/// we never append a duplicate rule.
 ///
 /// Called by [`run`] after config is written. Non-fatal: errors are printed
 /// to stderr and do not abort init.
@@ -467,11 +469,19 @@ fn run_gitignore_protect(directory: &Path) {
         existing.len() < 10 * 1024 * 1024,
         "run_gitignore_protect: .gitignore must be < 10 MB"
     );
-    let entries = ["mempalace.yaml", "entities.json"];
+    // Anchored patterns: these files only exist at the repo root, so a leading
+    // slash makes the rule unambiguous and also lets us deduplicate against
+    // unanchored variants a user may have written previously.
+    let entries = ["/mempalace.yaml", "/entities.json"];
     let mut appended: Vec<&str> = Vec::with_capacity(entries.len());
     let mut additions = String::new();
     for entry in entries {
-        if !existing.lines().any(|line| line.trim() == entry) {
+        let unanchored = entry.trim_start_matches('/');
+        let already_present = existing.lines().any(|line| {
+            let trimmed = line.trim();
+            trimmed == entry || trimmed == unanchored
+        });
+        if !already_present {
             additions.push_str(entry);
             additions.push('\n');
             appended.push(entry);
@@ -975,6 +985,37 @@ mod tests {
     }
 
     #[test]
+    fn gitignore_protect_dedupes_anchored_existing_entries() {
+        // Regression: when .gitignore already contains the rooted variants
+        // (`/mempalace.yaml`, `/entities.json`), run_gitignore_protect must
+        // recognise them as equivalent to the unanchored names and not append
+        // a redundant rule.
+        let dir = tempfile::tempdir().expect("tempdir must succeed");
+        std::fs::create_dir(dir.path().join(".git")).expect("must create .git dir");
+        std::fs::write(
+            dir.path().join(".gitignore"),
+            "/mempalace.yaml\n/entities.json\n",
+        )
+        .expect("must write .gitignore");
+
+        run_gitignore_protect(dir.path());
+
+        let contents =
+            std::fs::read_to_string(dir.path().join(".gitignore")).expect("must read .gitignore");
+        let yaml_count = contents.matches("mempalace.yaml").count();
+        let json_count = contents.matches("entities.json").count();
+        assert_eq!(
+            yaml_count, 1,
+            "anchored mempalace.yaml must not be duplicated"
+        );
+        // Pair assertion: anchored entities.json must also stay unique.
+        assert_eq!(
+            json_count, 1,
+            "anchored entities.json must not be duplicated"
+        );
+    }
+
+    #[test]
     fn gitignore_protect_skips_non_git_directory() {
         // run_gitignore_protect must not create or modify .gitignore when there
         // is no .git directory (i.e., not a git worktree root).
@@ -1073,6 +1114,10 @@ mod tests {
 
     // --- run_persist_lang: save error branch ---
 
+    // Uses `std::os::unix::fs::PermissionsExt` to make the config directory
+    // read-only — Windows has no equivalent permission model, so gate the
+    // test to Unix targets to keep cross-platform builds compiling.
+    #[cfg(unix)]
     #[test]
     fn run_persist_lang_does_not_panic_when_save_fails() {
         // When the config directory is read-only, config.save() returns Err.
