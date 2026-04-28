@@ -36,10 +36,10 @@
     "instruction": "Comprima en español. Guiones entre palabras, pipes entre conceptos. Elimine artículos y palabras de relleno. Mantenga nombres propios y números exactos."
   },
   "regex": {
-    "topic_pattern": "[A-ZÁ-Ú][a-zá-ú]{2,}|[A-Za-zÁ-ú]{3,}",
+    "topic_pattern": "[A-ZÁÉÍÓÚÑÜ][a-záéíóúñü]{2,}|[A-Za-z0-9_ÁÉÍÓÚÑÜáéíóúñü]{2,}",
     "stop_words": "el la los las un una unos unas de del al en con por para su sus mi mis tu tus es son está están fue ser estar haber sido como pero más muy también todo todos toda todas este esta estos estas ese esa esos esas que quien cual donde cuando porque aunque sin",
     "quote_pattern": "\"([^\"]{10,200})\"|«([^»]{10,200})»",
-    "action_pattern": "(?:construido|corregido|escrito|añadido|enviado|medido|probado|revisado|creado|eliminado|actualizado|configurado|desplegado|migrado)\\s+[\\wÁÉÍÓÚÑá-úñ\\s]{3,30}"
+    "action_pattern": "(?:construido|corregido|escrito|añadido|enviado|medido|probado|revisado|creado|eliminado|actualizado|configurado|desplegado|migrado)\\s+[\\wÁÉÍÓÚÑÜáéíóúñü\\s]{3,30}"
   },
   "entity": {
     "candidate_pattern": "[A-ZÁÉÍÓÚÑÜ][a-záéíóúñü]{1,19}",
