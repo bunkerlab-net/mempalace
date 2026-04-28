@@ -350,20 +350,25 @@ impl Dialect {
                 || !meta.room.is_empty()
                 || !meta.date.is_empty())
         {
-            let stem = if meta.source_file.is_empty() {
-                "?"
+            let stem_raw = if meta.source_file.is_empty() {
+                ""
             } else {
                 Path::new(meta.source_file)
                     .file_stem()
                     .and_then(|stem| stem.to_str())
-                    .unwrap_or("?")
+                    .unwrap_or("")
             };
+            // Encode each field so a `|`, `?`, or newline in metadata cannot
+            // corrupt the header layout on round-trip. Without escaping a
+            // filename like `quarter|q1.md` would split into 5 header parts
+            // and trip `decode_fill_header`'s arity assertion. Decoder pairs
+            // with `header_field_decode`.
             let header = format!(
                 "{}|{}|{}|{}",
-                if meta.wing.is_empty() { "?" } else { meta.wing },
-                if meta.room.is_empty() { "?" } else { meta.room },
-                if meta.date.is_empty() { "?" } else { meta.date },
-                stem,
+                header_field_encode(meta.wing),
+                header_field_encode(meta.room),
+                header_field_encode(meta.date),
+                header_field_encode(stem_raw),
             );
             lines.push(header);
         }
@@ -482,22 +487,99 @@ fn decode_fill_header(header: &str, decoded: &mut DecodedDialect) {
         parts.len()
     );
 
-    // The encoder emits a literal "?" in any of the four header positions
-    // when the corresponding metadata field was empty (see the header line
-    // in `compress`). Translating "?" back to "" here makes round-trips
-    // through `compress` → `decode` lossless: a missing field stays
-    // missing rather than re-surfacing as a synthetic question mark.
-    let unsentinel = |part: &&str| -> String {
-        if *part == "?" {
-            String::new()
-        } else {
-            (*part).to_string()
+    // `header_field_decode` reverses `header_field_encode`: `?` → empty,
+    // and the five percent-escapes (`%25`, `%7C`, `%0A`, `%0D`, `%3F`) are
+    // turned back into `%`, `|`, newline, CR, and `?` respectively. Other
+    // `%XX` sequences pass through verbatim so a stem like `30%discount`
+    // written by an older build still decodes to its literal form.
+    decoded.wing = parts
+        .first()
+        .map(|part| header_field_decode(part))
+        .unwrap_or_default();
+    decoded.room = parts
+        .get(1)
+        .map(|part| header_field_decode(part))
+        .unwrap_or_default();
+    decoded.date = parts
+        .get(2)
+        .map(|part| header_field_decode(part))
+        .unwrap_or_default();
+    decoded.stem = parts
+        .get(3)
+        .map(|part| header_field_decode(part))
+        .unwrap_or_default();
+}
+
+/// Percent-encode an AAAK header field so it survives round-tripping.
+///
+/// Replaces `%`, `|`, newline, and CR with their `%XX` escapes. Empty input
+/// emits the `?` sentinel; a literal `?` field is escaped to `%3F` so it is
+/// not later mistaken for empty by `header_field_decode`.
+///
+/// Encoding `%` first prevents double-encoding the escape introducer.
+fn header_field_encode(field: &str) -> String {
+    if field.is_empty() {
+        return "?".to_string();
+    }
+    if field == "?" {
+        return "%3F".to_string();
+    }
+    let mut out = String::with_capacity(field.len());
+    for character in field.chars() {
+        match character {
+            '%' => out.push_str("%25"),
+            '|' => out.push_str("%7C"),
+            '\n' => out.push_str("%0A"),
+            '\r' => out.push_str("%0D"),
+            _ => out.push(character),
         }
-    };
-    decoded.wing = parts.first().map(unsentinel).unwrap_or_default();
-    decoded.room = parts.get(1).map(unsentinel).unwrap_or_default();
-    decoded.date = parts.get(2).map(unsentinel).unwrap_or_default();
-    decoded.stem = parts.get(3).map(unsentinel).unwrap_or_default();
+    }
+    out
+}
+
+/// Inverse of [`header_field_encode`].
+///
+/// `?` decodes to empty; the five known `%XX` escapes decode to their literal
+/// characters; any other `%XX` (or a trailing `%` with too few following
+/// characters) is preserved verbatim so legacy un-escaped data containing
+/// percent signs round-trips unchanged.
+fn header_field_decode(field: &str) -> String {
+    if field == "?" {
+        return String::new();
+    }
+    let bytes = field.as_bytes();
+    let mut out = String::with_capacity(field.len());
+    let mut index: usize = 0;
+    while index < bytes.len() {
+        // Compare on raw bytes so a `%` followed by a multi-byte UTF-8 lead
+        // byte cannot trigger a mid-codepoint `&str` slice panic.
+        if bytes[index] == b'%' && index + 3 <= bytes.len() {
+            let triple = [bytes[index], bytes[index + 1], bytes[index + 2]];
+            let decoded_char = match &triple {
+                b"%25" => Some('%'),
+                b"%7C" => Some('|'),
+                b"%0A" => Some('\n'),
+                b"%0D" => Some('\r'),
+                b"%3F" => Some('?'),
+                _ => None,
+            };
+            if let Some(character) = decoded_char {
+                out.push(character);
+                index += 3;
+                continue;
+            }
+        }
+        // Unknown escape (or plain char): advance one full UTF-8 char so we
+        // never split a multi-byte sequence mid-way.
+        let remainder = &field[index..];
+        if let Some(character) = remainder.chars().next() {
+            out.push(character);
+            index += character.len_utf8();
+        } else {
+            break;
+        }
+    }
+    out
 }
 
 /// Called by [`Dialect::decode`] to populate content fields of `decoded`.
@@ -709,6 +791,88 @@ mod tests {
         let tokens = Dialect::count_tokens("   \t\n  ");
         assert_eq!(tokens, 1, "whitespace-only input must floor to 1 token");
         assert!(tokens > 0);
+    }
+
+    // ── header field escape/unescape ────────────────────────────────
+
+    #[test]
+    fn header_field_encode_empty_emits_sentinel() {
+        // Empty fields must serialize as the `?` sentinel so decoders can
+        // distinguish "absent" from "literal value".
+        assert_eq!(header_field_encode(""), "?");
+    }
+
+    #[test]
+    fn header_field_encode_literal_question_mark_disambiguates() {
+        // A field whose value really is `"?"` must not be mistaken for empty
+        // on the way back; encode it as `%3F`.
+        assert_eq!(header_field_encode("?"), "%3F");
+        assert_eq!(header_field_decode("%3F"), "?");
+    }
+
+    #[test]
+    fn header_field_encode_escapes_pipe_and_newlines() {
+        // The four characters that would corrupt the header layout — `|`,
+        // newline, CR, and the percent introducer itself — must all be
+        // percent-encoded so split-on-`|` stays correct.
+        assert_eq!(header_field_encode("a|b"), "a%7Cb");
+        assert_eq!(header_field_encode("a\nb"), "a%0Ab");
+        assert_eq!(header_field_encode("a\rb"), "a%0Db");
+        assert_eq!(header_field_encode("100%"), "100%25");
+    }
+
+    #[test]
+    fn header_field_decode_handles_unknown_percent_escapes() {
+        // Unknown `%XX` sequences must pass through untouched so legacy
+        // un-escaped data containing literal `%` (e.g. a stem like
+        // `30%discount`) still round-trips through the new decoder.
+        assert_eq!(header_field_decode("30%XX"), "30%XX");
+        assert_eq!(header_field_decode("trailing%"), "trailing%");
+        assert_eq!(header_field_decode("short%2"), "short%2");
+    }
+
+    #[test]
+    fn header_field_round_trip_preserves_special_chars() {
+        // The canonical correctness test: encode → decode is identity for
+        // any string, including ones with delimiters, sentinels, percent
+        // signs, multi-byte UTF-8, and CR/LF.
+        for sample in [
+            "projects",
+            "wing|with|pipes",
+            "report%2Bdraft",
+            "?",
+            "line one\nline two",
+            "alpha\rbeta",
+            "100% complete",
+            "café\u{2003}süß",
+        ] {
+            let encoded = header_field_encode(sample);
+            let decoded = header_field_decode(&encoded);
+            assert_eq!(
+                decoded, sample,
+                "round-trip must preserve {sample:?} (encoded as {encoded:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn decode_roundtrip_preserves_pipe_in_stem() {
+        // A filename with a literal `|` would previously over-split the
+        // header and trip `decode_fill_header`'s arity assertion. With
+        // percent-encoding the stem round-trips losslessly.
+        let dialect = Dialect::empty();
+        let meta = CompressMetadata {
+            source_file: "/notes/quarter|q1.md",
+            wing: "projects",
+            room: "planning",
+            date: "2025-01-10",
+        };
+        let aaak = dialect.compress("Some content with enough words to compress", Some(&meta));
+        let decoded = Dialect::decode(&aaak);
+        assert_eq!(decoded.wing, "projects");
+        assert_eq!(decoded.room, "planning");
+        assert_eq!(decoded.date, "2025-01-10");
+        assert_eq!(decoded.stem, "quarter|q1");
     }
 
     // ── decode ───────────────────────────────────────────────────────
