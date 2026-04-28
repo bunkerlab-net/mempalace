@@ -52,7 +52,11 @@ fn run_compress_row_preview(
     let decoded = Dialect::decode(compressed);
     println!("--- Drawer {} ---", &id[..8.min(id.len())]);
     println!("{compressed}");
-    if !decoded.wing.is_empty() {
+    if !decoded.wing.is_empty()
+        || !decoded.room.is_empty()
+        || !decoded.date.is_empty()
+        || !decoded.stem.is_empty()
+    {
         println!(
             "  Source: {}/{}/{}/{}",
             decoded.wing, decoded.room, decoded.date, decoded.stem
