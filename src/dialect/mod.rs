@@ -139,9 +139,25 @@ fn extract_key_sentence(text: &str) -> String {
     // Prefer a verbatim quoted string when the current locale defines a quote
     // pattern. The regex is compiled per call so a runtime locale switch is
     // honored — caching by locale would freeze whatever was active at first use.
+    let raw = extract_key_sentence_raw(text);
+    // Pipe is the AAAK field separator — a literal `|` in the quote would
+    // corrupt the encoded line and break `decode_fill_content`. Strip
+    // rather than escape: the format has no in-band escape mechanism
+    // today, and a lossy substitution keeps the grammar single-byte and
+    // round-trip-safe.
+    raw.replace('|', "/")
+}
+
+/// Resolve the unfiltered key sentence — caller is responsible for sanitizing
+/// AAAK-reserved characters before encoding.
+fn extract_key_sentence_raw(text: &str) -> String {
     if let Some(re) = current_locale_quote_re()
         && let Some(cap) = re.captures(text)
-        && let Some(matched) = cap.get(1)
+        // Spanish (and potentially other locales) declare two alternations in
+        // `quote_pattern` — one for `"..."` and one for `«...»` — so the
+        // matching capture may land in either group. Fall through to group 2
+        // when group 1 is absent so the second alternation is honored.
+        && let Some(matched) = cap.get(1).or_else(|| cap.get(2))
     {
         let quoted = matched.as_str().trim();
         if quoted.len() > 10 {
@@ -324,9 +340,15 @@ impl Dialect {
 
         let mut lines = Vec::new();
 
-        // Header line (if metadata available).
+        // Header line (if any metadata field is populated). Previously the
+        // condition only consulted `source_file` and `wing`, dropping the
+        // header — and therefore `room` and `date` — whenever the caller
+        // passed them but left the other two empty.
         if let Some(meta) = metadata
-            && (!meta.source_file.is_empty() || !meta.wing.is_empty())
+            && (!meta.source_file.is_empty()
+                || !meta.wing.is_empty()
+                || !meta.room.is_empty()
+                || !meta.date.is_empty())
         {
             let stem = if meta.source_file.is_empty() {
                 "?"
@@ -403,6 +425,16 @@ impl Dialect {
         } else {
             (None, lines[0])
         };
+
+        // Programmer-error precondition: callers must hand `decode` a
+        // well-formed AAAK string. A header-only input (e.g. just
+        // `wing|room|date|stem`) would otherwise fall through to
+        // `decode_fill_content` and silently produce garbage — assert here
+        // so the bug surfaces at the boundary instead of downstream.
+        assert!(
+            content.starts_with("0:"),
+            "decode: content line must start with `0:`; got {content:?}"
+        );
 
         let mut result = DecodedDialect::default();
         if let Some(header) = header_opt {
@@ -817,10 +849,17 @@ mod tests {
         // We craft an AAAK content string with a deliberate empty segment.
         let aaak_with_empty_segment = "0:ALC|project||excite";
         let decoded = Dialect::decode(aaak_with_empty_segment);
-        // The empty segment between `||` must not appear in any decoded field.
+        // The empty pipe segment must be skipped entirely: no quote field
+        // populated, no flags fabricated. The previous assertion was
+        // tautological (`a || !a`) and would have passed even if the
+        // decoder synthesized garbage from the empty segment.
         assert!(
-            !decoded.quote.is_empty() || decoded.quote.is_empty(),
-            "decode must not panic on empty pipe segment"
+            decoded.quote.is_empty(),
+            "empty pipe segment must not populate the quote field"
+        );
+        assert!(
+            decoded.flags.is_empty(),
+            "empty pipe segment must not produce flags"
         );
         // "excite" is the emotion (not empty, lowercase-leading).
         assert!(
