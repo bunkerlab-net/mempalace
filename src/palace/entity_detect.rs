@@ -264,6 +264,18 @@ fn extract_candidates_stop_words() -> HashSet<&'static str> {
     stops
 }
 
+/// Return `true` when `pattern` references characters outside the ASCII range.
+///
+/// Used by [`extract_candidates`] to skip locale `candidate_patterns` that
+/// would overlap with `SINGLE_RE` (the ASCII path). A pattern containing
+/// any non-ASCII byte — literal accented letters or unicode escapes
+/// (`\u{0900}`, `\\u0900`) — adds coverage `SINGLE_RE` cannot provide and
+/// is worth running; an all-ASCII pattern duplicates `SINGLE_RE` matches
+/// and would double-count every Latin candidate.
+fn pattern_targets_non_ascii(pattern: &str) -> bool {
+    !pattern.is_ascii() || pattern.contains("\\u")
+}
+
 /// Extract capitalized-word candidates from `text`, filtered by stop words and a
 /// minimum frequency of 3 occurrences.  Returns a map of candidate name to count.
 ///
@@ -303,9 +315,17 @@ fn extract_candidates(text: &str, patterns: &EntityPatterns) -> HashMap<String, 
         }
     }
 
-    // Locale-specific single-word patterns capture non-Latin scripts (Devanagari,
-    // CJK, Cyrillic, etc.) whose characters fall outside SINGLE_RE's ASCII range.
+    // Locale-specific single-word patterns capture non-Latin scripts
+    // (Devanagari, CJK, Cyrillic, etc.) whose characters fall outside
+    // SINGLE_RE's ASCII range. Patterns that contain only ASCII characters
+    // (e.g. English `[A-Z][a-z]{1,19}`) overlap with SINGLE_RE and would
+    // double-count every Latin name; guard with `pattern_targets_non_ascii`
+    // so each locale's `candidate_pattern` only runs when it actually adds
+    // coverage SINGLE_RE cannot provide.
     for pattern in &patterns.candidate_patterns {
+        if !pattern_targets_non_ascii(pattern) {
+            continue;
+        }
         if let Ok(re) = Regex::new(pattern) {
             for cap in re.captures_iter(text) {
                 // Some locale patterns lack an explicit capture group (e.g. CJK
