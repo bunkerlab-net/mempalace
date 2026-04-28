@@ -245,11 +245,35 @@ async fn diary_ingest_file_purge_drawer(connection: &Connection, drawer_id: &str
         !drawer_id.contains('%') && !drawer_id.contains('/'),
         "diary_ingest_file_purge_drawer: drawer_id must not contain wildcards or slashes"
     );
+    // Mirror `dedup_delete_drawer_inner`: clean every table that can hold a
+    // back-reference to this drawer id. Without these cleanups a force
+    // re-ingest could leave stale `compressed`/`triples`/`explicit_tunnels`
+    // rows alongside a fresh drawer row with the same id, silently
+    // contaminating closet boost lookups and KG provenance.
+    //
+    // The caller (`diary_ingest_file_replace`) wraps this function plus the
+    // follow-up `add_drawer` in a single `BEGIN`/`COMMIT`, so all five
+    // statements + the insert succeed or roll back together.
     connection
         .execute("DELETE FROM drawers WHERE id = ?", (drawer_id,))
         .await?;
     connection
         .execute("DELETE FROM drawer_words WHERE drawer_id = ?", (drawer_id,))
+        .await?;
+    connection
+        .execute("DELETE FROM compressed WHERE id = ?", (drawer_id,))
+        .await?;
+    connection
+        .execute(
+            "UPDATE triples SET source_drawer_id = NULL WHERE source_drawer_id = ?",
+            (drawer_id,),
+        )
+        .await?;
+    connection
+        .execute(
+            "DELETE FROM explicit_tunnels WHERE source_drawer_id = ? OR target_drawer_id = ?",
+            (drawer_id, drawer_id),
+        )
         .await?;
     Ok(())
 }
