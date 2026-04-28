@@ -295,11 +295,8 @@ fn onboarding_ask_wings(mode: &str) -> Result<Vec<String>> {
         Some(""),
     )?;
 
-    let wings: Vec<String> = if input.is_empty() {
-        defaults
-            .iter()
-            .map(|wing_str| (*wing_str).to_string())
-            .collect()
+    let parsed: Vec<String> = if input.is_empty() {
+        Vec::new()
     } else {
         input
             .split(',')
@@ -308,7 +305,22 @@ fn onboarding_ask_wings(mode: &str) -> Result<Vec<String>> {
             .collect()
     };
 
-    assert!(!wings.is_empty(), "wings list must not be empty");
+    // Fall back to the defaults when the user typed only whitespace or commas.
+    // The earlier `assert!` would have panicked here — onboarding is interactive,
+    // so a malformed input must lead to a usable wings list, not a crash.
+    let wings: Vec<String> = if parsed.is_empty() {
+        defaults
+            .iter()
+            .map(|wing_str| (*wing_str).to_string())
+            .collect()
+    } else {
+        parsed
+    };
+
+    assert!(
+        !wings.is_empty(),
+        "wings list must be non-empty after fallback to defaults"
+    );
     Ok(wings)
 }
 
