@@ -369,10 +369,17 @@ async fn diary_ingest_file_purge_orphans(
     if current_count >= previous_count {
         return Ok(());
     }
+    // All orphan deletions must succeed or fail together so a mid-loop
+    // error does not leave the palace with a subset of stale drawers removed.
+    connection.execute("BEGIN", ()).await?;
     for stale_index in current_count..previous_count {
         let drawer_id = diary_ingest_drawer_id(wing, agent, source_path, date_prefix, stale_index);
-        diary_ingest_file_purge_drawer(connection, &drawer_id).await?;
+        if let Err(error) = diary_ingest_file_purge_drawer(connection, &drawer_id).await {
+            let _ = connection.execute("ROLLBACK", ()).await;
+            return Err(error);
+        }
     }
+    connection.execute("COMMIT", ()).await?;
     Ok(())
 }
 
@@ -397,9 +404,8 @@ async fn diary_ingest_file_purge_drawer(connection: &Connection, drawer_id: &str
     // rows alongside a fresh drawer row with the same id, silently
     // contaminating closet boost lookups and KG provenance.
     //
-    // The caller (`diary_ingest_file_replace`) wraps this function plus the
-    // follow-up `add_drawer` in a single `BEGIN`/`COMMIT`, so all five
-    // statements + the insert succeed or roll back together.
+    // Callers are responsible for wrapping this function in a transaction so
+    // all five DELETE/UPDATE statements succeed or roll back together.
     connection
         .execute("DELETE FROM drawers WHERE id = ?", (drawer_id,))
         .await?;
