@@ -1,7 +1,8 @@
 //! Ingest on-disk markdown diary files into the palace.
 //!
 //! Diary files must be named `YYYY-MM-DD*.md`. Each `## ` section header
-//! inside the file becomes a separate drawer filed under `room = "daily"`.
+//! inside the file becomes a separate drawer filed under `room = "diary"`,
+//! matching the room name `tool_diary_read` filters on.
 //! A per-file cursor stored in the config dir prevents re-ingesting sections
 //! that were already processed on a previous run.
 
@@ -40,7 +41,7 @@ struct FileState {
 /// Ingest all diary files from `diary_dir` into the palace.
 ///
 /// Only files named `YYYY-MM-DD*.md` are processed. New sections discovered
-/// since the last run are filed as drawers under `wing`/`"daily"`. Passing
+/// since the last run are filed as drawers under `wing`/`"diary"`. Passing
 /// `force = true` re-ingests all sections regardless of cursor state.
 pub async fn ingest_diaries(
     connection: &Connection,
@@ -207,7 +208,10 @@ async fn diary_ingest_file(
             &DrawerParams {
                 id: &drawer_id,
                 wing,
-                room: "daily",
+                // Must match the room filter used by `tool_diary_read` in
+                // src/mcp/tools.rs (`WHERE room = 'diary'`); the previous
+                // value `"daily"` made ingested entries invisible to readers.
+                room: "diary",
                 content: &content,
                 source_file: source_path.as_ref(),
                 chunk_index: index,
