@@ -41,10 +41,19 @@ const _: () = assert!(CLOSET_BOOST_FALLBACK < CLOSET_BOOSTS[4]);
 ///
 /// Called after LLM-driven or regex-driven closet generation for a drawer.
 /// `lines` holds the full generated text (topics, quotes, summary).
+///
+/// `source_path` must be the same path string stored on the drawer row
+/// (`drawers.source_file`) and the same value passed to
+/// [`search_closet_boost`] as a candidate. The two sides match by exact
+/// string equality on the `compressed.source_file` column, so a basename
+/// here would silently break boost lookup against a full-path search hit.
+/// The parameter keeps the underlying column name (`source_file`) only at
+/// the SQL boundary; the API uses `source_path` to make the contract
+/// explicit at every call site.
 pub async fn upsert_closet_lines(
     connection: &Connection,
     drawer_id: &str,
-    source_file: &str,
+    source_path: &str,
     lines: &str,
 ) -> Result<()> {
     assert!(
@@ -59,7 +68,7 @@ pub async fn upsert_closet_lines(
     connection
         .execute(
             "INSERT OR REPLACE INTO compressed (id, content, source_file) VALUES (?, ?, ?)",
-            (drawer_id, lines, source_file),
+            (drawer_id, lines, source_path),
         )
         .await?;
 
