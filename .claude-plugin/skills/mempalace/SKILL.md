@@ -56,9 +56,11 @@ via MCP tools or the `mempalace` CLI. No cloud services or API keys required.
     mempalace_diary_write(content, date?)    -- write a diary entry
     mempalace_diary_read(date?, wing?)       -- read diary entries
 
-### Graph stats
+### Palace topology
 
-    mempalace_graph_stats()    -- connected components, clustering
+    mempalace_graph_stats()    -- room/tunnel/wing-edge counts and connectivity
+                                  (distinct from `mempalace_kg_stats` above,
+                                   which counts knowledge-graph triples)
 
 ## Slash Commands
 
