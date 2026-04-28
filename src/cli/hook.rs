@@ -743,6 +743,9 @@ fn hook_spawn_mine_sync(state_dir: &Path, transcript_path: &str) {
 ///
 /// The transcript's parent directory is always mined as a conversation source so
 /// the current session's messages are captured even before the stop hook fires.
+/// Writes the child PID to `mine.pid` so the subsequent `hook_maybe_auto_ingest`
+/// call sees the in-flight mine via [`hook_mine_already_running`] and does not
+/// spawn a duplicate mine for the same directory.
 fn hook_ingest_transcript(state_dir: &Path, transcript_path: &Path) {
     if !transcript_path.is_file() {
         return;
@@ -752,6 +755,13 @@ fn hook_ingest_transcript(state_dir: &Path, transcript_path: &Path) {
     };
     // Skip empty or trivially small files — they cannot contain useful messages.
     if meta.len() < 100 {
+        return;
+    }
+    if hook_mine_already_running(state_dir) {
+        hook_log(
+            state_dir,
+            "Skipping transcript ingest: mine already running",
+        );
         return;
     }
     let Some(parent) = transcript_path.parent() else {
@@ -779,7 +789,10 @@ fn hook_ingest_transcript(state_dir: &Path, transcript_path: &Path) {
         .stdout(std::process::Stdio::from(log_file))
         .stderr(std::process::Stdio::from(log_copy))
         .spawn();
-    if result.is_ok() {
+    if let Ok(child) = result {
+        // Share the same pid file used by hook_spawn_mine_bg so the auto-ingest
+        // call right after this sees the in-flight mine and skips its own spawn.
+        let _ = std::fs::write(state_dir.join("mine.pid"), child.id().to_string());
         hook_log(
             state_dir,
             &format!("Transcript ingest started: {}", transcript_path.display()),
