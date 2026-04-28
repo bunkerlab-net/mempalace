@@ -202,12 +202,20 @@ async fn regenerate_closets_process_drawer(
         "regenerate_closets_process_drawer: content must not be empty"
     );
 
-    let truncated = if drawer.content.len() > MAX_CONTENT_CHARS {
-        let mut end = MAX_CONTENT_CHARS;
-        while end > 0 && !drawer.content.is_char_boundary(end) {
-            end -= 1;
-        }
-        &drawer.content[..end]
+    // Truncate to MAX_CONTENT_CHARS Unicode scalar values, not bytes — the
+    // constant's name promises chars, and a 4-byte emoji must count as one
+    // unit, not four. `char_indices().nth(n)` gives the byte offset of the
+    // n-th char's start, falling back to the full length when the string is
+    // shorter than the limit (in which case the slice is the whole string).
+    let truncated_owned: String;
+    let truncated: &str = if drawer.content.chars().count() > MAX_CONTENT_CHARS {
+        let end = drawer
+            .content
+            .char_indices()
+            .nth(MAX_CONTENT_CHARS)
+            .map_or(drawer.content.len(), |(idx, _)| idx);
+        truncated_owned = drawer.content[..end].to_string();
+        &truncated_owned
     } else {
         &drawer.content
     };
@@ -748,18 +756,21 @@ mod tests {
 
     #[tokio::test]
     async fn regenerate_closets_truncates_multibyte_content_without_panic() {
-        // Content with multi-byte chars (emoji) that exceeds MAX_CONTENT_CHARS must be
-        // sliced at a valid UTF-8 char boundary. Covers L235-236.
+        // Content with multi-byte chars (emoji) that exceeds MAX_CONTENT_CHARS
+        // (counted in chars, not bytes) must be sliced at a valid char
+        // boundary. Use one more emoji than the char cap so the truncation
+        // path fires under the char-based logic.
         let (_db, connection) = crate::test_helpers::test_db().await;
 
-        // Emoji is 4 bytes each; place them so at least one spans the MAX_CONTENT_CHARS
-        // byte boundary, forcing the while loop on L235-236 to step back.
-        // Build just over MAX_CONTENT_CHARS bytes with 4-byte emoji.
-        let emoji_count = MAX_CONTENT_CHARS / 4 + 5;
+        let emoji_count = MAX_CONTENT_CHARS + 5;
         let long_content = "🚀".repeat(emoji_count);
         assert!(
+            long_content.chars().count() > MAX_CONTENT_CHARS,
+            "test setup: content must exceed MAX_CONTENT_CHARS chars"
+        );
+        assert!(
             long_content.len() > MAX_CONTENT_CHARS,
-            "test setup: content must exceed MAX_CONTENT_CHARS"
+            "test setup: content must also exceed MAX_CONTENT_CHARS bytes for the boundary walk"
         );
 
         connection
