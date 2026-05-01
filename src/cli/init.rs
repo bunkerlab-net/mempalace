@@ -473,8 +473,13 @@ fn run_setup_llm_consent_check(provider: &dyn LlmProvider, opts: &LlmOpts) -> Re
          init fully local.",
         opts.provider
     );
-    // Explicit --llm-api-key or --accept-external-llm means the user already opted in.
-    if provider.api_key_source() != Some(ApiKeySource::Env) || opts.accept_external_llm {
+    // Bypass the prompt only on explicit consent: either `--llm-api-key`
+    // (`Some(Flag)` — the flag itself is consent) or `--accept-external-llm`.
+    // A `None` key is NOT pre-consent: an external endpoint that accepts
+    // unauthenticated requests would still leak the corpus, so we treat it
+    // the same as an env-fallback key and force the interactive gate. The
+    // user can still decline (heuristics-only) or pass `--accept-external-llm`.
+    if provider.api_key_source() == Some(ApiKeySource::Flag) || opts.accept_external_llm {
         return Ok(true);
     }
     // Env-fallback key + external endpoint: require interactive confirmation.
@@ -740,11 +745,11 @@ fn run_persist_lang(lang: &[String]) {
     }
 }
 
-/// Append `/mempalace.yaml` and `/entities.json` (anchored to repo root) to
-/// the `.gitignore` in `directory` if the directory is the root of a git
-/// worktree and the entries are not already present. The dedup check treats
-/// anchored and unanchored variants (e.g. `mempalace.yaml`) as equivalent so
-/// we never append a duplicate rule.
+/// Append `/mempalace.yaml`, `/entities.json`, and `/corpus_origin.json`
+/// (anchored to repo root) to the `.gitignore` in `directory` if the
+/// directory is the root of a git worktree and the entries are not already
+/// present. The dedup check treats anchored and unanchored variants (e.g.
+/// `mempalace.yaml`) as equivalent so we never append a duplicate rule.
 ///
 /// Called by [`run`] after config is written. Non-fatal: errors are printed
 /// to stderr and do not abort init.
@@ -769,8 +774,11 @@ fn run_gitignore_protect(directory: &Path) {
     );
     // Anchored patterns: these files only exist at the repo root, so a leading
     // slash makes the rule unambiguous and also lets us deduplicate against
-    // unanchored variants a user may have written previously.
-    let entries = ["/mempalace.yaml", "/entities.json"];
+    // unanchored variants a user may have written previously. `corpus_origin.json`
+    // is the Pass 0 audit trail written by `run` after the proceed-confirm gate;
+    // it carries detected platform/persona signals and should never end up in
+    // shared version control alongside the other init artefacts.
+    let entries = ["/mempalace.yaml", "/entities.json", "/corpus_origin.json"];
     let mut appended: Vec<&str> = Vec::with_capacity(entries.len());
     let mut additions = String::new();
     for entry in entries {
@@ -834,7 +842,11 @@ fn run_print_summary(
         println!("          {}", room.description);
     }
 
-    if !detected.projects.is_empty() || !detected.people.is_empty() || !detected.topics.is_empty() {
+    if !detected.projects.is_empty()
+        || !detected.people.is_empty()
+        || !detected.topics.is_empty()
+        || !detected.uncertain.is_empty()
+    {
         println!("\n  Detected entities:");
         run_print_entities("Projects", &detected.projects);
         run_print_entities("People", &detected.people);
@@ -842,9 +854,7 @@ fn run_print_summary(
         // confirmed-pass-through bucket and trails with the items the user
         // may want to review.
         run_print_entities("Topics", &detected.topics);
-        if !detected.uncertain.is_empty() {
-            run_print_entities("Uncertain", &detected.uncertain);
-        }
+        run_print_entities("Uncertain", &detected.uncertain);
     }
 
     println!("\n-------------------------------------------------------");
@@ -1067,6 +1077,47 @@ mod tests {
         });
     }
 
+    #[test]
+    fn consent_check_external_none_key_does_not_bypass_prompt() {
+        // Regression: an external provider with `api_key_source() == None`
+        // must NOT short-circuit as pre-consented. Previously the predicate
+        // `key != Some(Env)` treated `None` the same as `Some(Flag)`, which
+        // would let an unauthenticated external endpoint leak the corpus
+        // without a consent gate. The bypass now requires explicit Flag or
+        // `--accept-external-llm`.
+        //
+        // Test environment has no interactive stdin, so the prompt's
+        // `read_line` returns 0 bytes → function returns `Ok(false)` (decline).
+        // That return value is itself the proof that the prompt path was
+        // reached, since the bypass would have returned `Ok(true)`.
+        temp_env::with_var("ANTHROPIC_API_KEY", None::<&str>, || {
+            let provider = crate::llm::client::AnthropicProvider::new(
+                "claude-haiku-4-5-20251001".to_string(),
+                None,
+                None,
+                60,
+            );
+            assert!(provider.is_external_service(), "anthropic is external");
+            assert_eq!(
+                provider.api_key_source(),
+                None,
+                "no flag key, no env key → None"
+            );
+            let opts = LlmOpts {
+                accept_external_llm: false,
+                ..LlmOpts::default()
+            };
+            let result = run_setup_llm_consent_check(&provider, &opts)
+                .expect("consent check must not error");
+            // Pair assertion: None on stdin (EOF) means decline; the bypass
+            // would have returned true regardless of stdin.
+            assert!(
+                !result,
+                "None key must NOT pre-consent — prompt path returned decline on EOF"
+            );
+        });
+    }
+
     // -- run_derive_wing_name --
 
     #[test]
@@ -1188,6 +1239,32 @@ mod tests {
         let rooms: Vec<crate::config::RoomConfig> = vec![];
         // Must not panic with any non-empty DetectedDict.
         run_print_summary("my_project", 42, 1_500_000, &rooms, &detected);
+    }
+
+    #[test]
+    fn run_print_summary_includes_uncertain_when_only_uncertain_detected() {
+        // Regression: a DetectedDict with only `uncertain` populated must
+        // still trigger the "Detected entities:" block. Without uncertain in
+        // the summary gate, a corpus that produced only ambiguous detections
+        // would show no review prompts at all and the user would never see
+        // the candidates flagged for manual review.
+        use crate::palace::entities::DetectedEntity;
+        use crate::palace::project_scanner::DetectedDict;
+        let detected = DetectedDict {
+            people: vec![],
+            projects: vec![],
+            topics: vec![],
+            uncertain: vec![DetectedEntity {
+                name: "Mystery".to_string(),
+                entity_type: "uncertain".to_string(),
+                confidence: 0.55,
+                frequency: 2,
+                signals: vec!["unknown source".to_string()],
+            }],
+        };
+        let rooms: Vec<crate::config::RoomConfig> = vec![];
+        // Must not panic and must traverse the uncertain-print branch.
+        run_print_summary("uncertain_wing", 3, 0, &rooms, &detected);
     }
 
     #[test]
@@ -1551,6 +1628,13 @@ mod tests {
         assert!(
             contents.contains("entities.json"),
             ".gitignore must contain entities.json"
+        );
+        // Pair assertion: corpus_origin.json (Pass 0 audit trail) must also
+        // be protected — it carries detected platform/persona signals that
+        // should not land in shared version control.
+        assert!(
+            contents.contains("corpus_origin.json"),
+            ".gitignore must contain corpus_origin.json"
         );
     }
 
