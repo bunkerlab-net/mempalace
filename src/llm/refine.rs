@@ -1091,4 +1091,157 @@ mod tests {
         assert!(corpus.contains("txt content"), "must include .txt files");
         assert!(corpus.contains("rst content"), "must include .rst files");
     }
+
+    // -- build_corpus_origin_preamble --
+
+    fn empty_origin() -> crate::palace::corpus_origin::CorpusOriginResult {
+        crate::palace::corpus_origin::CorpusOriginResult {
+            likely_ai_dialogue: false,
+            confidence: 0.5,
+            primary_platform: None,
+            user_name: None,
+            agent_persona_names: vec![],
+            evidence: vec![],
+        }
+    }
+
+    #[test]
+    fn build_corpus_origin_preamble_no_context_returns_empty() {
+        // When no context signals are set the function must return an empty string
+        // so the entity-refinement system prompt is unchanged.
+        let origin = empty_origin();
+        let preamble = build_corpus_origin_preamble(&origin);
+        assert!(
+            preamble.is_empty(),
+            "no-context origin must produce an empty preamble"
+        );
+        // Negative: the preamble must not contain any stray text.
+        assert!(
+            !preamble.contains("CORPUS"),
+            "no-context preamble must have no content"
+        );
+    }
+
+    #[test]
+    fn build_corpus_origin_preamble_ai_dialogue_with_platform() {
+        // When `likely_ai_dialogue` is true the preamble must name the platform.
+        let mut origin = empty_origin();
+        origin.likely_ai_dialogue = true;
+        origin.primary_platform = Some("Claude Code".to_string());
+        let preamble = build_corpus_origin_preamble(&origin);
+        assert!(
+            preamble.contains("Claude Code"),
+            "preamble must name the detected platform"
+        );
+        assert!(
+            preamble.contains("AI-dialogue record"),
+            "preamble must describe the corpus as an AI-dialogue record"
+        );
+    }
+
+    #[test]
+    fn build_corpus_origin_preamble_ai_dialogue_no_platform_uses_fallback() {
+        // When `primary_platform` is None the preamble must fall back to
+        // "unknown AI platform" so the classifier still has a hint.
+        let mut origin = empty_origin();
+        origin.likely_ai_dialogue = true;
+        let preamble = build_corpus_origin_preamble(&origin);
+        assert!(
+            preamble.contains("unknown AI platform"),
+            "preamble must contain fallback platform text when primary_platform is None"
+        );
+        // Pair assertion: must not be empty despite the fallback.
+        assert!(!preamble.is_empty(), "preamble must be non-empty");
+    }
+
+    #[test]
+    fn build_corpus_origin_preamble_persona_names_listed() {
+        // Agent persona names must appear in the preamble with a 'drop' instruction.
+        let mut origin = empty_origin();
+        origin.agent_persona_names = vec!["Claude".to_string(), "Assistant".to_string()];
+        let preamble = build_corpus_origin_preamble(&origin);
+        assert!(
+            preamble.contains("Claude"),
+            "preamble must list persona 'Claude'"
+        );
+        assert!(
+            preamble.contains("Assistant"),
+            "preamble must list persona 'Assistant'"
+        );
+        assert!(
+            preamble.contains("drop"),
+            "preamble must instruct the classifier to 'drop' personas"
+        );
+    }
+
+    #[test]
+    fn build_corpus_origin_preamble_user_name_included() {
+        // A known `user_name` must appear in the preamble so the classifier drops
+        // the corpus author as a false-positive contributor.
+        let mut origin = empty_origin();
+        origin.user_name = Some("Robbie".to_string());
+        let preamble = build_corpus_origin_preamble(&origin);
+        assert!(
+            preamble.contains("Robbie"),
+            "preamble must include the author's name"
+        );
+        assert!(
+            preamble.contains("Corpus author"),
+            "preamble must label the entry as 'Corpus author'"
+        );
+    }
+
+    // -- apply_classifications_route_entity unknown-label branch --
+
+    #[test]
+    fn apply_classifications_unknown_label_routes_to_uncertain() {
+        // An unrecognised label from the LLM (not person/project/topic/drop) must
+        // land in `uncertain` so the entity is not silently discarded.
+        let entity = make_entity("Gadget", "uncertain");
+
+        let mut people = vec![];
+        let mut projects = vec![];
+        let mut topics = vec![];
+        let mut uncertain = vec![];
+        let mut buckets = ClassifiedBuckets {
+            people: &mut people,
+            projects: &mut projects,
+            topics: &mut topics,
+            uncertain: &mut uncertain,
+        };
+
+        let mut decisions: HashMap<String, (String, String)> = HashMap::new();
+        // Inject a decision with a label the routing match does not recognise.
+        decisions.insert(
+            "Gadget".to_string(),
+            ("gadget".to_string(), "unrecognised label".to_string()),
+        );
+
+        let mut reclassified = 0usize;
+        let mut dropped = 0usize;
+
+        apply_classifications_route_entity(
+            entity,
+            &decisions,
+            &mut buckets,
+            &mut reclassified,
+            &mut dropped,
+        );
+
+        assert_eq!(
+            uncertain.len(),
+            1,
+            "unknown label must route entity to uncertain"
+        );
+        assert_eq!(dropped, 0, "unknown label must not drop the entity");
+        // Pair assertion: no other bucket must receive the entity.
+        assert!(
+            people.is_empty(),
+            "unknown label must not put entity in people"
+        );
+        assert!(
+            projects.is_empty(),
+            "unknown label must not put entity in projects"
+        );
+    }
 }
