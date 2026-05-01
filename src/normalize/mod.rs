@@ -1,9 +1,13 @@
 //! Chat export format detection and normalization to `> user\nresponse` transcript format.
+//!
+//! Supported formats: Claude Code JSONL, Codex CLI JSONL, Gemini CLI JSONL,
+//! Claude.ai JSON, `ChatGPT` JSON, and Slack exports.
 
 pub mod chatgpt;
 pub mod claude_ai;
 pub mod claude_code;
 pub mod codex;
+pub mod gemini_cli;
 pub mod slack;
 
 use std::path::Path;
@@ -81,6 +85,11 @@ fn try_normalize_json(content: &str) -> Option<String> {
 
     // Try Codex CLI JSONL.
     if let Some(result) = codex::try_parse(content) {
+        return Some(result);
+    }
+
+    // Try Gemini CLI JSONL (requires session_metadata sentinel).
+    if let Some(result) = gemini_cli::try_parse(content) {
         return Some(result);
     }
 
