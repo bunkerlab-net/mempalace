@@ -224,6 +224,7 @@ fn run_discover_entities_prose(
         people: result.people,
         projects: result.projects,
         uncertain: result.uncertain,
+        topics: result.topics,
     };
     merge_detected(current, prose_signal, false)
 }
@@ -956,6 +957,7 @@ mod tests {
             people: vec![],
             projects: vec![],
             uncertain: vec![],
+            topics: vec![],
         };
         let opts = LlmOpts::default(); // enabled = false
         let result = run_refine_entities(detected, temp_dir.path(), &opts)
@@ -993,6 +995,7 @@ mod tests {
                 frequency: 1,
                 signals: vec![],
             }],
+            topics: vec![],
         };
         // Rooms list — empty is fine for the print test.
         let rooms: Vec<crate::config::RoomConfig> = vec![];
@@ -1048,6 +1051,7 @@ mod tests {
             }],
             projects: vec![],
             uncertain: vec![],
+            topics: vec![],
         };
         temp_env::with_var("MEMPALACE_DIR", Some(registry_dir.path()), || {
             run_confirm_and_save(&detected, true, temp_dir.path())
@@ -1086,6 +1090,7 @@ mod tests {
             }],
             projects: vec![],
             uncertain: vec![],
+            topics: vec![],
         };
         run_confirm_and_save(&detected, true, temp_dir.path())
             .expect("run_confirm_and_save must succeed even with no confirmations");
@@ -1122,6 +1127,7 @@ mod tests {
                 signals: vec![],
             }],
             uncertain: vec![],
+            topics: vec![],
         };
         temp_env::with_var("MEMPALACE_DIR", Some(registry_dir.path()), || {
             run_confirm_and_save(&detected, true, temp_dir.path())
@@ -1415,6 +1421,7 @@ mod tests {
             }],
             projects: vec![],
             uncertain: vec![],
+            topics: vec![],
         };
         let rooms: Vec<crate::config::RoomConfig> = vec![];
         // 5 MB total — exercises the integer-division MB branch.

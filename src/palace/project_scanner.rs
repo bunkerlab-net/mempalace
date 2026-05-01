@@ -177,6 +177,8 @@ pub struct DetectedDict {
     pub people: Vec<DetectedEntity>,
     pub projects: Vec<DetectedEntity>,
     pub uncertain: Vec<DetectedEntity>,
+    /// Confirmed topic labels (from LLM reclassification); fed into the topic-tunnel pipeline.
+    pub topics: Vec<DetectedEntity>,
 }
 
 // ===================== PRIVATE TYPES =====================
@@ -978,6 +980,7 @@ pub fn to_detected_dict(projects: &[ProjectInfo], people: &[PersonInfo]) -> Dete
         people: people_entities,
         projects: project_entities,
         uncertain: vec![],
+        topics: vec![],
     }
 }
 
@@ -997,6 +1000,7 @@ pub fn merge_detected(
             .iter()
             .chain(&primary.projects)
             .chain(&primary.uncertain)
+            .chain(&primary.topics)
             .all(|e| !e.name.is_empty()),
         "primary entity names must be non-empty"
     );
@@ -1006,6 +1010,7 @@ pub fn merge_detected(
             .iter()
             .chain(&secondary.projects)
             .chain(&secondary.uncertain)
+            .chain(&secondary.topics)
             .all(|e| !e.name.is_empty()),
         "secondary entity names must be non-empty"
     );
@@ -1016,6 +1021,7 @@ pub fn merge_detected(
         .iter()
         .chain(&primary.projects)
         .chain(&primary.uncertain)
+        .chain(&primary.topics)
         .map(|e| e.name.to_lowercase())
         .collect();
 
@@ -1034,6 +1040,13 @@ pub fn merge_detected(
             if seen.insert(entity.name.to_lowercase()) {
                 primary.uncertain.push(entity);
             }
+        }
+    }
+    // Topics are always merged regardless of drop_uncertain — they feed the
+    // topic-tunnel pipeline, not the interactive confirmation step.
+    for entity in secondary.topics {
+        if seen.insert(entity.name.to_lowercase()) {
+            primary.topics.push(entity);
         }
     }
 
@@ -1260,6 +1273,7 @@ mod tests {
             }],
             projects: vec![],
             uncertain: vec![],
+            topics: vec![],
         };
         let secondary = DetectedDict {
             people: vec![DetectedEntity {
@@ -1271,6 +1285,7 @@ mod tests {
             }],
             projects: vec![],
             uncertain: vec![],
+            topics: vec![],
         };
         let merged = merge_detected(primary, secondary, false);
         assert_eq!(merged.people.len(), 1, "duplicate must be deduplicated");
@@ -1287,6 +1302,7 @@ mod tests {
             people: vec![],
             projects: vec![],
             uncertain: vec![],
+            topics: vec![],
         };
         let secondary = DetectedDict {
             people: vec![],
@@ -1298,6 +1314,7 @@ mod tests {
                 frequency: 3,
                 signals: vec![],
             }],
+            topics: vec![],
         };
         let merged = merge_detected(primary, secondary, true);
         assert!(
@@ -1963,6 +1980,7 @@ mod tests {
             }],
             projects: vec![],
             uncertain: vec![],
+            topics: vec![],
         };
         let secondary = DetectedDict {
             people: vec![DetectedEntity {
@@ -1980,6 +1998,7 @@ mod tests {
                 signals: vec![],
             }],
             uncertain: vec![],
+            topics: vec![],
         };
         let merged = merge_detected(primary, secondary, false);
         assert_eq!(merged.people.len(), 2, "both people must appear");
@@ -1993,6 +2012,7 @@ mod tests {
             people: vec![],
             projects: vec![],
             uncertain: vec![],
+            topics: vec![],
         };
         let secondary = DetectedDict {
             people: vec![],
@@ -2004,6 +2024,7 @@ mod tests {
                 frequency: 2,
                 signals: vec![],
             }],
+            topics: vec![],
         };
         let merged = merge_detected(primary, secondary, false);
         assert_eq!(
@@ -2027,6 +2048,7 @@ mod tests {
             }],
             projects: vec![],
             uncertain: vec![],
+            topics: vec![],
         };
         let secondary = DetectedDict {
             people: vec![DetectedEntity {
@@ -2038,6 +2060,7 @@ mod tests {
             }],
             projects: vec![],
             uncertain: vec![],
+            topics: vec![],
         };
         let merged = merge_detected(primary, secondary, false);
         assert_eq!(

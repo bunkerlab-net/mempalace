@@ -39,6 +39,8 @@ pub struct DetectionResult {
     pub people: Vec<DetectedEntity>,
     pub projects: Vec<DetectedEntity>,
     pub uncertain: Vec<DetectedEntity>,
+    /// Topic entities; populated by downstream LLM reclassification, always empty here.
+    pub topics: Vec<DetectedEntity>,
 }
 
 /// Scan files and detect entity candidates using the specified locale languages.
@@ -65,6 +67,7 @@ pub fn detect_entities(
             people: vec![],
             projects: vec![],
             uncertain: vec![],
+            topics: vec![],
         };
     }
 
@@ -77,6 +80,7 @@ pub fn detect_entities(
             people: vec![],
             projects: vec![],
             uncertain: vec![],
+            topics: vec![],
         };
     }
 
@@ -102,6 +106,7 @@ pub fn detect_entities(
         people,
         projects,
         uncertain,
+        topics: vec![],
     }
 }
 

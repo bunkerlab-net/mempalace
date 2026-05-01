@@ -38,7 +38,7 @@ const _: () = assert!(CORPUS_WALK_DEPTH_LIMIT > 0);
 const _: () = assert!(MAX_CONTEXT_SNIPPETS > 0);
 
 // Labels the LLM may return; anything else is discarded.
-const VALID_LABELS: &[&str] = &["person", "project", "drop"];
+const VALID_LABELS: &[&str] = &["person", "project", "topic", "drop"];
 
 const SYSTEM_PROMPT: &str = "\
 You are a named entity classifier for software projects.
@@ -48,13 +48,14 @@ Given candidates extracted from project files and git history, classify each ent
 Respond ONLY with a JSON object in this exact format:
 {
   \"decisions\": {
-    \"EntityName\": {\"label\": \"person|project|drop\", \"reason\": \"brief reason\"}
+    \"EntityName\": {\"label\": \"person|project|topic|drop\", \"reason\": \"brief reason\"}
   }
 }
 
 Labels:
 - person: a real human name (developer, author, contributor, researcher)
 - project: a software project, library, tool, product, technology, or brand
+- topic: a subject area, theme, or domain keyword (e.g. Rust, async, testing, concurrency)
 - drop: false positive, common word, generic term, URL fragment, or number
 ";
 
@@ -374,6 +375,10 @@ fn apply_classifications(
     assert!(total_input < 1_000_000, "entity count must be sane");
     assert!(decisions.len() < 1_000_000, "decisions count must be sane");
 
+    // Pass through existing topics unchanged — they feed the topic-tunnel pipeline
+    // and are not re-classified by the LLM.
+    let mut topics: Vec<DetectedEntity> = detected.topics;
+    let topics_passthrough = topics.len();
     let mut people: Vec<DetectedEntity> = Vec::new();
     let mut projects: Vec<DetectedEntity> = Vec::new();
     let mut uncertain: Vec<DetectedEntity> = Vec::new();
@@ -386,23 +391,33 @@ fn apply_classifications(
         .chain(detected.projects)
         .chain(detected.uncertain);
 
-    for entity in all_entities {
-        apply_classifications_route_entity(
-            entity,
-            decisions,
-            &mut people,
-            &mut projects,
-            &mut uncertain,
-            &mut reclassified,
-            &mut dropped,
-        );
-    }
+    {
+        let mut buckets = ClassifiedBuckets {
+            people: &mut people,
+            projects: &mut projects,
+            topics: &mut topics,
+            uncertain: &mut uncertain,
+        };
+        for entity in all_entities {
+            apply_classifications_route_entity(
+                entity,
+                decisions,
+                &mut buckets,
+                &mut reclassified,
+                &mut dropped,
+            );
+        }
+    } // `buckets` drops here, releasing the borrows on `people`, `projects`, etc.
 
     let total_output = people.len() + projects.len() + uncertain.len();
-    // Pair assertion: every input entity was either kept or dropped.
+    // Entities newly classified as "topic" by the LLM are excluded from total_output
+    // but still consumed from total_input; account for them separately.
+    let topics_classified = topics.len() - topics_passthrough;
+    // Pair assertion: every input entity was kept (in any bucket) or dropped.
     debug_assert!(
-        total_output + dropped == total_input,
-        "entity count must balance: {total_output} kept + {dropped} dropped != {total_input} input"
+        total_output + dropped + topics_classified == total_input,
+        "entity count must balance: {total_output} kept + {dropped} dropped + {topics_classified} \
+         topics != {total_input} input"
     );
 
     (
@@ -410,10 +425,22 @@ fn apply_classifications(
             people,
             projects,
             uncertain,
+            topics,
         },
         reclassified,
         dropped,
     )
+}
+
+/// Output buckets written by [`apply_classifications_route_entity`].
+///
+/// Grouping the four mutable vecs keeps the argument count of the routing
+/// helper within the pedantic `too_many_arguments` limit (7).
+struct ClassifiedBuckets<'a> {
+    people: &'a mut Vec<DetectedEntity>,
+    projects: &'a mut Vec<DetectedEntity>,
+    topics: &'a mut Vec<DetectedEntity>,
+    uncertain: &'a mut Vec<DetectedEntity>,
 }
 
 /// Route a single entity to the correct output bucket based on the LLM decision.
@@ -423,9 +450,7 @@ fn apply_classifications(
 fn apply_classifications_route_entity(
     entity: DetectedEntity,
     decisions: &HashMap<String, (String, String)>,
-    people: &mut Vec<DetectedEntity>,
-    projects: &mut Vec<DetectedEntity>,
-    uncertain: &mut Vec<DetectedEntity>,
+    buckets: &mut ClassifiedBuckets<'_>,
     reclassified: &mut usize,
     dropped: &mut usize,
 ) {
@@ -443,9 +468,10 @@ fn apply_classifications_route_entity(
         *reclassified += 1;
     }
     match label {
-        "person" => people.push(entity),
-        "project" => projects.push(entity),
-        _ => uncertain.push(entity),
+        "person" => buckets.people.push(entity),
+        "project" => buckets.projects.push(entity),
+        "topic" => buckets.topics.push(entity),
+        _ => buckets.uncertain.push(entity),
     }
 }
 
@@ -542,6 +568,7 @@ mod tests {
                 .into_iter()
                 .map(|n| make_entity(n, "uncertain"))
                 .collect(),
+            topics: vec![],
         }
     }
 
@@ -685,6 +712,49 @@ mod tests {
         let (result, _, dropped) = apply_classifications(detected, &decisions);
         let kept = result.people.len() + result.projects.len() + result.uncertain.len();
         assert_eq!(kept + dropped, 4, "total must balance");
+    }
+
+    #[test]
+    fn apply_classifications_routes_topic_label_to_topics_bucket() {
+        // A "topic" decision from the LLM must move the entity to `topics`, not `uncertain`.
+        let detected = make_dict(vec![], vec![], vec!["async_programming"]);
+        let mut decisions = HashMap::new();
+        decisions.insert(
+            "async_programming".to_string(),
+            ("topic".to_string(), "domain keyword".to_string()),
+        );
+        let (result, reclassified, dropped) = apply_classifications(detected, &decisions);
+        assert_eq!(
+            result.topics.len(),
+            1,
+            "topic-classified entity must be in topics bucket"
+        );
+        assert!(
+            result.uncertain.is_empty(),
+            "topics must not leak into uncertain"
+        );
+        assert_eq!(
+            reclassified, 1,
+            "routing from uncertain to topic counts as reclassified"
+        );
+        assert_eq!(dropped, 0);
+    }
+
+    #[test]
+    fn apply_classifications_passes_through_existing_topics() {
+        // Pre-existing topics (passed in detected.topics) must appear in output even
+        // without a matching LLM decision.
+        let mut detected = make_dict(vec!["Alice"], vec![], vec![]);
+        detected.topics = vec![make_entity("Rust", "topic")];
+        let decisions = HashMap::new();
+        let (result, _, dropped) = apply_classifications(detected, &decisions);
+        assert_eq!(
+            result.topics.len(),
+            1,
+            "pre-existing topic must pass through unchanged"
+        );
+        assert_eq!(result.topics[0].name, "Rust");
+        assert_eq!(dropped, 0);
     }
 
     // -- collect_contexts --
