@@ -267,7 +267,7 @@ async fn hook_stop_save_silently(
     .await;
 
     hook_ingest_transcript(state_dir, &input.transcript_path);
-    hook_maybe_auto_ingest(state_dir, input.transcript_path.to_str().unwrap_or(""));
+    hook_maybe_auto_ingest(state_dir);
 
     if count > 0 {
         let _ = std::fs::write(last_save_file, exchange_count.to_string());
@@ -305,27 +305,26 @@ fn hook_stop_save_blocking(
     // complete the save the checkpoint is lost but the hook will not loop endlessly.
     let _ = std::fs::write(last_save_file, exchange_count.to_string());
     hook_ingest_transcript(state_dir, &input.transcript_path);
-    hook_maybe_auto_ingest(state_dir, input.transcript_path.to_str().unwrap_or(""));
+    hook_maybe_auto_ingest(state_dir);
     let reason = format!("{STOP_BLOCK_REASON} Write diary entry to wing={project_wing}.");
     hook_output(&json!({"decision": "block", "reason": reason}));
 }
 
-/// Precompact hook: synchronously mine the transcript, then allow compaction.
+/// Precompact hook: mine transcript convos and project files, then allow compaction.
 ///
-/// Note: precompact does **not** call `hook_ingest_transcript` because
-/// `hook_spawn_mine_sync` already mines the same directory synchronously
-/// (the parent of the transcript when `MEMPAL_DIR` is unset, otherwise the
-/// configured override). The previous implementation called both, which
-/// raced two `mempalace mine` processes against the same target — the
-/// background ingest had no way to influence compaction timing, while the
-/// sync mine is the one that must finish before compaction proceeds.
+/// `hook_ingest_transcript` handles the transcript convos synchronously so the
+/// current session messages land before the context is compressed. `hook_spawn_mine_sync`
+/// handles `MEMPAL_DIR` project files (when set). The two calls are kept separate to
+/// avoid timeout stacking against the harness ceiling and to prevent PID-file overwrites
+/// that would suppress one mine when both targets fire from the same hook call.
 fn hook_precompact(input: &HookInput, state_dir: &Path) {
     assert!(!input.session_id.is_empty());
     hook_log(
         state_dir,
         &format!("PRE-COMPACT triggered for session {}", input.session_id),
     );
-    hook_spawn_mine_sync(state_dir, input.transcript_path.to_str().unwrap_or(""));
+    hook_ingest_transcript(state_dir, &input.transcript_path);
+    hook_spawn_mine_sync(state_dir);
     hook_output(&json!({}));
 }
 
@@ -615,21 +614,60 @@ fn hook_read_last_save(last_save_file: &Path) -> usize {
         .unwrap_or(0)
 }
 
-/// Determine the directory to mine: `MEMPAL_DIR` env var, or transcript parent.
-fn hook_get_mine_dir(transcript_path: &str) -> Option<PathBuf> {
-    if let Ok(env_dir) = std::env::var("MEMPAL_DIR") {
-        let env_dir_path = PathBuf::from(&env_dir);
-        if env_dir_path.is_dir() {
-            return Some(env_dir_path);
-        }
+/// A target for a `mempalace mine` subprocess launched by the hook.
+///
+/// `hook_get_mine_targets` returns these; each entry spawns one mine process.
+/// Transcript convos are handled separately by `hook_ingest_transcript`.
+enum MineTarget {
+    /// Mine a project directory with `--mode projects`.
+    Project(PathBuf),
+}
+
+/// Collect `mempalace mine` project targets from `MEMPAL_DIR`.
+///
+/// `MEMPAL_DIR` (when set, valid, and free of `..` traversal segments) contributes
+/// a `Project` target mined with `--mode projects`. Transcript convos are handled
+/// separately by `hook_ingest_transcript` to avoid double-mining the same JSONL
+/// into conflicting wings on every hook fire.
+///
+/// Returns an empty `Vec` when `MEMPAL_DIR` is unset or unusable.
+fn hook_get_mine_targets() -> Vec<MineTarget> {
+    let Ok(env_dir) = std::env::var("MEMPAL_DIR") else {
+        return Vec::new();
+    };
+    if env_dir.is_empty() {
+        return Vec::new();
     }
-    if !transcript_path.is_empty() {
-        let path = PathBuf::from(transcript_path);
-        if path.is_file() {
-            return path.parent().map(std::path::Path::to_path_buf);
-        }
+    let env_path = PathBuf::from(&env_dir);
+    // Reject paths with parent-directory traversal segments before canonicalization.
+    let has_traversal = env_path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir));
+    if has_traversal {
+        return Vec::new();
     }
-    None
+    let Ok(canonical) = env_path.canonicalize() else {
+        return Vec::new();
+    };
+    assert!(
+        !canonical.as_os_str().is_empty(),
+        "canonicalized MEMPAL_DIR must not be empty"
+    );
+    if canonical.is_dir() {
+        let targets = vec![MineTarget::Project(canonical)];
+        // Pair assertion: every returned path must be traversal-free after canonicalization.
+        debug_assert!(
+            targets.iter().all(|MineTarget::Project(path)| {
+                !path
+                    .components()
+                    .any(|component| matches!(component, std::path::Component::ParentDir))
+            }),
+            "hook_get_mine_targets: returned path must not contain traversal segments"
+        );
+        targets
+    } else {
+        Vec::new()
+    }
 }
 
 /// Return `true` if a previous background mine process is still running.
@@ -668,24 +706,39 @@ fn hook_pid_alive(pid: u32) -> bool {
     }
 }
 
-/// Spawn `mempalace mine` in the background if a mine directory is available.
-fn hook_maybe_auto_ingest(state_dir: &Path, transcript_path: &str) {
-    let Some(mine_dir) = hook_get_mine_dir(transcript_path) else {
+/// Background-mine `MEMPAL_DIR` (project files) if set.
+///
+/// Transcript convos are ingested separately via `hook_ingest_transcript` in the
+/// hook handlers. Keeping them out of this function avoids PID-file overwrites
+/// that would cause the "mine already running" guard to suppress the project mine.
+fn hook_maybe_auto_ingest(state_dir: &Path) {
+    let targets = hook_get_mine_targets();
+    if targets.is_empty() {
         return;
-    };
+    }
     if hook_mine_already_running(state_dir) {
         hook_log(state_dir, "Skipping auto-ingest: mine already running");
         return;
     }
-    hook_spawn_mine_bg(state_dir, &mine_dir);
+    for target in &targets {
+        let MineTarget::Project(mine_dir) = target;
+        hook_spawn_mine_bg(state_dir, mine_dir, "projects");
+    }
 }
 
-/// Spawn `mempalace mine <dir> --mode convos --wing sessions` in the background.
+/// Spawn `mempalace mine <dir> --mode <mode>` in the background.
 ///
 /// Appends stdout and stderr to `hook.log`. Writes the child PID to `mine.pid`
 /// so subsequent hook fires can detect whether the mine is still running.
-fn hook_spawn_mine_bg(state_dir: &Path, mine_dir: &Path) {
-    assert!(mine_dir.is_dir(), "mine_dir must be an existing directory");
+fn hook_spawn_mine_bg(state_dir: &Path, mine_dir: &Path, mode: &str) {
+    assert!(
+        mine_dir.is_dir(),
+        "hook_spawn_mine_bg: mine_dir must be an existing directory"
+    );
+    assert!(
+        !mode.is_empty(),
+        "hook_spawn_mine_bg: mode must not be empty"
+    );
 
     let Ok(exe) = std::env::current_exe() else {
         return;
@@ -697,14 +750,7 @@ fn hook_spawn_mine_bg(state_dir: &Path, mine_dir: &Path) {
         return;
     };
     let result = std::process::Command::new(&exe)
-        .args([
-            "mine",
-            &mine_dir.to_string_lossy(),
-            "--mode",
-            "convos",
-            "--wing",
-            "sessions",
-        ])
+        .args(["mine", &mine_dir.to_string_lossy(), "--mode", mode])
         .stdout(std::process::Stdio::from(log_file))
         .stderr(std::process::Stdio::from(log_copy))
         .spawn();
@@ -713,35 +759,38 @@ fn hook_spawn_mine_bg(state_dir: &Path, mine_dir: &Path) {
     }
 }
 
-/// Run `mempalace mine <dir> --mode convos` synchronously (blocks until done).
+/// Synchronously mine `MEMPAL_DIR` (precompact path — data must land before compaction).
 ///
-/// Used by the precompact hook where data must land before compaction proceeds.
-fn hook_spawn_mine_sync(state_dir: &Path, transcript_path: &str) {
-    let Some(mine_dir) = hook_get_mine_dir(transcript_path) else {
+/// Transcript convos are ingested separately via `hook_ingest_transcript` in
+/// `hook_precompact`. Keeping them out here avoids timeout stacking against the
+/// harness ceiling.
+fn hook_spawn_mine_sync(state_dir: &Path) {
+    let targets = hook_get_mine_targets();
+    if targets.is_empty() {
         return;
-    };
+    }
     let Ok(exe) = std::env::current_exe() else {
         return;
     };
     let _ = std::fs::create_dir_all(state_dir);
-    let Some(log_file) = hook_open_log(state_dir) else {
-        return;
-    };
-    let Ok(log_copy) = log_file.try_clone() else {
-        return;
-    };
-    let _ = std::process::Command::new(&exe)
-        .args([
-            "mine",
-            &mine_dir.to_string_lossy(),
-            "--mode",
-            "convos",
-            "--wing",
-            "sessions",
-        ])
-        .stdout(std::process::Stdio::from(log_file))
-        .stderr(std::process::Stdio::from(log_copy))
-        .status();
+    for target in &targets {
+        let MineTarget::Project(mine_dir) = target;
+        assert!(
+            mine_dir.is_dir(),
+            "hook_spawn_mine_sync: mine_dir must be an existing directory"
+        );
+        let Some(log_file) = hook_open_log(state_dir) else {
+            continue;
+        };
+        let Ok(log_copy) = log_file.try_clone() else {
+            continue;
+        };
+        let _ = std::process::Command::new(&exe)
+            .args(["mine", &mine_dir.to_string_lossy(), "--mode", "projects"])
+            .stdout(std::process::Stdio::from(log_file))
+            .stderr(std::process::Stdio::from(log_copy))
+            .status();
+    }
 }
 
 /// Spawn `mempalace mine <transcript_parent> --mode convos` in the background.
@@ -1009,11 +1058,44 @@ mod tests {
     }
 
     #[test]
-    fn hook_get_mine_dir_returns_none_for_empty_inputs() {
-        // No MEMPAL_DIR and no transcript path must return None.
+    fn hook_get_mine_targets_returns_empty_when_mempal_dir_unset() {
+        // No MEMPAL_DIR must return an empty targets list.
         temp_env::with_var("MEMPAL_DIR", None::<&str>, || {
-            let result = hook_get_mine_dir("");
-            assert!(result.is_none());
+            let targets = hook_get_mine_targets();
+            assert!(
+                targets.is_empty(),
+                "must return empty vec when MEMPAL_DIR is unset"
+            );
+        });
+    }
+
+    #[test]
+    fn hook_get_mine_targets_returns_project_target_for_valid_mempal_dir() {
+        // A valid MEMPAL_DIR must produce a single Project target.
+        let dir = tempfile::tempdir().expect("must create temp dir");
+        temp_env::with_var(
+            "MEMPAL_DIR",
+            Some(dir.path().to_str().expect("utf-8")),
+            || {
+                let targets = hook_get_mine_targets();
+                assert_eq!(targets.len(), 1, "must return exactly one target");
+                assert!(
+                    matches!(targets.first(), Some(MineTarget::Project(_))),
+                    "target must be Project variant"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn hook_get_mine_targets_rejects_traversal_in_mempal_dir() {
+        // MEMPAL_DIR with a `..` component must be rejected (returns empty).
+        temp_env::with_var("MEMPAL_DIR", Some("../some/dir"), || {
+            let targets = hook_get_mine_targets();
+            assert!(
+                targets.is_empty(),
+                "must reject MEMPAL_DIR with traversal segments"
+            );
         });
     }
 
@@ -1432,11 +1514,11 @@ mod tests {
     // -------- hook_maybe_auto_ingest --------
 
     #[test]
-    fn hook_maybe_auto_ingest_does_nothing_when_no_mine_dir() {
-        // With no MEMPAL_DIR and no transcript, auto-ingest must silently skip.
+    fn hook_maybe_auto_ingest_does_nothing_when_mempal_dir_unset() {
+        // With no MEMPAL_DIR, auto-ingest must silently skip (no spawn, no pid file).
         let dir = tempfile::tempdir().expect("must create temp dir");
         temp_env::with_var("MEMPAL_DIR", None::<&str>, || {
-            hook_maybe_auto_ingest(dir.path(), "");
+            hook_maybe_auto_ingest(dir.path());
         });
         // Postcondition: no PID file was written (no spawn occurred).
         assert!(!dir.path().join("mine.pid").exists());
@@ -1582,7 +1664,7 @@ mod tests {
         let mine_dir = tempfile::tempdir().expect("must create mine dir");
         // The spawned binary exits immediately in a test context; we just verify
         // the code path executes without panic.
-        hook_spawn_mine_bg(state_dir.path(), mine_dir.path());
+        hook_spawn_mine_bg(state_dir.path(), mine_dir.path(), "projects");
         // Postcondition: a PID file may exist (if spawn succeeded); no panic.
         let _ = state_dir.path().join("mine.pid").exists();
     }
@@ -1600,7 +1682,7 @@ mod tests {
             Some(mine_dir.path().to_str().expect("utf-8")),
             || {
                 // The spawned binary exits immediately in a test context.
-                hook_spawn_mine_sync(state_dir.path(), "");
+                hook_spawn_mine_sync(state_dir.path());
             },
         );
         // Postcondition: no panic — function ran to completion.
@@ -1764,50 +1846,49 @@ mod tests {
         assert_eq!(count, 0, "nonexistent file must return 0 messages");
     }
 
-    // -------- hook_get_mine_dir: env var and transcript parent paths --
+    // -------- hook_get_mine_targets: env var paths --
 
     #[test]
-    fn hook_get_mine_dir_returns_env_dir_when_mempal_dir_is_set() {
-        // When MEMPAL_DIR is set and the path is a directory, that must be returned.
+    fn hook_get_mine_targets_returns_project_for_valid_mempal_dir() {
+        // When MEMPAL_DIR is set and the path is a directory, a Project target is returned.
         let dir = tempfile::tempdir().expect("must create temp dir");
-        let dir_path = dir.path().to_str().expect("utf-8").to_string();
-        temp_env::with_var("MEMPAL_DIR", Some(dir_path.as_str()), || {
-            let result = hook_get_mine_dir("");
-            assert!(result.is_some(), "MEMPAL_DIR must be returned");
-            assert_eq!(
-                result.expect("checked above"),
-                dir.path(),
-                "must return the MEMPAL_DIR path"
-            );
-        });
+        temp_env::with_var(
+            "MEMPAL_DIR",
+            Some(dir.path().to_str().expect("utf-8")),
+            || {
+                let targets = hook_get_mine_targets();
+                assert_eq!(targets.len(), 1, "must return exactly one target");
+                let MineTarget::Project(path) = targets.first().expect("checked len");
+                assert!(path.is_dir(), "returned path must be a directory");
+            },
+        );
     }
 
     #[test]
-    fn hook_get_mine_dir_returns_transcript_parent_when_no_env_var() {
-        // When MEMPAL_DIR is absent but transcript is a real file, its parent dir is returned.
-        let dir = tempfile::tempdir().expect("must create temp dir");
-        let transcript = dir.path().join("session.jsonl");
-        std::fs::write(&transcript, "{}").expect("must write transcript");
+    fn hook_get_mine_targets_returns_empty_when_mempal_dir_absent() {
+        // When MEMPAL_DIR is absent, no targets are returned — transcript is handled
+        // separately by hook_ingest_transcript.
         temp_env::with_var("MEMPAL_DIR", None::<&str>, || {
-            let result = hook_get_mine_dir(transcript.to_str().expect("utf-8"));
-            assert!(result.is_some(), "transcript parent must be returned");
-            assert_eq!(
-                result.expect("checked above"),
-                dir.path(),
-                "parent dir must match transcript parent"
+            let targets = hook_get_mine_targets();
+            assert!(
+                targets.is_empty(),
+                "must return empty when MEMPAL_DIR is not set"
             );
         });
     }
 
     #[test]
-    fn hook_get_mine_dir_returns_none_when_env_dir_does_not_exist() {
-        // MEMPAL_DIR pointing at a non-existent directory must fall through to None.
+    fn hook_get_mine_targets_returns_empty_when_env_dir_does_not_exist() {
+        // MEMPAL_DIR pointing at a non-existent directory must return empty targets.
         temp_env::with_var(
             "MEMPAL_DIR",
             Some("/nonexistent/dir/that/cannot/exist"),
             || {
-                let result = hook_get_mine_dir("");
-                assert!(result.is_none(), "non-existent MEMPAL_DIR must return None");
+                let targets = hook_get_mine_targets();
+                assert!(
+                    targets.is_empty(),
+                    "non-existent MEMPAL_DIR must return empty targets"
+                );
             },
         );
     }
