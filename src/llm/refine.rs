@@ -15,6 +15,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
+use crate::palace::corpus_origin::CorpusOriginResult;
 use crate::palace::entities::DetectedEntity;
 use crate::palace::project_scanner::DetectedDict;
 
@@ -59,6 +60,56 @@ Labels:
 - drop: false positive, common word, generic term, URL fragment, or number
 ";
 
+// ===================== PUBLIC API — CORPUS ORIGIN =====================
+
+/// Build a system-prompt preamble from a corpus-origin detection result.
+///
+/// Returns an empty string when the origin adds no useful context (no platform,
+/// no persona names, non-AI corpus). A non-empty return value is prepended to
+/// [`SYSTEM_PROMPT`] in [`refine_entities`] so the classifier has full context.
+pub fn build_corpus_origin_preamble(origin: &CorpusOriginResult) -> String {
+    let has_context = origin.likely_ai_dialogue
+        || !origin.agent_persona_names.is_empty()
+        || origin.primary_platform.is_some()
+        || origin.user_name.is_some();
+    if !has_context {
+        return String::new();
+    }
+    let mut preamble = String::from("CORPUS CONTEXT (from corpus-origin Pass 0 detection):\n");
+    if origin.likely_ai_dialogue {
+        let platform = origin
+            .primary_platform
+            .as_deref()
+            .unwrap_or("unknown AI platform");
+        let _ = writeln!(
+            preamble,
+            "- This corpus is an AI-dialogue record ({platform})."
+        );
+    }
+    if !origin.agent_persona_names.is_empty() {
+        let names = origin.agent_persona_names.join(", ");
+        // Agent persona names are user-assigned labels for the AI agent — never real people.
+        let _ = writeln!(
+            preamble,
+            "- Agent persona names (user-assigned AI labels, NOT real people): {names}. \
+             If found as entity candidates, classify them as 'drop'."
+        );
+    }
+    if let Some(ref user_name) = origin.user_name {
+        let _ = writeln!(
+            preamble,
+            "- Corpus author: {user_name}. If found as a candidate, classify as 'drop' \
+             (the author, not a third-party contributor)."
+        );
+    }
+    assert!(
+        !preamble.is_empty(),
+        "non-empty context must produce non-empty preamble"
+    );
+    preamble.push('\n');
+    preamble
+}
+
 // ===================== PUBLIC TYPES =====================
 
 /// Output of [`refine_entities`] — refined entities with processing statistics.
@@ -84,11 +135,28 @@ pub struct RefineResult {
 /// Sends candidates in batches of [`BATCH_SIZE`] to `provider.classify`, parses
 /// the JSON decisions, and applies them to `detected`. Returns a [`RefineResult`]
 /// with the refined dict and processing statistics.
+///
+/// When `corpus_origin` is provided, a preamble with platform and persona context
+/// is prepended to the system prompt so the classifier avoids false-positive human
+/// classifications for AI agent persona names.
 pub fn refine_entities(
     detected: DetectedDict,
     corpus: &str,
     provider: &dyn LlmProvider,
+    corpus_origin: Option<&CorpusOriginResult>,
 ) -> RefineResult {
+    let system_prompt = match corpus_origin {
+        Some(origin) => {
+            let preamble = build_corpus_origin_preamble(origin);
+            if preamble.is_empty() {
+                SYSTEM_PROMPT.to_string()
+            } else {
+                format!("{preamble}{SYSTEM_PROMPT}")
+            }
+        }
+        None => SYSTEM_PROMPT.to_string(),
+    };
+
     let candidates = refine_entities_collect_candidates(&detected);
     let batches_total = candidates.len().div_ceil(BATCH_SIZE);
     assert!(batches_total <= candidates.len() + 1);
@@ -99,7 +167,7 @@ pub fn refine_entities(
     let mut errors: usize = 0;
 
     for batch in candidates.chunks(BATCH_SIZE) {
-        match refine_entities_batch(batch, &corpus_lines, provider) {
+        match refine_entities_batch(batch, &corpus_lines, provider, &system_prompt) {
             Some(decisions) => {
                 all_decisions.extend(decisions);
                 batches_completed += 1;
@@ -182,17 +250,20 @@ fn refine_entities_collect_candidates(detected: &DetectedDict) -> Vec<(&str, &st
 ///
 /// Returns `Some(decisions)` on success (map may be empty if the LLM drops all),
 /// or `None` when the LLM call or JSON parsing fails.
+/// `system_prompt` is the effective prompt including any corpus-origin preamble.
 /// Called by [`refine_entities`] for each chunk.
 fn refine_entities_batch(
     batch: &[(&str, &str)],
     corpus_lines: &[&str],
     provider: &dyn LlmProvider,
+    system_prompt: &str,
 ) -> Option<HashMap<String, (String, String)>> {
     assert!(!batch.is_empty());
     assert!(batch.len() <= BATCH_SIZE);
+    assert!(!system_prompt.is_empty(), "system_prompt must not be empty");
 
     let user_prompt = build_user_prompt(batch, corpus_lines);
-    let response = provider.classify(SYSTEM_PROMPT, &user_prompt, true).ok()?;
+    let response = provider.classify(system_prompt, &user_prompt, true).ok()?;
 
     let expected_names: Vec<&str> = batch.iter().map(|(name, _)| *name).collect();
     assert!(!expected_names.is_empty());
@@ -915,7 +986,7 @@ mod tests {
             response: "{}".to_string(),
         };
         let detected = make_dict(vec![], vec![], vec![]);
-        let result = refine_entities(detected, "", &provider);
+        let result = refine_entities(detected, "", &provider, None);
         assert_eq!(result.batches_total, 0);
         assert_eq!(result.batches_completed, 0);
         assert_eq!(result.errors, 0);
@@ -929,7 +1000,7 @@ mod tests {
             response: response.to_string(),
         };
         let detected = make_dict(vec!["Alice"], vec!["MyLib"], vec![]);
-        let result = refine_entities(detected, "Alice wrote MyLib", &provider);
+        let result = refine_entities(detected, "Alice wrote MyLib", &provider, None);
         assert_eq!(result.batches_completed, 1);
         assert_eq!(result.errors, 0);
         assert_eq!(result.batches_total, 1);
@@ -941,7 +1012,7 @@ mod tests {
     fn refine_entities_with_failing_provider_counts_errors() {
         // A provider that always fails must produce an error for each batch.
         let detected = make_dict(vec!["Alice"], vec![], vec![]);
-        let result = refine_entities(detected, "", &FailProvider);
+        let result = refine_entities(detected, "", &FailProvider, None);
         assert_eq!(result.errors, 1);
         assert_eq!(result.batches_completed, 0);
         assert_eq!(result.batches_total, 1);
@@ -955,7 +1026,7 @@ mod tests {
             response: response.to_string(),
         };
         let detected = make_dict(vec!["Bot42"], vec![], vec![]);
-        let result = refine_entities(detected, "", &provider);
+        let result = refine_entities(detected, "", &provider, None);
         assert_eq!(result.dropped, 1);
         assert!(result.merged.people.is_empty());
         assert!(result.merged.projects.is_empty());

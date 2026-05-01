@@ -797,6 +797,55 @@ pub fn scan_for_detection(project_dir: &Path, max_files: usize) -> Vec<std::path
     result
 }
 
+/// Filter AI agent persona names out of `detected` to prevent them from being
+/// confirmed as human entities during the init pipeline.
+///
+/// When `origin.agent_persona_names` is non-empty, any entity in `people` or
+/// `uncertain` whose lowercased name exactly matches a persona name is removed.
+/// This prevents custom AI agent names (e.g. "Echo", "Sparrow") from being
+/// mistaken for real human contributors. Called by `run_discover_entities` in
+/// `cli/init.rs` after corpus-origin Pass 0.
+pub fn apply_corpus_origin(
+    detected: &mut crate::palace::project_scanner::DetectedDict,
+    origin: &crate::palace::corpus_origin::CorpusOriginResult,
+) {
+    if origin.agent_persona_names.is_empty() {
+        return;
+    }
+
+    // Build a lowercase set of persona names for O(1) lookup.
+    let persona_set: std::collections::HashSet<String> = origin
+        .agent_persona_names
+        .iter()
+        .map(|name| name.to_lowercase())
+        .collect();
+
+    assert!(
+        !persona_set.is_empty(),
+        "persona set must be non-empty when persona_names is not"
+    );
+
+    let before_people = detected.people.len();
+    let before_uncertain = detected.uncertain.len();
+
+    detected
+        .people
+        .retain(|entity| !persona_set.contains(&entity.name.to_lowercase()));
+    detected
+        .uncertain
+        .retain(|entity| !persona_set.contains(&entity.name.to_lowercase()));
+
+    // Pair assertion: filtered lists cannot grow.
+    debug_assert!(
+        detected.people.len() <= before_people,
+        "people must not grow after filter"
+    );
+    debug_assert!(
+        detected.uncertain.len() <= before_uncertain,
+        "uncertain must not grow after filter"
+    );
+}
+
 #[cfg(test)]
 // Acceptable in tests: .expect() produces immediate, clear failures.
 #[allow(clippy::expect_used)]

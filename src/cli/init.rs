@@ -15,6 +15,9 @@ use crate::config::{ProjectConfig, RoomConfig};
 use crate::error::Result;
 use crate::llm::client::ApiKeySource;
 use crate::llm::{LlmProvider, collect_corpus_text, get_provider, refine_entities};
+use crate::palace::corpus_origin::{
+    CorpusOriginResult, detect_origin_heuristic, detect_origin_llm,
+};
 use crate::palace::entities::DetectedEntity;
 use crate::palace::entity_confirm::confirm_entities;
 use crate::palace::entity_detect;
@@ -28,7 +31,11 @@ use crate::palace::session_scanner::{is_claude_projects_root, scan_claude_projec
 // Timeout for LLM calls during entity refinement — long enough for local models.
 const LLM_TIMEOUT_SECS: u64 = 60;
 
+// Corpus excerpt size for corpus-origin Pass 0 detection (same cap as the LLM tier).
+const CORPUS_SAMPLE_SIZE: usize = 800;
+
 const _: () = assert!(LLM_TIMEOUT_SECS > 0);
+const _: () = assert!(CORPUS_SAMPLE_SIZE > 0);
 
 // ===================== PUBLIC TYPES =====================
 
@@ -100,11 +107,16 @@ pub fn run(
     );
     assert!(!directory.as_os_str().is_empty());
 
+    // Pass 0: detect whether this corpus is an AI-dialogue record. Result is
+    // threaded into entity discovery (to filter out AI persona names) and entity
+    // refinement (to prime the LLM classifier with platform/persona context).
+    let corpus_origin = run_detect_corpus_origin(&directory, llm_opts);
+
     // Phase 1: discover entities from manifest files and git history.
-    let (projects, detected) = run_discover_entities(&directory, lang);
+    let (projects, detected) = run_discover_entities(&directory, lang, &corpus_origin);
 
     // Phase 1.5: optionally refine entities with the LLM.
-    let detected = run_refine_entities(detected, &directory, llm_opts)?;
+    let detected = run_refine_entities(detected, &directory, llm_opts, &corpus_origin)?;
 
     // Phase 2: detect rooms from folder structure.
     let rooms = detect_rooms_from_folders(&directory);
@@ -147,12 +159,108 @@ pub fn run(
 
 // ===================== PRIVATE HELPERS =====================
 
+/// Run Pass 0 corpus-origin detection on the project directory.
+///
+/// Tier 1 (heuristic) always runs. Tier 2 (LLM) runs when `llm_opts` is
+/// enabled and a provider is reachable; the consent gate is NOT applied at
+/// Pass 0 because entity refinement (Phase 1.5) applies it separately with
+/// a user-visible warning. Results are merged: `likely_ai_dialogue`/`confidence`
+/// from heuristic; `primary_platform`/`user_name`/`agent_persona_names` from
+/// LLM; `evidence` concatenated. Result persisted to `corpus_origin.json`.
+fn run_detect_corpus_origin(directory: &Path, llm_opts: &LlmOpts) -> CorpusOriginResult {
+    assert!(
+        directory.is_dir(),
+        "run_detect_corpus_origin: must be a dir"
+    );
+
+    // Use existing corpus collector; split into fixed-size chunks to produce
+    // samples for both detection tiers.
+    let corpus = collect_corpus_text(directory);
+    let samples: Vec<String> = corpus
+        .as_bytes()
+        .chunks(CORPUS_SAMPLE_SIZE)
+        .take(20)
+        .filter_map(|chunk| std::str::from_utf8(chunk).ok())
+        .map(str::to_string)
+        .collect();
+
+    let heuristic = detect_origin_heuristic(&samples);
+
+    // Tier 2: attempt LLM-assisted detection if a provider is configured. Errors
+    // are silently swallowed — corpus-origin failure must not abort init.
+    let result = run_detect_corpus_origin_llm(&heuristic, &samples, llm_opts);
+
+    // Persist for the audit trail — non-fatal on error.
+    if let Ok(json_text) = serde_json::to_string_pretty(&result.to_json_value()) {
+        let _ = std::fs::write(directory.join("corpus_origin.json"), json_text.as_bytes());
+    }
+
+    assert!(result.confidence >= 0.0 && result.confidence <= 1.0);
+    result
+}
+
+/// Optionally upgrade a heuristic result with LLM-tier detection, then merge.
+///
+/// Merges field-by-field: `likely_ai_dialogue`/`confidence` from heuristic;
+/// `primary_platform`, `user_name`, and persona names from LLM (when non-empty);
+/// `evidence` concatenated.
+/// Returns `heuristic` unchanged when the LLM is disabled or unavailable.
+/// Called by [`run_detect_corpus_origin`].
+fn run_detect_corpus_origin_llm(
+    heuristic: &CorpusOriginResult,
+    samples: &[String],
+    llm_opts: &LlmOpts,
+) -> CorpusOriginResult {
+    if !llm_opts.enabled || samples.is_empty() {
+        return heuristic.clone();
+    }
+    let Ok(provider) = get_provider(
+        &llm_opts.provider,
+        &llm_opts.model,
+        llm_opts.endpoint.clone(),
+        llm_opts.api_key.clone(),
+        LLM_TIMEOUT_SECS,
+    ) else {
+        return heuristic.clone();
+    };
+    let (available, _) = provider.check_available();
+    if !available {
+        return heuristic.clone();
+    }
+    let llm = detect_origin_llm(samples, provider.as_ref());
+    // Merge: keep heuristic's likely_ai_dialogue + confidence (more reliable than
+    // LLM alone for the binary verdict); take LLM's richer metadata fields.
+    let mut combined_evidence = heuristic.evidence.clone();
+    combined_evidence.extend(llm.evidence);
+    CorpusOriginResult {
+        likely_ai_dialogue: heuristic.likely_ai_dialogue,
+        confidence: heuristic.confidence,
+        primary_platform: llm
+            .primary_platform
+            .or_else(|| heuristic.primary_platform.clone()),
+        user_name: llm.user_name.or_else(|| heuristic.user_name.clone()),
+        agent_persona_names: if llm.agent_persona_names.is_empty() {
+            heuristic.agent_persona_names.clone()
+        } else {
+            llm.agent_persona_names
+        },
+        evidence: combined_evidence,
+    }
+}
+
 /// Discover entities from manifest files, git history, and Claude Code sessions.
 ///
 /// Returns the raw `ProjectInfo` list (for wing-name derivation) and the merged
 /// `DetectedDict`. Never fails — returns empty collections when the directory has
 /// no recognized signals. Called by [`run`].
-fn run_discover_entities(directory: &Path, lang: &[String]) -> (Vec<ProjectInfo>, DetectedDict) {
+///
+/// `corpus_origin` is used to filter out AI agent persona names from the entity
+/// lists so they are not incorrectly confirmed as human contributors.
+fn run_discover_entities(
+    directory: &Path,
+    lang: &[String],
+    corpus_origin: &CorpusOriginResult,
+) -> (Vec<ProjectInfo>, DetectedDict) {
     assert!(directory.is_dir());
     assert!(!directory.as_os_str().is_empty());
 
@@ -171,7 +279,11 @@ fn run_discover_entities(directory: &Path, lang: &[String]) -> (Vec<ProjectInfo>
     // Phase 1b: supplement with prose-based entity detection. Use the CLI-provided
     // languages so prose detection respects --lang during init; defaults to English
     // when the caller passed no languages.
-    let detected = run_discover_entities_prose(directory, detected, lang);
+    let mut detected = run_discover_entities_prose(directory, detected, lang);
+
+    // Apply corpus-origin filtering: strip entity names that match AI agent persona
+    // names so they are not confirmed as human contributors.
+    entity_detect::apply_corpus_origin(&mut detected, corpus_origin);
 
     // Pair assertion: entity lists are bounded.
     debug_assert!(
@@ -233,11 +345,13 @@ fn run_discover_entities_prose(
 ///
 /// Returns `detected` unchanged when LLM is disabled or unavailable. On LLM
 /// failure, batch errors are logged to stderr and remaining entities are
-/// returned as-is. Called by [`run`].
+/// returned as-is. `corpus_origin` is forwarded to the entity classifier so it
+/// can prime the model with platform/persona context from Pass 0. Called by [`run`].
 fn run_refine_entities(
     detected: DetectedDict,
     directory: &Path,
     llm_opts: &LlmOpts,
+    corpus_origin: &CorpusOriginResult,
 ) -> Result<DetectedDict> {
     assert!(directory.is_dir());
     assert!(!directory.as_os_str().is_empty());
@@ -247,7 +361,7 @@ fn run_refine_entities(
     };
 
     let corpus = collect_corpus_text(directory);
-    let result = refine_entities(detected, &corpus, provider.as_ref());
+    let result = refine_entities(detected, &corpus, provider.as_ref(), Some(corpus_origin));
 
     if result.errors > 0 {
         eprintln!(
@@ -960,7 +1074,8 @@ mod tests {
             topics: vec![],
         };
         let opts = LlmOpts::default(); // enabled = false
-        let result = run_refine_entities(detected, temp_dir.path(), &opts)
+        let corpus_origin = detect_origin_heuristic(&[]);
+        let result = run_refine_entities(detected, temp_dir.path(), &opts, &corpus_origin)
             .expect("disabled LLM refine must not fail");
         assert!(result.people.is_empty());
         assert!(result.projects.is_empty());
@@ -1156,7 +1271,8 @@ mod tests {
         .expect("must write session file");
 
         // run_discover_entities should take the is_claude_projects_root=true branch.
-        let (_projects, detected) = run_discover_entities(temp_dir.path(), &[]);
+        let corpus_origin = detect_origin_heuristic(&[]);
+        let (_projects, detected) = run_discover_entities(temp_dir.path(), &[], &corpus_origin);
         // The session JSONL carries cwd="/Users/robbie/test-proj", so the session
         // scanner must surface "test-proj" in detected.projects.
         assert!(
