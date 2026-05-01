@@ -1539,6 +1539,79 @@ rooms:
         );
     }
 
+    // -- topic_tunnel_min_count ------------------------------------------------
+
+    #[test]
+    fn topic_tunnel_min_count_unset_returns_one() {
+        // Without the env var the default minimum is one shared topic per pair.
+        temp_env::with_var("MEMPALACE_TOPIC_TUNNEL_MIN_COUNT", None::<&str>, || {
+            assert_eq!(
+                MempalaceConfig::topic_tunnel_min_count(),
+                1,
+                "unset env var must yield default of 1"
+            );
+        });
+    }
+
+    #[test]
+    fn topic_tunnel_min_count_valid_integer_round_trips() {
+        // A clean positive integer must round-trip into a usize.
+        temp_env::with_var("MEMPALACE_TOPIC_TUNNEL_MIN_COUNT", Some("3"), || {
+            let result = MempalaceConfig::topic_tunnel_min_count();
+            assert_eq!(result, 3, "\"3\" must parse to 3");
+            // Pair assertion: above the clamp floor.
+            assert!(result >= 1, "result must always be at least 1");
+        });
+    }
+
+    #[test]
+    fn topic_tunnel_min_count_zero_clamps_to_one() {
+        // Zero is below the meaningful floor of 1 — the function must clamp up.
+        temp_env::with_var("MEMPALACE_TOPIC_TUNNEL_MIN_COUNT", Some("0"), || {
+            assert_eq!(
+                MempalaceConfig::topic_tunnel_min_count(),
+                1,
+                "0 must clamp to 1 (a tunnel needs at least one shared topic)"
+            );
+        });
+    }
+
+    #[test]
+    fn topic_tunnel_min_count_invalid_string_falls_back_to_default() {
+        // Garbage input must fall through to the default rather than panic.
+        temp_env::with_var("MEMPALACE_TOPIC_TUNNEL_MIN_COUNT", Some("abc"), || {
+            assert_eq!(
+                MempalaceConfig::topic_tunnel_min_count(),
+                1,
+                "non-numeric env var must fall back to default 1"
+            );
+        });
+    }
+
+    #[test]
+    fn topic_tunnel_min_count_whitespace_falls_back_to_default() {
+        // Whitespace-only is not a number; treat as unset and use the default.
+        temp_env::with_var("MEMPALACE_TOPIC_TUNNEL_MIN_COUNT", Some("   "), || {
+            assert_eq!(
+                MempalaceConfig::topic_tunnel_min_count(),
+                1,
+                "whitespace-only env var must fall back to default 1"
+            );
+        });
+    }
+
+    #[test]
+    fn topic_tunnel_min_count_negative_falls_back_to_default() {
+        // Negative values cannot parse as `usize` — fall back to default rather than wrap.
+        temp_env::with_var("MEMPALACE_TOPIC_TUNNEL_MIN_COUNT", Some("-2"), || {
+            assert_eq!(
+                MempalaceConfig::topic_tunnel_min_count(),
+                1,
+                "negative env var must fall back to default 1"
+            );
+        });
+    }
+
     #[test]
     fn palace_db_path_env_var_empty_falls_back_to_config() {
         // An empty MEMPALACE_PALACE_PATH must not panic — it must fall through to

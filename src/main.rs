@@ -40,6 +40,13 @@ fn main() {
         .block_on(async {
             let cli = Cli::parse();
             if let Err(e) = app::run(cli).await {
+                // Operator-initiated interruption (Ctrl-C) — the inner command
+                // already printed a contextual message (e.g. resume hint), and
+                // RAII guards have unwound, so exit silently with 130 to match
+                // POSIX SIGINT convention without doubling the message.
+                if matches!(e, error::Error::Interrupted) {
+                    std::process::exit(130);
+                }
                 eprintln!("error: {e}");
                 std::process::exit(1);
             }

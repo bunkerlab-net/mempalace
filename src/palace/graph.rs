@@ -526,8 +526,15 @@ async fn create_tunnel_upsert(
 
     let rows_updated = connection
         .execute(
-            "UPDATE explicit_tunnels SET label = ?1, source_drawer_id = ?2, target_drawer_id = ?3, updated_at = ?4 WHERE id = ?5",
-            turso::params![params.label, params.source_drawer_id, params.target_drawer_id, now, tunnel_id],
+            "UPDATE explicit_tunnels SET label = ?1, source_drawer_id = ?2, target_drawer_id = ?3, kind = ?4, updated_at = ?5 WHERE id = ?6",
+            turso::params![
+                params.label,
+                params.source_drawer_id,
+                params.target_drawer_id,
+                params.kind,
+                now,
+                tunnel_id,
+            ],
         )
         .await?;
 
@@ -771,6 +778,12 @@ pub fn topic_room(name: &str) -> String {
 ///
 /// Called by `compute_topic_tunnels` before intersecting pairs. Empty wing names
 /// and empty topic names are silently skipped so the caller only sees clean data.
+///
+/// Wing keys are normalized via [`normalize_wing`] (the canonical slug rule used
+/// elsewhere in the graph) so different raw spellings of the same wing — e.g.
+/// `my-proj` and `my_proj` — collapse into one bucket here rather than colliding
+/// later inside `create_tunnel`. Topics from each variant merge into the shared
+/// bucket with first-observed casing winning per topic key.
 fn compute_topic_tunnels_build_wing_map(
     topics_by_wing: &std::collections::BTreeMap<String, Vec<String>>,
 ) -> std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>> {
@@ -783,21 +796,26 @@ fn compute_topic_tunnels_build_wing_map(
         if wing_trimmed.is_empty() {
             continue;
         }
-        let mut bucket: std::collections::BTreeMap<String, String> =
-            std::collections::BTreeMap::new();
+        let wing_key = normalize_wing_name(wing_trimmed);
+        if wing_key.is_empty() {
+            continue;
+        }
+        let bucket = wing_topics.entry(wing_key).or_default();
         for name in names {
             let trimmed = name.trim();
             if trimmed.is_empty() {
                 continue;
             }
             let key = topic_normalize(trimmed);
-            // setdefault: keep the first-observed casing.
+            // setdefault: keep the first-observed casing across every variant
+            // of this wing key (e.g. both `my-proj` and `my_proj` contribute
+            // into the same bucket; whichever entry we see first wins).
             bucket.entry(key).or_insert_with(|| trimmed.to_string());
         }
-        if !bucket.is_empty() {
-            wing_topics.insert(wing_trimmed.to_string(), bucket);
-        }
     }
+    // Drop wings that contributed only empty topic names — keeps the downstream
+    // pair-intersection loop free of placeholder buckets.
+    wing_topics.retain(|_, bucket| !bucket.is_empty());
     wing_topics
 }
 
@@ -1267,6 +1285,37 @@ mod tests {
         assert!(
             tunnels.is_empty(),
             "no tunnels must exist when threshold not met"
+        );
+    }
+
+    #[tokio::test]
+    async fn compute_topic_tunnels_collapses_wing_key_variants() {
+        // Regression: `my-proj` and `my_proj` must normalise to a single wing key
+        // so the loop that pairs wings cannot accidentally create a self-tunnel
+        // between two spellings of the same underlying wing.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let mut topics_by_wing = std::collections::BTreeMap::new();
+        topics_by_wing.insert("my-proj".to_string(), vec!["Rust".to_string()]);
+        topics_by_wing.insert("my_proj".to_string(), vec!["rust".to_string()]);
+        topics_by_wing.insert("other_proj".to_string(), vec!["Rust".to_string()]);
+
+        // After normalisation the inputs reduce to two distinct wings: `my_proj`
+        // and `other_proj` — exactly one pair, so exactly one tunnel.
+        let count = compute_topic_tunnels(&connection, &topics_by_wing, 1, "shared topic")
+            .await
+            .expect("compute_topic_tunnels must succeed");
+        assert_eq!(
+            count, 1,
+            "wing-key variants must collapse: exactly one pair → one tunnel"
+        );
+
+        let tunnels = list_tunnels(&connection, None)
+            .await
+            .expect("list_tunnels must succeed");
+        // Pair assertion: no tunnel should ever have source == target wing.
+        assert!(
+            tunnels.iter().all(|t| t.source_wing != t.target_wing),
+            "wing-key variants must not produce a self-tunnel: {tunnels:?}"
         );
     }
 

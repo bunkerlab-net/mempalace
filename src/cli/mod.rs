@@ -238,11 +238,12 @@ pub enum Command {
         /// Skip the confirmation prompt (non-interactive / CI mode)
         #[arg(long, short = 'y')]
         skip_confirm: bool,
-        /// Override the truncation safety guard after independently verifying the palace size.
+        /// Override an aborting truncation safety guard after independently verifying the palace size.
         ///
-        /// Required when extraction returns exactly 10,000 drawers and the database
-        /// count cross-check either matches or cannot be read. Use only after confirming
-        /// the palace genuinely contains that count.
+        /// Use only when the guard actually aborts — e.g. the database count exceeds the
+        /// extracted 10,000 drawers, or the database count cannot be read at the 10,000
+        /// extraction limit. Pass this flag only after confirming the palace genuinely
+        /// holds the reported count; it does not need to be set when the guard is silent.
         #[arg(long)]
         confirm_truncation_ok: bool,
     },

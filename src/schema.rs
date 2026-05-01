@@ -172,10 +172,14 @@ pub async fn ensure_schema(connection: &Connection) -> Result<()> {
 
     // Migration: add kind column to explicit_tunnels (introduced to distinguish
     // user-created "explicit" tunnels from auto-generated "topic" tunnels).
+    // Mirror the fresh-schema definition exactly — TEXT NOT NULL DEFAULT 'explicit'
+    // — so an upgraded DB matches a freshly-created one. SQLite (>=3.3.0) honours
+    // a non-NULL DEFAULT inside ALTER TABLE ADD COLUMN, so the back-fill happens
+    // at column-add time and the NOT NULL constraint is satisfied on existing rows.
     ignore_duplicate_column(
         connection
             .execute(
-                "ALTER TABLE explicit_tunnels ADD COLUMN kind TEXT DEFAULT 'explicit'",
+                "ALTER TABLE explicit_tunnels ADD COLUMN kind TEXT NOT NULL DEFAULT 'explicit'",
                 (),
             )
             .await,

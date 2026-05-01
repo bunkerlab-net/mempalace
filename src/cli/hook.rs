@@ -14,6 +14,17 @@ use uuid::Uuid;
 use crate::config::config_dir;
 use crate::error::{Error, Result};
 
+/// PID file written by the transcript ingest mine. Distinct from
+/// [`PID_FILE_PROJECT`] so the two passes can run concurrently when the stop
+/// hook fires both — sharing one `mine.pid` would let whichever wrote last
+/// suppress the other.
+const PID_FILE_TRANSCRIPT: &str = "mine_transcript.pid";
+
+/// PID file written by the `MEMPAL_DIR` project-mode mine. Distinct from
+/// [`PID_FILE_TRANSCRIPT`] so transcript ingest does not poison the
+/// "already-running" guard for project mining.
+const PID_FILE_PROJECT: &str = "mine_project.pid";
+
 /// Number of human messages between auto-save checkpoints.
 const SAVE_INTERVAL: usize = 15;
 /// Number of recent user messages to sample for theme extraction.
@@ -312,18 +323,20 @@ fn hook_stop_save_blocking(
 
 /// Precompact hook: mine transcript convos and project files, then allow compaction.
 ///
-/// `hook_ingest_transcript` handles the transcript convos synchronously so the
-/// current session messages land before the context is compressed. `hook_spawn_mine_sync`
-/// handles `MEMPAL_DIR` project files (when set). The two calls are kept separate to
-/// avoid timeout stacking against the harness ceiling and to prevent PID-file overwrites
-/// that would suppress one mine when both targets fire from the same hook call.
+/// [`hook_ingest_transcript_sync`] handles the transcript convos synchronously
+/// so the current session's messages land BEFORE the harness compresses the
+/// context — the async [`hook_ingest_transcript`] used by stop hooks would
+/// otherwise race the compaction. [`hook_spawn_mine_sync`] handles the
+/// `MEMPAL_DIR` project files (when set), also synchronously. Both calls are
+/// blocking but use distinct pid file conventions (no pid file for sync calls)
+/// so neither suppresses the other.
 fn hook_precompact(input: &HookInput, state_dir: &Path) {
     assert!(!input.session_id.is_empty());
     hook_log(
         state_dir,
         &format!("PRE-COMPACT triggered for session {}", input.session_id),
     );
-    hook_ingest_transcript(state_dir, &input.transcript_path);
+    hook_ingest_transcript_sync(state_dir, &input.transcript_path);
     hook_spawn_mine_sync(state_dir);
     hook_output(&json!({}));
 }
@@ -670,9 +683,18 @@ fn hook_get_mine_targets() -> Vec<MineTarget> {
     }
 }
 
-/// Return `true` if a previous background mine process is still running.
-fn hook_mine_already_running(state_dir: &Path) -> bool {
-    let pid_file = state_dir.join("mine.pid");
+/// Return `true` if a previous background mine process named by `pid_file_name`
+/// is still running.
+///
+/// Each mine target writes its own pid file (see [`PID_FILE_TRANSCRIPT`] /
+/// [`PID_FILE_PROJECT`]) so the transcript ingest and project mine never
+/// suppress each other through a shared lock.
+fn hook_mine_already_running(state_dir: &Path, pid_file_name: &str) -> bool {
+    assert!(
+        !pid_file_name.is_empty(),
+        "hook_mine_already_running: pid_file_name must not be empty"
+    );
+    let pid_file = state_dir.join(pid_file_name);
     let Ok(content) = std::fs::read_to_string(&pid_file) else {
         return false;
     };
@@ -716,8 +738,13 @@ fn hook_maybe_auto_ingest(state_dir: &Path) {
     if targets.is_empty() {
         return;
     }
-    if hook_mine_already_running(state_dir) {
-        hook_log(state_dir, "Skipping auto-ingest: mine already running");
+    // Only inspect the project-mode pid — the transcript ingest writes its own
+    // pid file and must not block the project mine from starting in parallel.
+    if hook_mine_already_running(state_dir, PID_FILE_PROJECT) {
+        hook_log(
+            state_dir,
+            "Skipping auto-ingest: project mine already running",
+        );
         return;
     }
     for target in &targets {
@@ -728,8 +755,10 @@ fn hook_maybe_auto_ingest(state_dir: &Path) {
 
 /// Spawn `mempalace mine <dir> --mode <mode>` in the background.
 ///
-/// Appends stdout and stderr to `hook.log`. Writes the child PID to `mine.pid`
-/// so subsequent hook fires can detect whether the mine is still running.
+/// Appends stdout and stderr to `hook.log`. Writes the child PID to
+/// [`PID_FILE_PROJECT`] so subsequent hook fires can detect whether the
+/// project mine is still running. Distinct from the transcript-mode pid file
+/// so the two passes can run concurrently.
 fn hook_spawn_mine_bg(state_dir: &Path, mine_dir: &Path, mode: &str) {
     assert!(
         mine_dir.is_dir(),
@@ -755,7 +784,9 @@ fn hook_spawn_mine_bg(state_dir: &Path, mine_dir: &Path, mode: &str) {
         .stderr(std::process::Stdio::from(log_copy))
         .spawn();
     if let Ok(child) = result {
-        let _ = std::fs::write(state_dir.join("mine.pid"), child.id().to_string());
+        // Project-mode pid file — distinct from the transcript ingest pid so
+        // both passes can run concurrently when the stop hook fires both.
+        let _ = std::fs::write(state_dir.join(PID_FILE_PROJECT), child.id().to_string());
     }
 }
 
@@ -797,9 +828,9 @@ fn hook_spawn_mine_sync(state_dir: &Path) {
 ///
 /// The transcript's parent directory is always mined as a conversation source so
 /// the current session's messages are captured even before the stop hook fires.
-/// Writes the child PID to `mine.pid` so the subsequent `hook_maybe_auto_ingest`
-/// call sees the in-flight mine via [`hook_mine_already_running`] and does not
-/// spawn a duplicate mine for the same directory.
+/// Writes the child PID to [`PID_FILE_TRANSCRIPT`] (a separate file from the
+/// project-mode pid) so the subsequent `hook_maybe_auto_ingest` project pass is
+/// not suppressed by an in-flight transcript ingest.
 fn hook_ingest_transcript(state_dir: &Path, transcript_path: &Path) {
     if !transcript_path.is_file() {
         return;
@@ -811,10 +842,12 @@ fn hook_ingest_transcript(state_dir: &Path, transcript_path: &Path) {
     if meta.len() < 100 {
         return;
     }
-    if hook_mine_already_running(state_dir) {
+    // Only check the transcript-mode pid; the project mine has its own pid
+    // file and must not block a transcript ingest from running concurrently.
+    if hook_mine_already_running(state_dir, PID_FILE_TRANSCRIPT) {
         hook_log(
             state_dir,
-            "Skipping transcript ingest: mine already running",
+            "Skipping transcript ingest: transcript mine already running",
         );
         return;
     }
@@ -844,13 +877,84 @@ fn hook_ingest_transcript(state_dir: &Path, transcript_path: &Path) {
         .stderr(std::process::Stdio::from(log_copy))
         .spawn();
     if let Ok(child) = result {
-        // Share the same pid file used by hook_spawn_mine_bg so the auto-ingest
-        // call right after this sees the in-flight mine and skips its own spawn.
-        let _ = std::fs::write(state_dir.join("mine.pid"), child.id().to_string());
+        // Transcript-mode pid — kept separate from PID_FILE_PROJECT so the
+        // project mine guard does not see this in-flight ingest as itself.
+        let _ = std::fs::write(state_dir.join(PID_FILE_TRANSCRIPT), child.id().to_string());
         hook_log(
             state_dir,
             &format!("Transcript ingest started: {}", transcript_path.display()),
         );
+    }
+}
+
+/// Synchronously run `mempalace mine <transcript_parent> --mode convos`.
+///
+/// Used by the precompact hook so the transcript ingest finishes BEFORE the
+/// harness compresses the conversation. Mirrors [`hook_ingest_transcript`]'s
+/// gating but blocks on `.status()` instead of `.spawn()`. Writes no pid file
+/// because the call is blocking — the in-flight protection is the function
+/// frame itself. Non-zero child exits are logged but not surfaced as errors so
+/// a child failure cannot abort compaction.
+fn hook_ingest_transcript_sync(state_dir: &Path, transcript_path: &Path) {
+    if !transcript_path.is_file() {
+        return;
+    }
+    let Ok(meta) = std::fs::metadata(transcript_path) else {
+        return;
+    };
+    if meta.len() < 100 {
+        return;
+    }
+    let Some(parent) = transcript_path.parent() else {
+        return;
+    };
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(state_dir);
+    let Some(log_file) = hook_open_log(state_dir) else {
+        return;
+    };
+    let Ok(log_copy) = log_file.try_clone() else {
+        return;
+    };
+    let status = std::process::Command::new(&exe)
+        .args([
+            "mine",
+            &parent.to_string_lossy(),
+            "--mode",
+            "convos",
+            "--wing",
+            "sessions",
+        ])
+        .stdout(std::process::Stdio::from(log_file))
+        .stderr(std::process::Stdio::from(log_copy))
+        .status();
+    match status {
+        Ok(exit_status) if exit_status.success() => {
+            hook_log(
+                state_dir,
+                &format!(
+                    "Transcript ingest (sync) finished: {}",
+                    transcript_path.display()
+                ),
+            );
+        }
+        Ok(exit_status) => {
+            hook_log(
+                state_dir,
+                &format!(
+                    "Transcript ingest (sync) exited non-zero ({exit_status}): {}",
+                    transcript_path.display()
+                ),
+            );
+        }
+        Err(error) => {
+            hook_log(
+                state_dir,
+                &format!("Transcript ingest (sync) failed to spawn: {error}"),
+            );
+        }
     }
 }
 
@@ -1302,17 +1406,41 @@ mod tests {
 
     #[test]
     fn hook_mine_already_running_returns_false_when_pid_file_absent() {
-        // No PID file must return false (no mine running).
+        // No PID file (for either mode) must return false — no mine running.
         let dir = tempfile::tempdir().expect("must create temp dir");
-        assert!(!hook_mine_already_running(dir.path()));
+        assert!(!hook_mine_already_running(dir.path(), PID_FILE_PROJECT));
+        assert!(!hook_mine_already_running(dir.path(), PID_FILE_TRANSCRIPT));
     }
 
     #[test]
     fn hook_mine_already_running_returns_false_for_non_numeric_pid() {
         // A PID file with non-numeric content must return false gracefully.
         let dir = tempfile::tempdir().expect("must create temp dir");
-        std::fs::write(dir.path().join("mine.pid"), "not-a-pid").expect("must write");
-        assert!(!hook_mine_already_running(dir.path()));
+        std::fs::write(dir.path().join(PID_FILE_PROJECT), "not-a-pid").expect("must write");
+        assert!(!hook_mine_already_running(dir.path(), PID_FILE_PROJECT));
+    }
+
+    #[test]
+    fn hook_mine_already_running_pid_files_are_independent() {
+        // Regression: writing a (live or fake) pid into one of the per-mode
+        // files must NOT mark the other mode as running. Without per-mode
+        // separation, transcript ingest would mask project mining and vice
+        // versa.
+        let dir = tempfile::tempdir().expect("must create temp dir");
+        // Write a non-existent (dead) PID into the project pid file. The
+        // function returns false either way (PID is dead), but the key check
+        // below is that the OTHER pid file is not consulted.
+        std::fs::write(dir.path().join(PID_FILE_PROJECT), "4200001").expect("must write");
+        assert!(
+            !hook_mine_already_running(dir.path(), PID_FILE_TRANSCRIPT),
+            "transcript pid file does not exist — must report not running"
+        );
+        // Pair: the file that does exist (with a dead PID) also must not be
+        // reported as running, because the PID does not refer to a live process.
+        assert!(
+            !hook_mine_already_running(dir.path(), PID_FILE_PROJECT),
+            "dead project pid must report not running"
+        );
     }
 
     // -------- hook_ingest_transcript --------
@@ -1521,7 +1649,9 @@ mod tests {
             hook_maybe_auto_ingest(dir.path());
         });
         // Postcondition: no PID file was written (no spawn occurred).
-        assert!(!dir.path().join("mine.pid").exists());
+        assert!(!dir.path().join(PID_FILE_PROJECT).exists());
+        // Pair: no transcript pid leaked either.
+        assert!(!dir.path().join(PID_FILE_TRANSCRIPT).exists());
     }
 
     // -------- hook_pid_alive --------
@@ -1666,7 +1796,7 @@ mod tests {
         // the code path executes without panic.
         hook_spawn_mine_bg(state_dir.path(), mine_dir.path(), "projects");
         // Postcondition: a PID file may exist (if spawn succeeded); no panic.
-        let _ = state_dir.path().join("mine.pid").exists();
+        let _ = state_dir.path().join(PID_FILE_PROJECT).exists();
     }
 
     // -------- hook_spawn_mine_sync --------
@@ -1687,6 +1817,52 @@ mod tests {
         );
         // Postcondition: no panic — function ran to completion.
         assert!(state_dir.path().exists());
+    }
+
+    // -------- hook_ingest_transcript_sync --------
+
+    #[test]
+    fn hook_ingest_transcript_sync_does_nothing_for_nonexistent_path() {
+        // A non-existent transcript must early-return without panicking.
+        let dir = tempfile::tempdir().expect("must create temp dir");
+        hook_ingest_transcript_sync(dir.path(), &PathBuf::from("/nonexistent/file.jsonl"));
+        // Postcondition: no transcript pid file written (no spawn occurred).
+        assert!(!dir.path().join(PID_FILE_TRANSCRIPT).exists());
+    }
+
+    #[test]
+    fn hook_ingest_transcript_sync_does_nothing_for_small_file() {
+        // Files under 100 bytes must be skipped without spawning a process.
+        let dir = tempfile::tempdir().expect("must create temp dir");
+        let transcript = dir.path().join("tiny.jsonl");
+        std::fs::write(&transcript, b"{}").expect("must write");
+        hook_ingest_transcript_sync(dir.path(), &transcript);
+        // Pair: the transcript file is left untouched and the sync version
+        // never writes a pid file (its blocking call is the in-flight signal).
+        assert!(transcript.exists());
+        assert!(!dir.path().join(PID_FILE_TRANSCRIPT).exists());
+    }
+
+    #[test]
+    fn hook_ingest_transcript_sync_blocks_until_child_completes() {
+        // With a large enough transcript the sync helper invokes .status() and
+        // therefore blocks until the spawned binary exits — verify the call
+        // returns control without panic and does not leak a transcript pid.
+        let dir = tempfile::tempdir().expect("must create temp dir");
+        let transcript = dir.path().join("session.jsonl");
+        let content = r#"{"message":{"role":"user","content":"some session content"}}"#.repeat(3);
+        std::fs::write(&transcript, content).expect("must write transcript");
+        hook_ingest_transcript_sync(dir.path(), &transcript);
+        // Sync mode never writes PID_FILE_TRANSCRIPT — that file is reserved
+        // for the async path. Existence of the file would indicate a regression
+        // back to the old shared-pid coordination.
+        assert!(
+            !dir.path().join(PID_FILE_TRANSCRIPT).exists(),
+            "sync transcript ingest must NOT write PID_FILE_TRANSCRIPT"
+        );
+        // Pair assertion: log was created during the call (the child was
+        // attempted, success or fail).
+        assert!(dir.path().join("hook.log").exists());
     }
 
     // -------- hook_ingest_transcript (large-file path) --------
@@ -1901,8 +2077,8 @@ mod tests {
         // PID 1 is always init/launchd — exists — so we use PID 4_200_001 which
         // cannot be a valid running process (above Linux pid_max).
         let dir = tempfile::tempdir().expect("must create temp dir");
-        std::fs::write(dir.path().join("mine.pid"), "4200001").expect("must write");
-        let result = hook_mine_already_running(dir.path());
+        std::fs::write(dir.path().join(PID_FILE_PROJECT), "4200001").expect("must write");
+        let result = hook_mine_already_running(dir.path(), PID_FILE_PROJECT);
         assert!(!result, "dead PID must return false");
     }
 

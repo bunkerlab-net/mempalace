@@ -236,7 +236,12 @@ impl OpenAICompatProvider {
         let (resolved_key, source) = if let Some(key) = api_key.filter(|k| !k.is_empty()) {
             (Some(key), Some(ApiKeySource::Flag))
         } else {
-            let env_key = std::env::var("OPENAI_API_KEY").ok();
+            // Treat blank or whitespace-only env values as missing — shells routinely
+            // export empty vars when users clear them, and accepting `""` as a key
+            // would mark `ApiKeySource::Env` and bypass the consent gate falsely.
+            let env_key = std::env::var("OPENAI_API_KEY")
+                .ok()
+                .filter(|key| !key.trim().is_empty());
             let source = if env_key.is_some() {
                 Some(ApiKeySource::Env)
             } else {
@@ -392,7 +397,12 @@ impl AnthropicProvider {
         let (resolved_key, source) = if let Some(key) = api_key.filter(|k| !k.is_empty()) {
             (Some(key), Some(ApiKeySource::Flag))
         } else {
-            let env_key = std::env::var("ANTHROPIC_API_KEY").ok();
+            // Treat blank or whitespace-only env values as missing — shells routinely
+            // export empty vars when users clear them, and accepting `""` as a key
+            // would mark `ApiKeySource::Env` and bypass the consent gate falsely.
+            let env_key = std::env::var("ANTHROPIC_API_KEY")
+                .ok()
+                .filter(|key| !key.trim().is_empty());
             let source = if env_key.is_some() {
                 Some(ApiKeySource::Env)
             } else {
@@ -705,8 +715,13 @@ pub fn endpoint_is_local(url: &str) -> bool {
             return true;
         }
     }
-    // IPv6 unique-local: fc00::/7 — addresses starting with fc or fd.
-    if host.starts_with("fc") || host.starts_with("fd") {
+    // IPv6 unique-local: fc00::/7. Require the host to actually parse as an
+    // IPv6 literal before applying the prefix rule — otherwise hostnames like
+    // `fda.example` would be misclassified as local. The mask `0xfe == 0xfc`
+    // matches the entire fc00::/7 block (first nibble of the high octet).
+    if let Ok(ip) = host.parse::<std::net::Ipv6Addr>()
+        && ip.octets()[0] & 0xfe == 0xfc
+    {
         return true;
     }
     false
@@ -1374,6 +1389,22 @@ mod tests {
     }
 
     #[test]
+    fn endpoint_is_local_hostname_with_fc_fd_prefix_is_external() {
+        // Regression: hostnames that happen to start with "fc" or "fd" must NOT
+        // be misclassified as IPv6 ULA — only literal IPv6 addresses parse and
+        // qualify. A bare DNS hostname like `fda.example` is external.
+        assert!(
+            !endpoint_is_local("https://fda.example"),
+            "fda.example is a DNS hostname, not an IPv6 ULA"
+        );
+        // Pair assertion: same shape with `fc` prefix.
+        assert!(
+            !endpoint_is_local("https://fc-server.example.com"),
+            "fc-server.example.com is a DNS hostname, not an IPv6 ULA"
+        );
+    }
+
+    #[test]
     fn endpoint_is_local_public_endpoints_are_external() {
         // Public SaaS endpoints must not be treated as local.
         assert!(
@@ -1420,6 +1451,50 @@ mod tests {
             let provider = OpenAICompatProvider::new("gpt-4o".to_string(), None, None, 60);
             assert_eq!(provider.api_key_source(), None);
             assert!(provider.api_key.is_none());
+        });
+    }
+
+    #[test]
+    fn openai_compat_api_key_source_none_when_env_key_blank() {
+        // A blank OPENAI_API_KEY (e.g. from `export OPENAI_API_KEY=`) must NOT
+        // qualify as a key — both the value and the source must be omitted so
+        // the consent gate does not falsely classify the provider as Env-keyed.
+        temp_env::with_var("OPENAI_API_KEY", Some(""), || {
+            let provider = OpenAICompatProvider::new("gpt-4o".to_string(), None, None, 60);
+            assert_eq!(
+                provider.api_key_source(),
+                None,
+                "blank env var must not set ApiKeySource::Env"
+            );
+            assert!(
+                provider.api_key.is_none(),
+                "blank env var must not produce a stored key"
+            );
+        });
+        // Pair: whitespace-only env values must also be treated as missing.
+        temp_env::with_var("OPENAI_API_KEY", Some("   \t"), || {
+            let provider = OpenAICompatProvider::new("gpt-4o".to_string(), None, None, 60);
+            assert_eq!(provider.api_key_source(), None);
+            assert!(provider.api_key.is_none());
+        });
+    }
+
+    #[test]
+    fn anthropic_api_key_source_none_when_env_key_blank() {
+        // Same regression for the Anthropic constructor: blank ANTHROPIC_API_KEY
+        // must not yield a stored key or an Env source.
+        temp_env::with_var("ANTHROPIC_API_KEY", Some(""), || {
+            let provider =
+                AnthropicProvider::new("claude-haiku-4-5-20251001".to_string(), None, None, 60);
+            assert_eq!(
+                provider.api_key_source(),
+                None,
+                "blank env var must not set ApiKeySource::Env"
+            );
+            assert!(
+                provider.api_key.is_none(),
+                "blank env var must not produce a stored key"
+            );
         });
     }
 

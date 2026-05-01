@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use turso::Connection;
 
 use crate::config::{ProjectConfig, RoomConfig, normalize_wing_name};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::palace::chunker::chunk_text;
 use crate::palace::drawer;
 use crate::palace::room_detect::{detect_room, is_skip_dir};
@@ -477,7 +477,8 @@ fn mine_shell_quote(path_str: &str) -> String {
 ///
 /// Returns `(drawers_total, files_skipped, files_unreadable_or_too_short, room_counts)`.
 /// Checks `ctrl_c_flag` before each file; on interrupt prints a resume hint and
-/// exits with code 130.
+/// returns [`Error::Interrupted`] so RAII guards (the mine lock) release on the
+/// unwind. The CLI translates the variant into POSIX exit code 130 after cleanup.
 async fn mine_process_files(
     connection: &Connection,
     files: &[PathBuf],
@@ -509,7 +510,10 @@ async fn mine_process_files(
                 "Resume with: mempalace mine {}",
                 mine_shell_quote(&project_dir.display().to_string())
             );
-            std::process::exit(130);
+            // Bubble out as a typed error so MineGuard::drop runs on the unwind.
+            // main.rs maps Error::Interrupted to POSIX exit code 130 explicitly,
+            // matching the prior std::process::exit(130) behaviour for the user.
+            return Err(Error::Interrupted);
         }
 
         let source_file = filepath.to_string_lossy().to_string();

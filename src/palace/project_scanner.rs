@@ -1015,13 +1015,20 @@ pub fn merge_detected(
         "secondary entity names must be non-empty"
     );
 
-    // Collect all names already in primary (case-insensitive).
+    // Collect all entity names already in primary (case-insensitive). Topics
+    // are deduped against their own bucket only — they share an orthogonal
+    // namespace from people/projects/uncertain, so a topic that happens to
+    // share a name with a person (e.g. `"Rust"`) must not be silently dropped.
     let mut seen: HashSet<String> = primary
         .people
         .iter()
         .chain(&primary.projects)
         .chain(&primary.uncertain)
-        .chain(&primary.topics)
+        .map(|e| e.name.to_lowercase())
+        .collect();
+    let mut seen_topics: HashSet<String> = primary
+        .topics
+        .iter()
         .map(|e| e.name.to_lowercase())
         .collect();
 
@@ -1043,9 +1050,11 @@ pub fn merge_detected(
         }
     }
     // Topics are always merged regardless of drop_uncertain — they feed the
-    // topic-tunnel pipeline, not the interactive confirmation step.
+    // topic-tunnel pipeline, not the interactive confirmation step. Dedup
+    // against `seen_topics` only so a topic name that collides with a person
+    // or project still survives into the topics bucket.
     for entity in secondary.topics {
-        if seen.insert(entity.name.to_lowercase()) {
+        if seen_topics.insert(entity.name.to_lowercase()) {
             primary.topics.push(entity);
         }
     }
@@ -2033,6 +2042,84 @@ mod tests {
             "uncertain must be kept when drop_uncertain=false"
         );
         assert_eq!(merged.uncertain[0].name, "MaybeProject");
+    }
+
+    #[test]
+    fn merge_detected_topic_with_name_shared_with_person_survives() {
+        // Regression: the topic bucket has its own dedup namespace, so a topic
+        // named `Rust` must merge into `primary.topics` even when another
+        // bucket already contains an entry with the same lowercased name.
+        let primary = DetectedDict {
+            people: vec![DetectedEntity {
+                name: "Rust".to_string(),
+                entity_type: "person".to_string(),
+                confidence: 0.9,
+                frequency: 1,
+                signals: vec![],
+            }],
+            projects: vec![],
+            uncertain: vec![],
+            topics: vec![],
+        };
+        let secondary = DetectedDict {
+            people: vec![],
+            projects: vec![],
+            uncertain: vec![],
+            topics: vec![DetectedEntity {
+                name: "Rust".to_string(),
+                entity_type: "topic".to_string(),
+                confidence: 0.7,
+                frequency: 4,
+                signals: vec!["frequent".to_string()],
+            }],
+        };
+        let merged = merge_detected(primary, secondary, false);
+        assert_eq!(merged.people.len(), 1, "person must remain present");
+        // Pair assertion: the topic must NOT be dropped just because a person
+        // of the same name already exists.
+        assert_eq!(
+            merged.topics.len(),
+            1,
+            "topic with name shared with a person must merge into topics bucket"
+        );
+        assert_eq!(merged.topics[0].name, "Rust");
+    }
+
+    #[test]
+    fn merge_detected_topic_dedup_within_topics_bucket() {
+        // Pair regression: dedup still applies WITHIN the topics bucket — two
+        // topics with the same name (case-insensitive) must collapse to one.
+        let primary = DetectedDict {
+            people: vec![],
+            projects: vec![],
+            uncertain: vec![],
+            topics: vec![DetectedEntity {
+                name: "rust".to_string(),
+                entity_type: "topic".to_string(),
+                confidence: 0.95,
+                frequency: 8,
+                signals: vec![],
+            }],
+        };
+        let secondary = DetectedDict {
+            people: vec![],
+            projects: vec![],
+            uncertain: vec![],
+            topics: vec![DetectedEntity {
+                name: "Rust".to_string(),
+                entity_type: "topic".to_string(),
+                confidence: 0.4,
+                frequency: 1,
+                signals: vec![],
+            }],
+        };
+        let merged = merge_detected(primary, secondary, false);
+        assert_eq!(
+            merged.topics.len(),
+            1,
+            "case-insensitive duplicate topic must collapse"
+        );
+        assert_eq!(merged.topics[0].name, "rust", "primary casing must win");
     }
 
     #[test]

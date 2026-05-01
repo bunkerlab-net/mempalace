@@ -78,6 +78,13 @@ pub enum Error {
         message: String,
     },
 
+    /// Operator-initiated interruption (Ctrl-C / SIGINT) caught by a long-running
+    /// command. Returning this variant — rather than calling `std::process::exit`
+    /// — lets RAII guards (e.g. the mine lock) release on the unwind. The CLI
+    /// translates this variant into POSIX exit code 130 after cleanup.
+    #[error("interrupted")]
+    Interrupted,
+
     #[error("{0}")]
     Other(String),
 }
@@ -206,6 +213,18 @@ mod tests {
             ),
             "weak signal fields must match expected values"
         );
+    }
+
+    #[test]
+    fn interrupted_error_displays_fixed_message() {
+        // Error::Interrupted has no payload — its display must always be
+        // exactly "interrupted" so callers can pattern-match on the string in
+        // logs without worrying about a payload that drifts.
+        let error = Error::Interrupted;
+        let display = error.to_string();
+        assert_eq!(display, "interrupted");
+        // Pair assertion: matches! on the variant works (used by main.rs).
+        assert!(matches!(error, Error::Interrupted));
     }
 
     #[test]

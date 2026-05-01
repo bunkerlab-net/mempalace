@@ -140,6 +140,14 @@ pub fn run(
         return Ok(None);
     }
 
+    // Persist the corpus-origin audit trail only after the user agrees to
+    // proceed — declining at the prompt must leave no side effects on disk.
+    // Non-fatal on error; serialisation/IO failures are deliberately ignored
+    // because the audit file is supplementary, not load-bearing.
+    if let Ok(json_text) = serde_json::to_string_pretty(&corpus_origin.to_json_value()) {
+        let _ = std::fs::write(directory.join("corpus_origin.json"), json_text.as_bytes());
+    }
+
     // Write mempalace.yaml before entities.json so a failure in run_write_config
     // does not leave an orphaned entities.json on disk without a valid config.
     run_write_config(&wing_name, rooms, &directory)?;
@@ -174,26 +182,27 @@ fn run_detect_corpus_origin(directory: &Path, llm_opts: &LlmOpts) -> CorpusOrigi
     );
 
     // Use existing corpus collector; split into fixed-size chunks to produce
-    // samples for both detection tiers.
+    // samples for both detection tiers. `from_utf8_lossy` preserves text whose
+    // multibyte boundaries fall inside a chunk by replacing the partial sequence
+    // with U+FFFD instead of dropping the entire chunk — important for non-ASCII
+    // corpora where strict UTF-8 parsing would bias Pass 0.
     let corpus = collect_corpus_text(directory);
     let samples: Vec<String> = corpus
         .as_bytes()
         .chunks(CORPUS_SAMPLE_SIZE)
         .take(20)
-        .filter_map(|chunk| std::str::from_utf8(chunk).ok())
-        .map(str::to_string)
+        .map(|chunk| String::from_utf8_lossy(chunk).into_owned())
         .collect();
 
     let heuristic = detect_origin_heuristic(&samples);
 
-    // Tier 2: attempt LLM-assisted detection if a provider is configured. Errors
-    // are silently swallowed — corpus-origin failure must not abort init.
+    // Tier 2: attempt LLM-assisted detection if a provider is configured AND
+    // implicit consent is granted (local provider, --accept-external-llm, or
+    // an explicit --llm-api-key). Pass 0 is non-interactive, so an env-fallback
+    // key against an external provider must NOT trigger an LLM call here —
+    // entity refinement (Phase 1.5) prompts the user separately. Errors are
+    // silently swallowed; corpus-origin failure must not abort init.
     let result = run_detect_corpus_origin_llm(&heuristic, &samples, llm_opts);
-
-    // Persist for the audit trail — non-fatal on error.
-    if let Ok(json_text) = serde_json::to_string_pretty(&result.to_json_value()) {
-        let _ = std::fs::write(directory.join("corpus_origin.json"), json_text.as_bytes());
-    }
 
     assert!(result.confidence >= 0.0 && result.confidence <= 1.0);
     result
@@ -204,7 +213,8 @@ fn run_detect_corpus_origin(directory: &Path, llm_opts: &LlmOpts) -> CorpusOrigi
 /// Merges field-by-field: `likely_ai_dialogue`/`confidence` from heuristic;
 /// `primary_platform`, `user_name`, and persona names from LLM (when non-empty);
 /// `evidence` concatenated.
-/// Returns `heuristic` unchanged when the LLM is disabled or unavailable.
+/// Returns `heuristic` unchanged when the LLM is disabled, unavailable, or the
+/// non-interactive consent gate (`pass0_consent_obtained`) blocks the call.
 /// Called by [`run_detect_corpus_origin`].
 fn run_detect_corpus_origin_llm(
     heuristic: &CorpusOriginResult,
@@ -223,6 +233,12 @@ fn run_detect_corpus_origin_llm(
     ) else {
         return heuristic.clone();
     };
+    // Non-interactive consent gate: an external provider with an env-fallback
+    // key cannot be used in Pass 0 because there is no user-facing prompt here.
+    // The interactive consent gate runs in Phase 1.5 (`run_setup_llm_consent_check`).
+    if !pass0_consent_obtained(provider.as_ref(), llm_opts) {
+        return heuristic.clone();
+    }
     let (available, _) = provider.check_available();
     if !available {
         return heuristic.clone();
@@ -411,6 +427,27 @@ fn run_setup_llm(opts: &LlmOpts) -> Result<Option<Box<dyn LlmProvider>>> {
     assert!(!provider.name().is_empty());
     eprintln!("  LLM: {} ({}) ready", opts.provider, opts.model);
     Ok(Some(provider))
+}
+
+/// Non-interactive consent check used by Pass 0 corpus-origin LLM detection.
+///
+/// Returns `true` when the provider may be used without prompting:
+/// - Local providers (no privacy concern).
+/// - External provider with `--accept-external-llm` (user pre-opted in).
+/// - External provider whose key was supplied via explicit `--llm-api-key`
+///   (`ApiKeySource::Flag`) — the act of passing the flag is itself consent.
+///
+/// Returns `false` for an external provider with an env-fallback key
+/// (`ApiKeySource::Env`) or no key at all: those paths require the interactive
+/// consent gate that only runs in Phase 1.5 (`run_setup_llm_consent_check`).
+fn pass0_consent_obtained(provider: &dyn LlmProvider, opts: &LlmOpts) -> bool {
+    if !provider.is_external_service() {
+        return true;
+    }
+    if opts.accept_external_llm {
+        return true;
+    }
+    provider.api_key_source() == Some(ApiKeySource::Flag)
 }
 
 /// Print the privacy warning and optionally prompt for consent when an external
@@ -1694,12 +1731,107 @@ mod tests {
             result.confidence >= 0.0 && result.confidence <= 1.0,
             "confidence must be in [0.0, 1.0] for an empty directory"
         );
-        // Pair assertion: a corpus_origin.json must be persisted alongside init output.
+        // Pair assertion: the function MUST NOT write corpus_origin.json — that
+        // write is deferred to `run()` after the user confirms the proceed gate
+        // so a declined init leaves no audit-trail side effects on disk.
         let written = temp_dir.path().join("corpus_origin.json");
         assert!(
-            written.exists(),
-            "corpus_origin.json must be written to the directory"
+            !written.exists(),
+            "corpus_origin.json must not be written before proceed confirmation"
         );
+    }
+
+    #[test]
+    fn init_run_writes_corpus_origin_json_after_proceed() {
+        // After init succeeds (yes=true bypasses the proceed prompt), the corpus
+        // origin audit trail must land in the project directory. This is the
+        // post-confirmation pair to the test above.
+        let temp_directory = tempfile::tempdir()
+            .expect("failed to create temporary directory for corpus-origin write test");
+        run(
+            temp_directory.path(),
+            true,
+            false,
+            false,
+            &[],
+            &LlmOpts::default(),
+        )
+        .expect("init::run should succeed for a valid directory");
+        assert!(
+            temp_directory.path().join("corpus_origin.json").exists(),
+            "corpus_origin.json must be written after the proceed gate"
+        );
+    }
+
+    // -- pass0_consent_obtained --
+
+    #[test]
+    fn pass0_consent_obtained_local_provider_returns_true() {
+        // A local provider always passes the gate — no privacy concern.
+        let provider = crate::llm::client::OllamaProvider::new("gemma3:4b".to_string(), None, 60);
+        let opts = LlmOpts::default();
+        assert!(
+            pass0_consent_obtained(&provider, &opts),
+            "local provider must pass Pass 0 consent gate"
+        );
+    }
+
+    #[test]
+    fn pass0_consent_obtained_external_with_accept_flag_returns_true() {
+        // --accept-external-llm bypasses the gate even with an env-fallback key.
+        temp_env::with_var("ANTHROPIC_API_KEY", Some("sk-ant-env"), || {
+            let provider = crate::llm::client::AnthropicProvider::new(
+                "claude-haiku-4-5-20251001".to_string(),
+                None,
+                None,
+                60,
+            );
+            let opts = LlmOpts {
+                accept_external_llm: true,
+                ..LlmOpts::default()
+            };
+            assert!(
+                pass0_consent_obtained(&provider, &opts),
+                "--accept-external-llm must bypass Pass 0 consent gate"
+            );
+        });
+    }
+
+    #[test]
+    fn pass0_consent_obtained_external_with_explicit_key_returns_true() {
+        // An explicit --llm-api-key is itself consent — passing the flag is opt-in.
+        temp_env::with_var("ANTHROPIC_API_KEY", None::<&str>, || {
+            let provider = crate::llm::client::AnthropicProvider::new(
+                "claude-haiku-4-5-20251001".to_string(),
+                None,
+                Some("sk-ant-explicit".to_string()),
+                60,
+            );
+            let opts = LlmOpts::default();
+            assert!(
+                pass0_consent_obtained(&provider, &opts),
+                "explicit Flag-source key must pass Pass 0 consent gate"
+            );
+        });
+    }
+
+    #[test]
+    fn pass0_consent_obtained_external_with_env_key_returns_false() {
+        // Env-fallback key + external endpoint + no --accept-external-llm must
+        // be blocked at Pass 0 — the user has not given non-interactive consent.
+        temp_env::with_var("ANTHROPIC_API_KEY", Some("sk-ant-env"), || {
+            let provider = crate::llm::client::AnthropicProvider::new(
+                "claude-haiku-4-5-20251001".to_string(),
+                None,
+                None,
+                60,
+            );
+            let opts = LlmOpts::default(); // accept_external_llm = false
+            assert!(
+                !pass0_consent_obtained(&provider, &opts),
+                "env-fallback key must block Pass 0 LLM call"
+            );
+        });
     }
 
     #[test]

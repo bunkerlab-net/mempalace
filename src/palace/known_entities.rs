@@ -310,10 +310,23 @@ fn add_to_known_entities_set_wing_topics(
     // Postcondition: output cannot be larger than input.
     debug_assert!(ordered.len() <= topics.len());
 
-    // Get or create the topics_by_wing map.
+    // Get or create the topics_by_wing map. If it exists but is not an object
+    // (corrupted file or schema drift), rebuild it as a fresh object rather
+    // than returning early — silently dropping the user's wing topics on a
+    // malformed value would be a data-loss footgun.
     let topics_map = existing
         .entry("topics_by_wing".to_string())
         .or_insert_with(|| Value::Object(Map::new()));
+    if !topics_map.is_object() {
+        *topics_map = Value::Object(Map::new());
+    }
+    // Pair assertion: regardless of the prior shape, the value is now an object.
+    debug_assert!(
+        topics_map.is_object(),
+        "topics_by_wing must be a JSON object after the rebuild guard"
+    );
+    // The guard above guarantees this is an object; the let-else bail-out is
+    // unreachable but kept so clippy::expect_used (denied repo-wide) is honored.
     let Some(map) = topics_map.as_object_mut() else {
         return;
     };
@@ -622,6 +635,41 @@ mod tests {
             assert!(
                 topics.contains(&"WebAssembly"),
                 "WebAssembly must be in topics"
+            );
+        });
+    }
+
+    #[test]
+    fn add_with_wing_rebuilds_non_object_topics_by_wing() {
+        // Regression: if an existing registry has `topics_by_wing` as something
+        // other than an object (e.g. corrupted file or stale schema), the helper
+        // must replace it with a fresh object and persist the new wing topics
+        // rather than silently dropping the user's input.
+        with_temp_registry(|path| {
+            // Seed the registry with `topics_by_wing` as a string (malformed).
+            std::fs::write(&path, r#"{"topics_by_wing":"oops"}"#).expect("write malformed");
+            let mut entities = HashMap::new();
+            entities.insert("topics".to_string(), vec!["Rust".to_string()]);
+            add_to_known_entities(&entities, Some("wing_alpha")).expect("add must succeed");
+
+            let data: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).expect("read"))
+                    .expect("parse");
+            assert!(
+                data["topics_by_wing"].is_object(),
+                "malformed topics_by_wing must be rebuilt as an object"
+            );
+            // Pair assertion: the user's wing topics must land in the rebuilt map.
+            let topics: Vec<&str> = data["topics_by_wing"]["wing_alpha"]
+                .as_array()
+                .expect("array")
+                .iter()
+                .filter_map(|val| val.as_str())
+                .collect();
+            assert_eq!(
+                topics,
+                ["Rust"],
+                "wing topics must be persisted after rebuild"
             );
         });
     }

@@ -173,11 +173,16 @@ async fn search_memories_candidates(
         let _ = write!(filters, " AND d.room = ?{param_offset}");
     }
 
+    // Exclude rows with empty id or content directly in SQL so that malformed
+    // drawers (schema drift, bypass writes) cannot eat into the LIMIT before
+    // the Rust-side filter culls them. Without this predicate, ten empty rows
+    // and zero good rows would fill the candidate window.
     let sql = format!(
         "SELECT d.id, d.content, d.wing, d.room, d.source_file, d.chunk_index, d.filed_at \
          FROM drawers d \
          JOIN drawer_words dw ON d.id = dw.drawer_id \
          WHERE dw.word IN ({in_clause}){filters} \
+           AND d.id <> '' AND d.content <> '' \
          GROUP BY d.id \
          ORDER BY SUM(dw.count) DESC \
          LIMIT ?{}",
