@@ -706,7 +706,12 @@ async fn mine_run_topic_tunnels(connection: &Connection, wing: &str) {
     );
 
     let topics_by_wing = crate::palace::known_entities::get_topics_by_wing();
-    if !topics_by_wing.contains_key(wing) {
+    // Normalise the lookup key — older registries (or rare write paths that
+    // bypass the normalisation in `add_to_known_entities_set_wing_topics`) may
+    // contain raw wing names; mirroring `graph.rs`'s read-side normalisation
+    // keeps this function tolerant of both shapes.
+    let normalized_wing = crate::config::normalize_wing_name(wing);
+    if !topics_by_wing.contains_key(&normalized_wing) {
         return;
     }
     let min_count = crate::config::MempalaceConfig::topic_tunnel_min_count();

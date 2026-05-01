@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
-use crate::config::config_dir;
+use crate::config::{config_dir, normalize_wing_name};
 use crate::error::Result;
 
 // Safety bound: maximum names processed per category per call.
@@ -274,13 +274,18 @@ fn add_to_known_entities_new_list(names: &[String]) -> Vec<Value> {
     result
 }
 
-/// Replace `existing["topics_by_wing"][wing_name]` with a fresh deduplicated
+/// Replace `existing["topics_by_wing"][wing_key]` with a fresh deduplicated
 /// list from `topics`, preserving first-seen casing for each topic name.
 ///
 /// Called by [`add_to_known_entities`] when a wing name is provided. The
 /// replace (not union) semantic mirrors the Python implementation so that
 /// re-running `init` reflects the user's latest confirmation rather than
 /// accumulating stale topic labels from previous runs.
+///
+/// The `wing_name` is canonicalised via [`normalize_wing_name`] before insertion
+/// so the read path (`graph::topic_tunnels_for_wing`,
+/// `compute_topic_tunnels_build_wing_map`) — which always normalises — finds
+/// the bucket regardless of how the caller spelled the wing.
 fn add_to_known_entities_set_wing_topics(
     existing: &mut Map<String, Value>,
     wing_name: &str,
@@ -290,6 +295,12 @@ fn add_to_known_entities_set_wing_topics(
         !wing_name.is_empty(),
         "add_to_known_entities_set_wing_topics: wing must not be empty"
     );
+
+    // Canonicalise the wing key so writes match the read path's normalisation.
+    let wing_key = normalize_wing_name(wing_name.trim());
+    if wing_key.is_empty() {
+        return;
+    }
 
     // Build a de-duplicated list from the provided topics.
     let mut seen_lower: HashSet<String> = HashSet::new();
@@ -332,9 +343,9 @@ fn add_to_known_entities_set_wing_topics(
     };
 
     if ordered.is_empty() {
-        map.remove(wing_name);
+        map.remove(&wing_key);
     } else {
-        map.insert(wing_name.to_string(), Value::Array(ordered));
+        map.insert(wing_key, Value::Array(ordered));
     }
 
     // Remove the topics_by_wing key entirely if no wings remain.
@@ -688,6 +699,65 @@ mod tests {
                 data.get("topics_by_wing").is_none(),
                 "topics_by_wing must not be written without a wing"
             );
+        });
+    }
+
+    #[test]
+    fn add_with_wing_normalises_wing_key_to_canonical_slug() {
+        // Regression: hyphenated and spaced wing names must be canonicalised
+        // via normalize_wing_name so the registry matches the read path
+        // (graph::topic_tunnels_for_wing) which always normalises.
+        with_temp_registry(|path| {
+            let mut entities = HashMap::new();
+            entities.insert("topics".to_string(), vec!["Rust".to_string()]);
+            // Hyphen + uppercase + space — all should collapse to one key.
+            add_to_known_entities(&entities, Some("My-Proj Alpha")).expect("add must succeed");
+            let data: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).expect("read"))
+                    .expect("parse");
+            let topics_map = data["topics_by_wing"].as_object().expect("object");
+            // Pair assertion: the canonical slug is the only key present.
+            assert!(
+                topics_map.contains_key("my_proj_alpha"),
+                "wing key must be normalised to canonical slug"
+            );
+            assert!(
+                !topics_map.contains_key("My-Proj Alpha"),
+                "raw wing spelling must not be persisted"
+            );
+        });
+    }
+
+    #[test]
+    fn add_with_wing_normalisation_collapses_to_one_bucket_on_replace() {
+        // Pair assertion: writing once with `my-proj` and again with `my_proj`
+        // must end with a single bucket because both normalise to `my_proj`.
+        // Replace semantic means the second write wins.
+        with_temp_registry(|path| {
+            let mut first = HashMap::new();
+            first.insert("topics".to_string(), vec!["Rust".to_string()]);
+            add_to_known_entities(&first, Some("my-proj")).expect("first add");
+
+            let mut second = HashMap::new();
+            second.insert("topics".to_string(), vec!["Go".to_string()]);
+            add_to_known_entities(&second, Some("my_proj")).expect("second add");
+
+            let data: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).expect("read"))
+                    .expect("parse");
+            let topics_map = data["topics_by_wing"].as_object().expect("object");
+            assert_eq!(
+                topics_map.len(),
+                1,
+                "both wing spellings must collapse to one bucket"
+            );
+            let topics: Vec<&str> = topics_map["my_proj"]
+                .as_array()
+                .expect("array")
+                .iter()
+                .filter_map(|val| val.as_str())
+                .collect();
+            assert_eq!(topics, ["Go"], "second write must replace, not union");
         });
     }
 

@@ -151,7 +151,7 @@ pub fn run(
     // Write mempalace.yaml before entities.json so a failure in run_write_config
     // does not leave an orphaned entities.json on disk without a valid config.
     run_write_config(&wing_name, rooms, &directory)?;
-    run_confirm_and_save(&detected, yes, &directory)?;
+    run_confirm_and_save(&detected, yes, &directory, &wing_name)?;
 
     if !lang.is_empty() {
         run_persist_lang(lang);
@@ -469,7 +469,8 @@ fn run_setup_llm_consent_check(provider: &dyn LlmProvider, opts: &LlmOpts) -> Re
     }
     eprintln!(
         "  \u{26a0} {} is an EXTERNAL API. Your folder content will be sent to \
-         the provider during init. Pass --no-llm to keep init fully local.",
+         the provider during init. Rerun without --llm (or omit it) to keep \
+         init fully local.",
         opts.provider
     );
     // Explicit --llm-api-key or --accept-external-llm means the user already opted in.
@@ -603,14 +604,24 @@ fn run_write_config(wing_name: &str, rooms: Vec<RoomConfig>, directory: &Path) -
 /// names to `~/.local/share/mempalace/known_entities.json` and to
 /// `entities.json` inside the project directory. Registry write errors are
 /// non-fatal (logged to stderr) so a full-disk condition does not abort init.
-/// Called by [`run`] to keep that function within the 70-line limit.
-fn run_confirm_and_save(detected: &DetectedDict, yes: bool, directory: &Path) -> Result<()> {
+///
+/// Topics are passed through verbatim alongside `people` and `projects`: they
+/// flow into the registry's `topics_by_wing[wing_name]` slot (replace semantic)
+/// so the miner's topic-tunnel pipeline can find them at mine time. Called by
+/// [`run`] to keep that function within the 70-line limit.
+fn run_confirm_and_save(
+    detected: &DetectedDict,
+    yes: bool,
+    directory: &Path,
+    wing_name: &str,
+) -> Result<()> {
     assert!(directory.is_dir());
     assert!(!directory.as_os_str().is_empty());
+    assert!(!wing_name.is_empty());
 
     let confirmed = confirm_entities(detected, yes);
 
-    if confirmed.people.is_empty() && confirmed.projects.is_empty() {
+    if confirmed.people.is_empty() && confirmed.projects.is_empty() && confirmed.topics.is_empty() {
         return Ok(());
     }
 
@@ -622,8 +633,14 @@ fn run_confirm_and_save(detected: &DetectedDict, yes: bool, directory: &Path) ->
     if !confirmed.projects.is_empty() {
         by_category.insert("projects".to_string(), confirmed.projects.clone());
     }
+    if !confirmed.topics.is_empty() {
+        by_category.insert("topics".to_string(), confirmed.topics.clone());
+    }
 
-    if let Err(error) = add_to_known_entities(&by_category, None) {
+    // Pass `wing_name` so the registry routes confirmed topics into
+    // `topics_by_wing[wing_name]`; the miner reads this when deciding which
+    // wings to consider for cross-wing topic tunnels.
+    if let Err(error) = add_to_known_entities(&by_category, Some(wing_name)) {
         eprintln!("  Warning: could not update entity registry: {error}");
     }
 
@@ -631,6 +648,7 @@ fn run_confirm_and_save(detected: &DetectedDict, yes: bool, directory: &Path) ->
     let entities_json = serde_json::json!({
         "people": confirmed.people,
         "projects": confirmed.projects,
+        "topics": confirmed.topics,
     });
     let entities_path = directory.join("entities.json");
     let json_text = serde_json::to_string_pretty(&entities_json)?;
@@ -1213,7 +1231,7 @@ mod tests {
             topics: vec![],
         };
         temp_env::with_var("MEMPALACE_DIR", Some(registry_dir.path()), || {
-            run_confirm_and_save(&detected, true, temp_dir.path())
+            run_confirm_and_save(&detected, true, temp_dir.path(), "test_wing")
                 .expect("run_confirm_and_save must succeed");
         });
         let entities_path = temp_dir.path().join("entities.json");
@@ -1251,7 +1269,7 @@ mod tests {
             uncertain: vec![],
             topics: vec![],
         };
-        run_confirm_and_save(&detected, true, temp_dir.path())
+        run_confirm_and_save(&detected, true, temp_dir.path(), "test_wing")
             .expect("run_confirm_and_save must succeed even with no confirmations");
         let entities_path = temp_dir.path().join("entities.json");
         assert!(
@@ -1289,7 +1307,7 @@ mod tests {
             topics: vec![],
         };
         temp_env::with_var("MEMPALACE_DIR", Some(registry_dir.path()), || {
-            run_confirm_and_save(&detected, true, temp_dir.path())
+            run_confirm_and_save(&detected, true, temp_dir.path(), "test_wing")
                 .expect("run_confirm_and_save must succeed");
         });
         let entities_path = temp_dir.path().join("entities.json");
@@ -1298,6 +1316,66 @@ mod tests {
             std::fs::read_to_string(&entities_path).expect("entities.json must be readable");
         assert!(content.contains("Alice"), "must include confirmed person");
         assert!(content.contains("mylib"), "must include confirmed project");
+    }
+
+    #[test]
+    fn run_confirm_and_save_persists_topics_in_entities_json_and_registry() {
+        // Regression: confirmed topics must land both in entities.json (so the
+        // project records them) and in the global registry's topics_by_wing
+        // bucket (so the miner's topic-tunnel pipeline finds them).
+        use crate::palace::entities::DetectedEntity;
+        use crate::palace::project_scanner::DetectedDict;
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let registry_dir = tempfile::tempdir().expect("registry dir");
+        let detected = DetectedDict {
+            people: vec![],
+            projects: vec![],
+            uncertain: vec![],
+            topics: vec![DetectedEntity {
+                name: "Rust".to_string(),
+                entity_type: "topic".to_string(),
+                confidence: 0.9,
+                frequency: 5,
+                signals: vec![],
+            }],
+        };
+        temp_env::with_var("MEMPALACE_DIR", Some(registry_dir.path()), || {
+            run_confirm_and_save(&detected, true, temp_dir.path(), "topics_wing")
+                .expect("run_confirm_and_save must succeed");
+        });
+
+        // entities.json must include the topics array.
+        let entities_path = temp_dir.path().join("entities.json");
+        assert!(entities_path.exists(), "entities.json must be written");
+        let entities_text =
+            std::fs::read_to_string(&entities_path).expect("entities.json readable");
+        let entities_value: serde_json::Value =
+            serde_json::from_str(&entities_text).expect("entities.json parse");
+        let topics: Vec<&str> = entities_value["topics"]
+            .as_array()
+            .expect("topics array")
+            .iter()
+            .filter_map(|val| val.as_str())
+            .collect();
+        assert_eq!(topics, ["Rust"], "topics must persist in entities.json");
+
+        // known_entities.json must include topics_by_wing[topics_wing].
+        let registry_path = registry_dir.path().join("known_entities.json");
+        assert!(registry_path.exists(), "known_entities.json must exist");
+        let registry_value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&registry_path).expect("registry read"))
+                .expect("registry parse");
+        let registry_topics: Vec<&str> = registry_value["topics_by_wing"]["topics_wing"]
+            .as_array()
+            .expect("registry topics array")
+            .iter()
+            .filter_map(|val| val.as_str())
+            .collect();
+        assert_eq!(
+            registry_topics,
+            ["Rust"],
+            "topics must persist in topics_by_wing[wing]"
+        );
     }
 
     #[test]

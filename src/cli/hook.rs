@@ -935,7 +935,7 @@ fn hook_ingest_transcript(state_dir: &Path, transcript_path: &Path) {
 /// gating but blocks on `.status()` instead of `.spawn()`. Coordinates with
 /// the async transcript pid file [`PID_FILE_TRANSCRIPT`] by polling: if an
 /// async ingest is already in flight the sync helper waits for it to clear
-/// (bounded by [`SYNC_INGEST_PID_WAIT_BUDGET`]) before spawning, otherwise
+/// (bounded by [`SYNC_INGEST_PID_WAIT_BUDGET_MS`]) before spawning, otherwise
 /// the two would race for the same database lock. The sync path itself
 /// writes no pid file — its blocking call is the in-flight signal. Non-zero
 /// child exits are logged but not surfaced as errors so a child failure

@@ -233,12 +233,13 @@ impl OpenAICompatProvider {
     ) -> Self {
         assert!(!model.is_empty());
         assert!(timeout_secs > 0);
-        let (resolved_key, source) = if let Some(key) = api_key.filter(|k| !k.is_empty()) {
+        // Treat blank or whitespace-only flag and env values as missing — shells
+        // routinely export empty vars when users clear them, and accepting a
+        // whitespace-only key would mark `ApiKeySource::Flag`/`Env` and bypass
+        // the consent gate falsely. Mirrors the env path below.
+        let (resolved_key, source) = if let Some(key) = api_key.filter(|k| !k.trim().is_empty()) {
             (Some(key), Some(ApiKeySource::Flag))
         } else {
-            // Treat blank or whitespace-only env values as missing — shells routinely
-            // export empty vars when users clear them, and accepting `""` as a key
-            // would mark `ApiKeySource::Env` and bypass the consent gate falsely.
             let env_key = std::env::var("OPENAI_API_KEY")
                 .ok()
                 .filter(|key| !key.trim().is_empty());
@@ -394,12 +395,13 @@ impl AnthropicProvider {
     ) -> Self {
         assert!(!model.is_empty());
         assert!(timeout_secs > 0);
-        let (resolved_key, source) = if let Some(key) = api_key.filter(|k| !k.is_empty()) {
+        // Treat blank or whitespace-only flag and env values as missing — shells
+        // routinely export empty vars when users clear them, and accepting a
+        // whitespace-only key would mark `ApiKeySource::Flag`/`Env` and bypass
+        // the consent gate falsely. Mirrors the env path below.
+        let (resolved_key, source) = if let Some(key) = api_key.filter(|k| !k.trim().is_empty()) {
             (Some(key), Some(ApiKeySource::Flag))
         } else {
-            // Treat blank or whitespace-only env values as missing — shells routinely
-            // export empty vars when users clear them, and accepting `""` as a key
-            // would mark `ApiKeySource::Env` and bypass the consent gate falsely.
             let env_key = std::env::var("ANTHROPIC_API_KEY")
                 .ok()
                 .filter(|key| !key.trim().is_empty());
