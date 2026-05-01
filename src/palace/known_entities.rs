@@ -128,7 +128,14 @@ pub fn get_topics_by_wing() -> std::collections::BTreeMap<String, Vec<String>> {
         let Some(arr) = topics_val.as_array() else {
             continue;
         };
-        let wing_key = normalize_wing_name(wing.trim());
+        // Trim before calling normalize_wing_name — `normalize_wing_name` asserts
+        // non-empty input, so a registry corrupted to `""` or `"   "` would
+        // panic. Skip those entries explicitly instead.
+        let wing_trimmed = wing.trim();
+        if wing_trimmed.is_empty() {
+            continue;
+        }
+        let wing_key = normalize_wing_name(wing_trimmed);
         if wing_key.is_empty() {
             continue;
         }
@@ -825,6 +832,25 @@ mod tests {
                 result.is_empty(),
                 "must be empty when no topics_by_wing in registry"
             );
+        });
+    }
+
+    #[test]
+    fn get_topics_by_wing_skips_corrupt_empty_or_whitespace_keys() {
+        // Regression: a registry with `""` or `"   "` as a wing key would
+        // previously call normalize_wing_name with empty input, which asserts
+        // and panics. The read path must skip those entries instead.
+        with_temp_registry(|path| {
+            std::fs::write(
+                &path,
+                r#"{"topics_by_wing":{"":["Rust"],"   ":["Go"],"valid":["Async"]}}"#,
+            )
+            .expect("write registry with corrupt wing keys");
+            // Must not panic.
+            let result = get_topics_by_wing();
+            assert_eq!(result.len(), 1, "only the valid wing must survive");
+            assert!(result.contains_key("valid"));
+            assert_eq!(result["valid"], vec!["Async".to_string()]);
         });
     }
 

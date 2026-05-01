@@ -694,6 +694,33 @@ fn mine_apply_include_ignored(
     scanned
 }
 
+/// Install a Ctrl-C handler that flips an atomic flag on first signal.
+///
+/// `mine_process_files` polls the returned flag once per file and aborts the
+/// loop cleanly when it is set. If `tokio::signal::ctrl_c` fails to register
+/// (e.g. inside a runtime that has already taken the SIGINT slot), the flag
+/// stays `false` and the miner runs to completion without interrupt
+/// support — a registration error must never falsely mark the miner as
+/// interrupted, since that would abort every mine on the affected runtime.
+/// Called by [`mine`] to keep that function under the 70-line guideline.
+fn mine_install_ctrl_c_handler() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    let ctrl_c_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag_clone = ctrl_c_flag.clone();
+    tokio::spawn(async move {
+        match tokio::signal::ctrl_c().await {
+            Ok(()) => {
+                flag_clone.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            Err(error) => {
+                eprintln!(
+                    "  warning: Ctrl-C handler registration failed; mine will run without interrupt support: {error}"
+                );
+            }
+        }
+    });
+    ctrl_c_flag
+}
+
 /// Rebase pre-scanned file paths onto the canonicalised `project_dir`.
 ///
 /// Callers (`init::run` → `app::run_mine_after_init`) scan with their own
@@ -873,13 +900,7 @@ pub async fn mine(connection: &Connection, project_dir: &Path, opts: &MineParams
 
     mine_print_header(wing, &rooms, files.len(), opts.dry_run);
 
-    // Set an atomic flag when Ctrl-C fires; mine_process_files checks it per file.
-    let ctrl_c_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let flag_clone = ctrl_c_flag.clone();
-    let _ctrl_c_task = tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.ok();
-        flag_clone.store(true, std::sync::atomic::Ordering::Relaxed);
-    });
+    let ctrl_c_flag = mine_install_ctrl_c_handler();
 
     let (drawers_total, files_skipped, files_unreadable_or_too_short, room_counts) =
         mine_process_files(

@@ -621,11 +621,13 @@ fn run_confirm_and_save(
 
     let confirmed = confirm_entities(detected, yes);
 
-    if confirmed.people.is_empty() && confirmed.projects.is_empty() && confirmed.topics.is_empty() {
-        return Ok(());
-    }
-
-    // Build the category map for the global registry.
+    // Build the category map for the global registry. Always include a
+    // `"topics"` entry — even when empty — so the registry's
+    // `topics_by_wing[wing_name]` slot is cleared on a re-init that
+    // detected no topics. Otherwise stale topics from a previous run would
+    // linger and feed the miner's cross-wing tunnel computation. People
+    // and projects keep the "skip if empty" semantic since they have a
+    // union (not replace) merge contract — clearing them is not desired.
     let mut by_category: HashMap<String, Vec<String>> = HashMap::new();
     if !confirmed.people.is_empty() {
         by_category.insert("people".to_string(), confirmed.people.clone());
@@ -633,15 +635,20 @@ fn run_confirm_and_save(
     if !confirmed.projects.is_empty() {
         by_category.insert("projects".to_string(), confirmed.projects.clone());
     }
-    if !confirmed.topics.is_empty() {
-        by_category.insert("topics".to_string(), confirmed.topics.clone());
-    }
+    by_category.insert("topics".to_string(), confirmed.topics.clone());
 
     // Pass `wing_name` so the registry routes confirmed topics into
     // `topics_by_wing[wing_name]`; the miner reads this when deciding which
     // wings to consider for cross-wing topic tunnels.
     if let Err(error) = add_to_known_entities(&by_category, Some(wing_name)) {
         eprintln!("  Warning: could not update entity registry: {error}");
+    }
+
+    // Skip the per-project `entities.json` write when nothing was confirmed.
+    // The registry update above already cleared any stale topics, so there
+    // is no value in writing an empty entities.json file.
+    if confirmed.people.is_empty() && confirmed.projects.is_empty() && confirmed.topics.is_empty() {
+        return Ok(());
     }
 
     // Write entities.json into the project directory.
@@ -1346,6 +1353,72 @@ mod tests {
             std::fs::read_to_string(&entities_path).expect("entities.json must be readable");
         assert!(content.contains("Alice"), "must include confirmed person");
         assert!(content.contains("mylib"), "must include confirmed project");
+    }
+
+    #[test]
+    fn run_confirm_and_save_clears_stale_topics_on_reinit_with_no_topics() {
+        // Regression: re-running init with no detected topics must clear the
+        // wing's previous topic list from `topics_by_wing[wing]`. Otherwise
+        // stale labels would keep feeding the miner's cross-wing tunnel
+        // pipeline indefinitely.
+        use crate::palace::entities::DetectedEntity;
+        use crate::palace::project_scanner::DetectedDict;
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let registry_dir = tempfile::tempdir().expect("registry dir");
+
+        // First run: confirm a topic, populating topics_by_wing[stale_wing].
+        let first = DetectedDict {
+            people: vec![],
+            projects: vec![],
+            uncertain: vec![],
+            topics: vec![DetectedEntity {
+                name: "Rust".to_string(),
+                entity_type: "topic".to_string(),
+                confidence: 0.9,
+                frequency: 5,
+                signals: vec![],
+            }],
+        };
+        temp_env::with_var("MEMPALACE_DIR", Some(registry_dir.path()), || {
+            run_confirm_and_save(&first, true, temp_dir.path(), "stale_wing")
+                .expect("first confirm");
+        });
+
+        // Pair assertion: precondition — the topic landed in the registry.
+        let registry_path = registry_dir.path().join("known_entities.json");
+        let registry_after_first: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&registry_path).expect("registry read 1"),
+        )
+        .expect("parse 1");
+        assert!(
+            registry_after_first["topics_by_wing"]["stale_wing"].is_array(),
+            "first run must seed topics_by_wing[stale_wing]"
+        );
+
+        // Second run: zero detected topics. The wing's stale topics MUST be
+        // cleared even though the early-return path used to skip the call.
+        let second = DetectedDict {
+            people: vec![],
+            projects: vec![],
+            uncertain: vec![],
+            topics: vec![],
+        };
+        temp_env::with_var("MEMPALACE_DIR", Some(registry_dir.path()), || {
+            run_confirm_and_save(&second, true, temp_dir.path(), "stale_wing")
+                .expect("second confirm");
+        });
+
+        let registry_after_second: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&registry_path).expect("registry read 2"),
+        )
+        .expect("parse 2");
+        // Either topics_by_wing is gone entirely (last wing removed) or the
+        // wing key is no longer present. Both shapes mean "stale topics gone".
+        let cleared = registry_after_second
+            .get("topics_by_wing")
+            .and_then(|map| map.get("stale_wing"))
+            .is_none();
+        assert!(cleared, "stale_wing topics must be cleared on re-init");
     }
 
     #[test]

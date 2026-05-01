@@ -824,10 +824,23 @@ fn hook_spawn_mine_bg(state_dir: &Path, mine_dir: &Path, mode: &str) {
         .stdout(std::process::Stdio::from(log_file))
         .stderr(std::process::Stdio::from(log_copy))
         .spawn();
-    if let Ok(child) = result {
-        // Project-mode pid file — distinct from the transcript ingest pid so
-        // both passes can run concurrently when the stop hook fires both.
-        let _ = std::fs::write(state_dir.join(PID_FILE_PROJECT), child.id().to_string());
+    match result {
+        Ok(child) => {
+            // Project-mode pid file — distinct from the transcript ingest pid so
+            // both passes can run concurrently when the stop hook fires both.
+            // Only write the pid AFTER we know a child was actually launched
+            // so a stale pid never blocks subsequent hook fires.
+            let _ = std::fs::write(state_dir.join(PID_FILE_PROJECT), child.id().to_string());
+        }
+        Err(error) => {
+            hook_log(
+                state_dir,
+                &format!(
+                    "Background project mine for {} failed to spawn: {error}",
+                    mine_dir.display()
+                ),
+            );
+        }
     }
 }
 
@@ -956,14 +969,27 @@ fn hook_ingest_transcript(state_dir: &Path, transcript_path: &Path) {
         .stdout(std::process::Stdio::from(log_file))
         .stderr(std::process::Stdio::from(log_copy))
         .spawn();
-    if let Ok(child) = result {
-        // Transcript-mode pid — kept separate from PID_FILE_PROJECT so the
-        // project mine guard does not see this in-flight ingest as itself.
-        let _ = std::fs::write(state_dir.join(PID_FILE_TRANSCRIPT), child.id().to_string());
-        hook_log(
-            state_dir,
-            &format!("Transcript ingest started: {}", transcript_path.display()),
-        );
+    match result {
+        Ok(child) => {
+            // Transcript-mode pid — kept separate from PID_FILE_PROJECT so the
+            // project mine guard does not see this in-flight ingest as itself.
+            // Only write the pid AFTER spawn succeeds so the transcript-sync
+            // poll never blocks on a process that never started.
+            let _ = std::fs::write(state_dir.join(PID_FILE_TRANSCRIPT), child.id().to_string());
+            hook_log(
+                state_dir,
+                &format!("Transcript ingest started: {}", transcript_path.display()),
+            );
+        }
+        Err(error) => {
+            hook_log(
+                state_dir,
+                &format!(
+                    "Transcript ingest for {} failed to spawn: {error}",
+                    transcript_path.display()
+                ),
+            );
+        }
     }
 }
 
