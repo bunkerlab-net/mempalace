@@ -684,34 +684,28 @@ pub fn endpoint_is_local(url: &str) -> bool {
     if host.ends_with(".local") {
         return true;
     }
-    // RFC 1918: 10.0.0.0/8
-    if host.starts_with("10.") {
-        return true;
-    }
-    // RFC 1918: 192.168.0.0/16
-    if host.starts_with("192.168.") {
-        return true;
-    }
-    // RFC 1918: 172.16.0.0/12 — second octet 16..=31
-    if let Some(rest) = host.strip_prefix("172.") {
-        let second: u8 = rest
-            .split('.')
-            .next()
-            .and_then(|octet_str| octet_str.parse().ok())
-            .unwrap_or(0);
-        if (16..=31).contains(&second) {
+    // RFC 1918 + Tailscale CGNAT checks must operate on a parsed IPv4 literal
+    // rather than the raw host string. Treating "10.example.com" or
+    // "192.168.evil.example" as local would be a privacy hole — the env-fallback
+    // consent gate trusts this function to keep external services out of the
+    // implicit-trust set. Parse first; only then inspect the octets.
+    if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
+        let octets = ip.octets();
+        // RFC 1918: 10.0.0.0/8
+        if octets[0] == 10 {
             return true;
         }
-    }
-    // Tailscale CGNAT: 100.64.0.0/10 — first octet 100, second octet 64..=127.
-    // 100.x.x.x outside this range remains regular allocated public space (external).
-    if let Some(rest) = host.strip_prefix("100.") {
-        let second: u8 = rest
-            .split('.')
-            .next()
-            .and_then(|octet_str| octet_str.parse().ok())
-            .unwrap_or(0);
-        if (64..=127).contains(&second) {
+        // RFC 1918: 192.168.0.0/16
+        if octets[0] == 192 && octets[1] == 168 {
+            return true;
+        }
+        // RFC 1918: 172.16.0.0/12 — second octet 16..=31
+        if octets[0] == 172 && (16..=31).contains(&octets[1]) {
+            return true;
+        }
+        // Tailscale CGNAT: 100.64.0.0/10 — first octet 100, second octet 64..=127.
+        // 100.x.x.x outside this range remains regular allocated public space.
+        if octets[0] == 100 && (64..=127).contains(&octets[1]) {
             return true;
         }
     }
@@ -1385,6 +1379,30 @@ mod tests {
         assert!(
             endpoint_is_local("http://[fc00::1]"),
             "fc00 IPv6 ULA must be local"
+        );
+    }
+
+    #[test]
+    fn endpoint_is_local_hostname_with_rfc1918_prefix_is_external() {
+        // Regression: hostnames whose label happens to start with an RFC1918
+        // octet must NOT be misclassified as local. The prefix-string check
+        // would have returned `true` for `10.example.com` and `192.168.evil.com`
+        // — only a parsed Ipv4 literal qualifies.
+        assert!(
+            !endpoint_is_local("https://10.example.com"),
+            "10.example.com is a DNS hostname, not RFC1918"
+        );
+        assert!(
+            !endpoint_is_local("https://192.168.evil.example"),
+            "192.168.evil.example is a DNS hostname, not RFC1918"
+        );
+        assert!(
+            !endpoint_is_local("https://172.20.evil.example"),
+            "172.20.evil.example is a DNS hostname, not RFC1918"
+        );
+        assert!(
+            !endpoint_is_local("https://100.64.evil.example"),
+            "100.64.evil.example is a DNS hostname, not Tailscale CGNAT"
         );
     }
 

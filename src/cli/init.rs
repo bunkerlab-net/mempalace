@@ -169,12 +169,19 @@ pub fn run(
 
 /// Run Pass 0 corpus-origin detection on the project directory.
 ///
-/// Tier 1 (heuristic) always runs. Tier 2 (LLM) runs when `llm_opts` is
-/// enabled and a provider is reachable; the consent gate is NOT applied at
-/// Pass 0 because entity refinement (Phase 1.5) applies it separately with
-/// a user-visible warning. Results are merged: `likely_ai_dialogue`/`confidence`
-/// from heuristic; `primary_platform`/`user_name`/`agent_persona_names` from
-/// LLM; `evidence` concatenated. Result persisted to `corpus_origin.json`.
+/// Tier 1 (heuristic) always runs. Tier 2 (LLM) runs only when `llm_opts` is
+/// enabled, a provider is reachable, AND the non-interactive consent gate
+/// `pass0_consent_obtained` returns `true` (local provider, an explicit
+/// `--llm-api-key`, or `--accept-external-llm`). An env-fallback key against
+/// an external provider does NOT clear this gate at Pass 0 because there is
+/// no user-facing prompt here; the interactive consent prompt is handled
+/// later in Phase 1.5 (`run_setup_llm_consent_check`).
+///
+/// Merge rule (when Tier 2 runs): `likely_ai_dialogue` and `confidence` are
+/// kept from the heuristic; `primary_platform`, `user_name`, and
+/// `agent_persona_names` are taken from the LLM when non-empty; `evidence`
+/// from both tiers is concatenated. Result is persisted to
+/// `corpus_origin.json` by `run()` after the proceed-confirm gate.
 fn run_detect_corpus_origin(directory: &Path, llm_opts: &LlmOpts) -> CorpusOriginResult {
     assert!(
         directory.is_dir(),

@@ -25,6 +25,20 @@ const PID_FILE_TRANSCRIPT: &str = "mine_transcript.pid";
 /// "already-running" guard for project mining.
 const PID_FILE_PROJECT: &str = "mine_project.pid";
 
+/// Total time budget — milliseconds — for the precompact sync transcript
+/// ingest to wait for an in-flight async transcript ingest to clear before
+/// it spawns its own child. Capped tightly because precompact runs on the
+/// hot path of the compaction harness; if the async ingest has not finished
+/// in this window we skip, log, and let the harness proceed.
+const SYNC_INGEST_PID_WAIT_BUDGET_MS: u64 = 3_000;
+
+/// Poll interval for the wait loop above. 100 ms balances responsiveness
+/// (we resume promptly when the async ingest exits) against syscall churn.
+const SYNC_INGEST_PID_POLL_INTERVAL_MS: u64 = 100;
+const _: () = assert!(SYNC_INGEST_PID_WAIT_BUDGET_MS > 0);
+const _: () = assert!(SYNC_INGEST_PID_POLL_INTERVAL_MS > 0);
+const _: () = assert!(SYNC_INGEST_PID_WAIT_BUDGET_MS >= SYNC_INGEST_PID_POLL_INTERVAL_MS);
+
 /// Number of human messages between auto-save checkpoints.
 const SAVE_INTERVAL: usize = 15;
 /// Number of recent user messages to sample for theme extraction.
@@ -704,6 +718,33 @@ fn hook_mine_already_running(state_dir: &Path, pid_file_name: &str) -> bool {
     hook_pid_alive(pid)
 }
 
+/// Poll the transcript pid file until either an in-flight async ingest
+/// clears or the time budget expires. Returns `true` when it is safe to
+/// spawn the synchronous ingest, `false` on timeout.
+///
+/// Called only by [`hook_ingest_transcript_sync`]. The bounded wait keeps
+/// the precompact hook off the harness hot path even when an async ingest
+/// is stuck. Loop iteration count is bounded by
+/// `SYNC_INGEST_PID_WAIT_BUDGET_MS / SYNC_INGEST_PID_POLL_INTERVAL_MS` per
+/// the assertions above the constants.
+fn hook_ingest_transcript_sync_wait_for_pid(state_dir: &Path) -> bool {
+    let max_iterations: u64 = SYNC_INGEST_PID_WAIT_BUDGET_MS / SYNC_INGEST_PID_POLL_INTERVAL_MS;
+    assert!(
+        max_iterations > 0,
+        "wait budget must produce at least one iteration"
+    );
+    let interval = std::time::Duration::from_millis(SYNC_INGEST_PID_POLL_INTERVAL_MS);
+    for _ in 0..max_iterations {
+        if !hook_mine_already_running(state_dir, PID_FILE_TRANSCRIPT) {
+            return true;
+        }
+        std::thread::sleep(interval);
+    }
+    // One last check after the final sleep so a transition that lands on the
+    // boundary is not missed before we report timeout.
+    !hook_mine_already_running(state_dir, PID_FILE_TRANSCRIPT)
+}
+
 /// Check whether a process ID is alive without sending it a signal.
 ///
 /// On POSIX, `kill -0 <pid>` is the standard existence probe. On non-POSIX
@@ -891,10 +932,14 @@ fn hook_ingest_transcript(state_dir: &Path, transcript_path: &Path) {
 ///
 /// Used by the precompact hook so the transcript ingest finishes BEFORE the
 /// harness compresses the conversation. Mirrors [`hook_ingest_transcript`]'s
-/// gating but blocks on `.status()` instead of `.spawn()`. Writes no pid file
-/// because the call is blocking — the in-flight protection is the function
-/// frame itself. Non-zero child exits are logged but not surfaced as errors so
-/// a child failure cannot abort compaction.
+/// gating but blocks on `.status()` instead of `.spawn()`. Coordinates with
+/// the async transcript pid file [`PID_FILE_TRANSCRIPT`] by polling: if an
+/// async ingest is already in flight the sync helper waits for it to clear
+/// (bounded by [`SYNC_INGEST_PID_WAIT_BUDGET`]) before spawning, otherwise
+/// the two would race for the same database lock. The sync path itself
+/// writes no pid file — its blocking call is the in-flight signal. Non-zero
+/// child exits are logged but not surfaced as errors so a child failure
+/// cannot abort compaction.
 fn hook_ingest_transcript_sync(state_dir: &Path, transcript_path: &Path) {
     if !transcript_path.is_file() {
         return;
@@ -912,6 +957,19 @@ fn hook_ingest_transcript_sync(state_dir: &Path, transcript_path: &Path) {
         return;
     };
     let _ = std::fs::create_dir_all(state_dir);
+    // Wait briefly for any in-flight async transcript ingest to clear so the
+    // two ingests do not contend on the database lock. Bail out cleanly on
+    // timeout — precompact must never block compaction indefinitely.
+    if !hook_ingest_transcript_sync_wait_for_pid(state_dir) {
+        hook_log(
+            state_dir,
+            &format!(
+                "Transcript ingest (sync) skipped: async transcript ingest still running after {SYNC_INGEST_PID_WAIT_BUDGET_MS}ms: {}",
+                transcript_path.display()
+            ),
+        );
+        return;
+    }
     let Some(log_file) = hook_open_log(state_dir) else {
         return;
     };
@@ -1863,6 +1921,58 @@ mod tests {
         // Pair assertion: log was created during the call (the child was
         // attempted, success or fail).
         assert!(dir.path().join("hook.log").exists());
+    }
+
+    // -------- hook_ingest_transcript_sync_wait_for_pid --------
+
+    #[test]
+    fn hook_ingest_transcript_sync_wait_for_pid_returns_true_when_pid_absent() {
+        // No transcript pid file → helper returns immediately so the sync
+        // ingest can proceed without contending on the database lock.
+        let dir = tempfile::tempdir().expect("must create state dir");
+        let start = std::time::Instant::now();
+        let proceed = hook_ingest_transcript_sync_wait_for_pid(dir.path());
+        let elapsed = start.elapsed();
+        assert!(
+            proceed,
+            "wait must return true when no transcript pid is present"
+        );
+        // Pair assertion: the absence-fast-path must not block on sleep.
+        // Compare against the per-iteration interval rather than the full
+        // budget so the test remains tight.
+        assert!(
+            elapsed < std::time::Duration::from_millis(SYNC_INGEST_PID_POLL_INTERVAL_MS),
+            "absent-pid fast path must not sleep, took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn hook_ingest_transcript_sync_wait_for_pid_returns_true_for_stale_pid() {
+        // A pid file pointing at a dead process is not a contended ingest;
+        // the helper must return `true` so the sync ingest proceeds. PID
+        // 4_200_001 is the same convention used elsewhere in this test suite
+        // for "definitely-not-running".
+        let dir = tempfile::tempdir().expect("must create state dir");
+        std::fs::write(dir.path().join(PID_FILE_TRANSCRIPT), "4200001")
+            .expect("must write stale pid");
+        assert!(
+            hook_ingest_transcript_sync_wait_for_pid(dir.path()),
+            "stale pid must not block sync ingest"
+        );
+    }
+
+    #[test]
+    fn hook_ingest_transcript_sync_wait_for_pid_returns_true_for_non_numeric_pid() {
+        // Negative space: a malformed pid file (manual edit or partial write)
+        // must not be interpreted as an in-flight ingest — same fail-open
+        // behaviour as `hook_mine_already_running`.
+        let dir = tempfile::tempdir().expect("must create state dir");
+        std::fs::write(dir.path().join(PID_FILE_TRANSCRIPT), "not-a-pid")
+            .expect("must write non-numeric pid");
+        assert!(
+            hook_ingest_transcript_sync_wait_for_pid(dir.path()),
+            "non-numeric pid must fall through to true"
+        );
     }
 
     // -------- hook_ingest_transcript (large-file path) --------

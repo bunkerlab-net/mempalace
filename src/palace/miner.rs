@@ -473,6 +473,49 @@ fn mine_shell_quote(path_str: &str) -> String {
     format!("'{escaped}'")
 }
 
+/// Reconstruct the user's `mempalace mine` invocation from `opts` and
+/// `project_dir`, suitable for printing in the Ctrl-C resume hint.
+///
+/// Only non-default flags are emitted so the printed command stays close to
+/// what the user originally typed. Each path component is escaped via
+/// [`mine_shell_quote`] so the line round-trips through `sh -c` even when
+/// paths contain spaces or single quotes. Called by `mine_process_files`.
+fn mine_resume_command(project_dir: &Path, opts: &MineParams) -> String {
+    let mut parts: Vec<String> = vec![
+        "mempalace".to_string(),
+        "mine".to_string(),
+        mine_shell_quote(&project_dir.display().to_string()),
+    ];
+    if let Some(wing) = opts.wing.as_deref()
+        && !wing.is_empty()
+    {
+        parts.push("--wing".to_string());
+        parts.push(mine_shell_quote(wing));
+    }
+    // Default agent is "mempalace" — only emit when the user overrode it.
+    if !opts.agent.is_empty() && opts.agent != "mempalace" {
+        parts.push("--agent".to_string());
+        parts.push(mine_shell_quote(&opts.agent));
+    }
+    if opts.limit > 0 {
+        parts.push("--limit".to_string());
+        parts.push(opts.limit.to_string());
+    }
+    if opts.dry_run {
+        parts.push("--dry-run".to_string());
+    }
+    // CLI default for respect_gitignore is true; emit `--no-gitignore` only
+    // when the user disabled gitignore filtering.
+    if !opts.respect_gitignore {
+        parts.push("--no-gitignore".to_string());
+    }
+    for include_path in &opts.include_ignored_paths {
+        parts.push("--include-ignored".to_string());
+        parts.push(mine_shell_quote(&include_path.display().to_string()));
+    }
+    parts.join(" ")
+}
+
 /// Process all files in the mine loop.
 ///
 /// Returns `(drawers_total, files_skipped, files_unreadable_or_too_short, room_counts)`.
@@ -506,10 +549,7 @@ async fn mine_process_files(
                 "\nInterrupted after {files_processed} file(s), {drawers_total} drawer(s). \
                  Last: {last}"
             );
-            eprintln!(
-                "Resume with: mempalace mine {}",
-                mine_shell_quote(&project_dir.display().to_string())
-            );
+            eprintln!("Resume with: {}", mine_resume_command(project_dir, opts));
             // Bubble out as a typed error so MineGuard::drop runs on the unwind.
             // main.rs maps Error::Interrupted to POSIX exit code 130 explicitly,
             // matching the prior std::process::exit(130) behaviour for the user.
@@ -689,6 +729,53 @@ async fn mine_run_topic_tunnels(connection: &Connection, wing: &str) {
     }
 }
 
+/// Resolve the canonical wing slug and the room list `mine` will use, given
+/// the user-supplied [`MineParams`] and a canonicalised `project_dir`.
+///
+/// This helper exists so [`mine`] stays under the 70-line guideline. It handles:
+/// 1. Trimming the `--wing` override (whitespace-only counts as no override).
+/// 2. Loading the project config (yaml lookup → basename fallback synth).
+/// 3. Canonicalising the resolved wing through [`normalize_wing_name`] so a
+///    hand-edited yaml `wing: my-proj` and a CLI `--wing my-proj` produce
+///    the same slug as the basename fallback (`my_proj`). Without this, the
+///    `topics_by_wing` registry would never find a partner for the wing.
+/// 4. Synthesising a default `general` room when the yaml supplied an empty
+///    rooms list — `detect_room`'s precondition forbids empty room slices.
+fn mine_resolve_wing_and_rooms(
+    project_dir: &Path,
+    opts: &MineParams,
+) -> Result<(String, Vec<crate::config::RoomConfig>)> {
+    let normalized_wing: Option<String> = opts
+        .wing
+        .as_deref()
+        .map(str::trim)
+        .filter(|w| !w.is_empty())
+        .map(str::to_string);
+
+    let config = mine_load_config(project_dir, normalized_wing.as_deref())?;
+
+    let wing_resolved = normalized_wing.as_deref().unwrap_or(&config.wing);
+    let wing_owned = normalize_wing_name(wing_resolved);
+    assert!(
+        !wing_owned.is_empty(),
+        "mine_resolve_wing_and_rooms: canonical wing must not be empty"
+    );
+
+    let mut rooms = config.rooms;
+    if rooms.is_empty() {
+        rooms.push(crate::config::RoomConfig {
+            name: "general".to_string(),
+            description: String::new(),
+            keywords: vec![],
+        });
+    }
+    assert!(
+        !rooms.is_empty(),
+        "mine_resolve_wing_and_rooms: rooms must be non-empty after fallback"
+    );
+    Ok((wing_owned, rooms))
+}
+
 /// Mine a project directory into the palace.
 pub async fn mine(connection: &Connection, project_dir: &Path, opts: &MineParams) -> Result<()> {
     if !project_dir.is_dir() {
@@ -705,19 +792,8 @@ pub async fn mine(connection: &Connection, project_dir: &Path, opts: &MineParams
         ))
     })?;
 
-    // Normalize the wing override: trim whitespace and treat empty/whitespace-only
-    // values as no override, falling back to config or directory basename.
-    let normalized_wing: Option<String> = opts
-        .wing
-        .as_deref()
-        .map(str::trim)
-        .filter(|w| !w.is_empty())
-        .map(str::to_string);
-
-    let config = mine_load_config(&project_dir, normalized_wing.as_deref())?;
-
-    let wing = normalized_wing.as_deref().unwrap_or(&config.wing);
-    let mut rooms = config.rooms;
+    let (wing_owned, mut rooms) = mine_resolve_wing_and_rooms(&project_dir, opts)?;
+    let wing: &str = &wing_owned;
     if rooms.is_empty() {
         // Empty rooms list in mempalace.yaml would violate detect_room's precondition;
         // fall back to a single general room so mining can proceed.
@@ -1306,6 +1382,100 @@ mod tests {
         );
     }
 
+    // --- mine_resume_command ---
+
+    fn resume_opts() -> MineParams {
+        // Default-shaped MineParams for the resume-command tests so each test
+        // toggles exactly the fields under test.
+        MineParams {
+            wing: None,
+            agent: "mempalace".to_string(),
+            limit: 0,
+            dry_run: false,
+            respect_gitignore: true,
+            include_ignored_paths: vec![],
+            pre_scanned_files: None,
+        }
+    }
+
+    #[test]
+    fn mine_resume_command_emits_only_path_when_all_defaults() {
+        // With defaults the resume hint must reduce to the bare command and
+        // path so the printed line stays close to what the user typed.
+        let project = std::path::Path::new("/tmp/proj");
+        let command = mine_resume_command(project, &resume_opts());
+        assert_eq!(command, "mempalace mine '/tmp/proj'");
+    }
+
+    #[test]
+    fn mine_resume_command_includes_wing_override() {
+        // A user-supplied --wing must round-trip verbatim (single-quoted) so
+        // re-running the printed command lands in the same wing.
+        let project = std::path::Path::new("/tmp/proj");
+        let mut opts = resume_opts();
+        opts.wing = Some("my-proj".to_string());
+        let command = mine_resume_command(project, &opts);
+        assert!(
+            command.contains("--wing 'my-proj'"),
+            "wing override must be preserved verbatim, got {command:?}"
+        );
+    }
+
+    #[test]
+    fn mine_resume_command_includes_non_default_flags() {
+        // dry-run, limit, agent, no-gitignore, and include-ignored must all
+        // round-trip when set to non-default values.
+        let project = std::path::Path::new("/tmp/proj");
+        let mut opts = resume_opts();
+        opts.agent = "diary-agent".to_string();
+        opts.limit = 100;
+        opts.dry_run = true;
+        opts.respect_gitignore = false;
+        opts.include_ignored_paths = vec![PathBuf::from("/tmp/proj/dist/bundle.js")];
+        let command = mine_resume_command(project, &opts);
+        assert!(
+            command.contains("--agent 'diary-agent'"),
+            "agent override must be preserved, got {command:?}"
+        );
+        assert!(
+            command.contains("--limit 100"),
+            "limit must be preserved, got {command:?}"
+        );
+        assert!(
+            command.contains("--dry-run"),
+            "dry-run must be preserved, got {command:?}"
+        );
+        assert!(
+            command.contains("--no-gitignore"),
+            "no-gitignore must be preserved, got {command:?}"
+        );
+        assert!(
+            command.contains("--include-ignored '/tmp/proj/dist/bundle.js'"),
+            "include-ignored path must be preserved, got {command:?}"
+        );
+    }
+
+    #[test]
+    fn mine_resume_command_skips_default_agent_and_limit() {
+        // Pair: when agent stays at its default and limit==0 the resume hint
+        // must NOT emit those flags so the output stays minimal.
+        let project = std::path::Path::new("/tmp/proj");
+        let opts = resume_opts();
+        let command = mine_resume_command(project, &opts);
+        assert!(
+            !command.contains("--agent"),
+            "default agent must not be emitted, got {command:?}"
+        );
+        assert!(
+            !command.contains("--limit"),
+            "limit==0 must not be emitted, got {command:?}"
+        );
+        assert!(
+            !command.contains("--no-gitignore"),
+            "default gitignore behaviour must not be emitted, got {command:?}"
+        );
+    }
+
     // --- mine() wing normalization ---
 
     const CONFIG_YAML: &str = "wing: config-wing\nrooms:\n  - name: general\n    description: ''\n";
@@ -1351,7 +1521,9 @@ mod tests {
     #[tokio::test]
     async fn mine_wing_whitespace_only_falls_back_to_config() {
         // A whitespace-only --wing must be treated as no override, so the
-        // config file's wing ("config-wing") is used instead.
+        // config file's wing ("config-wing") is used instead — and then
+        // canonicalised to the normalised slug "config_wing" so it matches
+        // the basename / topics-by-wing convention.
         let dir = tempfile::tempdir().expect("tempdir should be created");
         std::fs::write(dir.path().join("mempalace.yaml"), CONFIG_YAML)
             .expect("write config should succeed");
@@ -1372,15 +1544,15 @@ mod tests {
         assert_eq!(rows.len(), 1, "must have exactly one distinct wing");
         let stored_wing: String = rows[0].get(0).expect("wing column must be readable");
         assert_eq!(
-            stored_wing, "config-wing",
-            "whitespace-only wing must fall back to config"
+            stored_wing, "config_wing",
+            "whitespace-only wing must fall back to config and canonicalise"
         );
     }
 
     #[tokio::test]
     async fn mine_wing_empty_falls_back_to_config() {
         // An empty --wing must be treated as no override, so the config file's
-        // wing ("config-wing") is used instead.
+        // wing ("config-wing") is used and canonicalised to "config_wing".
         let dir = tempfile::tempdir().expect("tempdir should be created");
         std::fs::write(dir.path().join("mempalace.yaml"), CONFIG_YAML)
             .expect("write config should succeed");
@@ -1401,8 +1573,37 @@ mod tests {
         assert_eq!(rows.len(), 1, "must have exactly one distinct wing");
         let stored_wing: String = rows[0].get(0).expect("wing column must be readable");
         assert_eq!(
-            stored_wing, "config-wing",
-            "empty wing must fall back to config"
+            stored_wing, "config_wing",
+            "empty wing must fall back to config and canonicalise"
+        );
+    }
+
+    #[tokio::test]
+    async fn mine_wing_override_canonicalises_hyphen_to_underscore() {
+        // Regression: a CLI override like `--wing my-proj` must be canonicalised
+        // through `normalize_wing_name` so drawers land in the same wing as the
+        // basename fallback / `topics_by_wing` registry. Without this, topic
+        // tunnels never find a partner because the registry key never matches.
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        std::fs::write(
+            dir.path().join("notes.txt"),
+            "rust programming language provides memory safety without a garbage collector",
+        )
+        .expect("write notes.txt should succeed");
+
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        mine(&connection, dir.path(), &mine_opts(Some("my-proj")))
+            .await
+            .expect("mine must succeed with hyphenated wing");
+
+        let rows = crate::db::query_all(&connection, "SELECT DISTINCT wing FROM drawers", ())
+            .await
+            .expect("query must succeed");
+        assert_eq!(rows.len(), 1, "must have exactly one distinct wing");
+        let stored_wing: String = rows[0].get(0).expect("wing column must be readable");
+        assert_eq!(
+            stored_wing, "my_proj",
+            "hyphenated CLI override must canonicalise"
         );
     }
 

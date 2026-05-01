@@ -817,7 +817,8 @@ pub fn apply_corpus_origin(
     let persona_set: std::collections::HashSet<String> = origin
         .agent_persona_names
         .iter()
-        .map(|name| name.to_lowercase())
+        .map(String::as_str)
+        .map(str::to_lowercase)
         .collect();
 
     assert!(

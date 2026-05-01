@@ -481,6 +481,17 @@ pub async fn create_tunnel(
         "target_room must not be empty"
     );
 
+    // Reject any tunnel kind outside the closed taxonomy. The schema column
+    // `explicit_tunnels.kind` is consumed by the MCP `find_tunnels` filter and
+    // by downstream UI labelling, so an unexpected value would leak into both
+    // — fail fast at the write boundary instead of persisting bad data.
+    if !matches!(params.kind, "explicit" | "topic") {
+        return Err(crate::error::Error::Other(format!(
+            "create_tunnel: kind must be \"explicit\" or \"topic\", got {:?}",
+            params.kind
+        )));
+    }
+
     // Normalize wing slugs so "my-project" and "my_project" resolve identically.
     let source_wing_norm = normalize_wing(params.source_wing);
     let target_wing_norm = normalize_wing(params.target_wing);
@@ -912,7 +923,18 @@ pub async fn topic_tunnels_for_wing(
         return Ok(0);
     }
 
-    let own = match topics_by_wing.get(wing) {
+    // Callers may pass an unnormalised wing spelling (e.g. `my-proj`) while
+    // `topics_by_wing` is keyed by the canonical slug (`my_proj`) — produced by
+    // `compute_topic_tunnels_build_wing_map` for the same reason. Normalise
+    // here so the lookup hits the right bucket and the slice we hand to
+    // `compute_topic_tunnels` keeps the slug invariant on both keys.
+    let normalized_wing = normalize_wing(wing);
+    assert!(
+        !normalized_wing.is_empty(),
+        "topic_tunnels_for_wing: normalized wing must not be empty"
+    );
+
+    let own = match topics_by_wing.get(&normalized_wing) {
         Some(names) if !names.is_empty() => names,
         _ => return Ok(0),
     };
@@ -921,12 +943,12 @@ pub async fn topic_tunnels_for_wing(
     // compute_topic_tunnels to keep threshold and casing logic in one place.
     let mut total: usize = 0;
     for (other, other_topics) in topics_by_wing {
-        if other == wing || other_topics.is_empty() {
+        if other == &normalized_wing || other_topics.is_empty() {
             continue;
         }
         let mut slice: std::collections::BTreeMap<String, Vec<String>> =
             std::collections::BTreeMap::new();
-        slice.insert(wing.to_string(), own.clone());
+        slice.insert(normalized_wing.clone(), own.clone());
         slice.insert(other.clone(), other_topics.clone());
         total += compute_topic_tunnels(connection, &slice, min_count, label_prefix).await?;
     }
@@ -1345,6 +1367,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn topic_tunnels_for_wing_normalizes_caller_wing() {
+        // Regression: callers may pass an unnormalised wing slug ("my-proj")
+        // while the registry was populated with the canonical slug
+        // ("my_proj"). The lookup must still hit the right bucket so the
+        // incremental update from the miner does not silently no-op when the
+        // wing was stored under its hyphen form.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let mut topics_by_wing = std::collections::BTreeMap::new();
+        topics_by_wing.insert("my_proj".to_string(), vec!["Rust".to_string()]);
+        topics_by_wing.insert("other_proj".to_string(), vec!["rust".to_string()]);
+
+        // Hyphenated alias must resolve to the canonical bucket above.
+        let count =
+            topic_tunnels_for_wing(&connection, "my-proj", &topics_by_wing, 1, "shared topic")
+                .await
+                .expect("topic_tunnels_for_wing must succeed for hyphen alias");
+        assert_eq!(
+            count, 1,
+            "hyphenated alias must resolve to canonical wing bucket and create one tunnel"
+        );
+        let tunnels = list_tunnels(&connection, Some("my_proj"))
+            .await
+            .expect("list_tunnels for my_proj");
+        assert_eq!(
+            tunnels.len(),
+            1,
+            "exactly one tunnel must reference the canonical slug"
+        );
+    }
+
+    #[tokio::test]
     async fn kind_column_preserved_on_explicit_tunnel() {
         // Explicit tunnels written via MCP or API must carry kind="explicit".
         let (_db, connection) = crate::test_helpers::test_db().await;
@@ -1373,6 +1426,43 @@ mod tests {
         assert_eq!(
             tunnels[0].kind, "explicit",
             "listed tunnel must carry kind='explicit'"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_tunnel_rejects_invalid_kind() {
+        // Negative space: any kind outside the closed {"explicit","topic"}
+        // taxonomy must be refused before the row is persisted, otherwise the
+        // value would leak through `find_tunnels`/`list_tunnels` filters.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let result = create_tunnel(
+            &connection,
+            &CreateTunnelParams {
+                source_wing: "alpha",
+                source_room: "code",
+                target_wing: "beta",
+                target_room: "code",
+                label: "bad kind",
+                kind: "bogus",
+                source_drawer_id: None,
+                target_drawer_id: None,
+            },
+        )
+        .await;
+        let error = result.expect_err("invalid kind must error");
+        let message = error.to_string();
+        assert!(
+            message.contains("kind must be"),
+            "error must explain valid kinds, got {message:?}"
+        );
+        // Pair: nothing was written even though the error fired late on the
+        // path — list_tunnels must report zero rows.
+        let tunnels = list_tunnels(&connection, None)
+            .await
+            .expect("list_tunnels must succeed");
+        assert!(
+            tunnels.is_empty(),
+            "no row may be persisted for an invalid kind"
         );
     }
 }
