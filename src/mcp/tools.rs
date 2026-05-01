@@ -1348,6 +1348,7 @@ async fn tool_create_tunnel(connection: &Connection, args: &Value) -> Value {
             target_wing: &target_wing,
             target_room: &target_room,
             label: &label,
+            kind: "explicit",
             source_drawer_id: source_drawer_id.as_deref(),
             target_drawer_id: target_drawer_id.as_deref(),
         },

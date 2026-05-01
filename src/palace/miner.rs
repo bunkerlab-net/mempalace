@@ -650,6 +650,41 @@ fn mine_apply_include_ignored(
     scanned
 }
 
+/// Compute topic tunnels for `wing` after mining completes.
+///
+/// Reads `topics_by_wing` from the global registry and calls
+/// `graph::topic_tunnels_for_wing`. Degrades quietly on error so a
+/// registry issue never aborts a mine. Called by [`mine`].
+async fn mine_run_topic_tunnels(connection: &Connection, wing: &str) {
+    assert!(
+        !wing.is_empty(),
+        "mine_run_topic_tunnels: wing must not be empty"
+    );
+
+    let topics_by_wing = crate::palace::known_entities::get_topics_by_wing();
+    if !topics_by_wing.contains_key(wing) {
+        return;
+    }
+    let min_count = crate::config::MempalaceConfig::topic_tunnel_min_count();
+    match crate::palace::graph::topic_tunnels_for_wing(
+        connection,
+        wing,
+        &topics_by_wing,
+        min_count,
+        "shared topic",
+    )
+    .await
+    {
+        Ok(count) if count > 0 => {
+            println!("\n  Topic tunnels: +{count} cross-wing link(s)");
+        }
+        Ok(_) => {}
+        Err(error) => {
+            eprintln!("\n  WARNING: topic tunnel computation skipped — {error}");
+        }
+    }
+}
+
 /// Mine a project directory into the palace.
 pub async fn mine(connection: &Connection, project_dir: &Path, opts: &MineParams) -> Result<()> {
     if !project_dir.is_dir() {
@@ -722,6 +757,10 @@ pub async fn mine(connection: &Connection, project_dir: &Path, opts: &MineParams
             &ctrl_c_flag,
         )
         .await?;
+
+    if !opts.dry_run {
+        mine_run_topic_tunnels(connection, wing).await;
+    }
 
     mine_print_summary(
         opts.dry_run,

@@ -316,6 +316,21 @@ impl MempalaceConfig {
         );
         self.palace_path.clone()
     }
+
+    /// Minimum shared-topic count required before two wings get a topic tunnel.
+    ///
+    /// Resolution order: `MEMPALACE_TOPIC_TUNNEL_MIN_COUNT` env var → `1` (default).
+    /// Values below 1 are clamped to 1. Returns a `usize` so callers can
+    /// pass it directly to `compute_topic_tunnels` without casting.
+    pub fn topic_tunnel_min_count() -> usize {
+        if let Ok(value) = std::env::var("MEMPALACE_TOPIC_TUNNEL_MIN_COUNT")
+            && let Ok(parsed) = value.trim().parse::<usize>()
+        {
+            return parsed.max(1);
+        }
+        // Default: a single shared topic creates a tunnel.
+        1
+    }
 }
 
 impl Default for MempalaceConfig {

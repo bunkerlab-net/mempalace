@@ -464,7 +464,7 @@ fn run_confirm_and_save(detected: &DetectedDict, yes: bool, directory: &Path) ->
         by_category.insert("projects".to_string(), confirmed.projects.clone());
     }
 
-    if let Err(error) = add_to_known_entities(&by_category) {
+    if let Err(error) = add_to_known_entities(&by_category, None) {
         eprintln!("  Warning: could not update entity registry: {error}");
     }
 

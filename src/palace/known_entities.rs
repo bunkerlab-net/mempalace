@@ -47,10 +47,16 @@ pub fn registry_path() -> PathBuf {
 /// - Missing categories: created as a fresh deduplicated list.
 /// - Corrupted or non-object registry JSON: starts fresh.
 ///
+/// When `wing` is `Some(w)` and `entities_by_category` contains a non-empty
+/// `"topics"` key, the registry's `topics_by_wing[w]` is replaced (not
+/// unioned) with the de-duplicated topic list. This is the signal source for
+/// `graph::compute_topic_tunnels` at mine time.
+///
 /// The registry file is chmod 0o600 after write so only the current user can
 /// read it. Returns the registry path so callers can log or display it.
 pub fn add_to_known_entities<S: std::hash::BuildHasher>(
     entities_by_category: &HashMap<String, Vec<String>, S>,
+    wing: Option<&str>,
 ) -> Result<PathBuf> {
     let path = registry_path();
     assert!(!path.as_os_str().is_empty());
@@ -62,10 +68,18 @@ pub fn add_to_known_entities<S: std::hash::BuildHasher>(
     let mut existing = add_to_known_entities_load(&path);
 
     for (category, names) in entities_by_category {
-        if names.is_empty() {
+        // topics_by_wing is managed separately below; skip as a regular category.
+        if category == "topics_by_wing" || names.is_empty() {
             continue;
         }
         add_to_known_entities_merge_category(&mut existing, category, names);
+    }
+
+    // Write topics_by_wing[wing] = deduped_topics (replace, not union).
+    if let Some(wing_name) = wing.filter(|wing_str| !wing_str.trim().is_empty())
+        && let Some(topics) = entities_by_category.get("topics")
+    {
+        add_to_known_entities_set_wing_topics(&mut existing, wing_name, topics);
     }
 
     let json = serde_json::to_string_pretty(&Value::Object(existing))?;
@@ -82,6 +96,40 @@ pub fn add_to_known_entities<S: std::hash::BuildHasher>(
     debug_assert!(path.exists(), "registry must exist after write");
 
     Ok(path)
+}
+
+/// Read `topics_by_wing` from the registry.
+///
+/// Returns an empty map when the registry is absent, unreadable, or lacks a
+/// valid `topics_by_wing` object. Wing-topic lists must be string arrays.
+pub fn get_topics_by_wing() -> std::collections::BTreeMap<String, Vec<String>> {
+    let path = registry_path();
+    let existing = add_to_known_entities_load(&path);
+
+    let Some(Value::Object(topics_map)) = existing.get("topics_by_wing") else {
+        return std::collections::BTreeMap::new();
+    };
+
+    let mut result = std::collections::BTreeMap::new();
+    for (wing, topics_val) in topics_map {
+        if let Some(arr) = topics_val.as_array() {
+            let names: Vec<String> = arr
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|name| !name.trim().is_empty())
+                .map(str::to_string)
+                .collect();
+            if !names.is_empty() {
+                result.insert(wing.clone(), names);
+            }
+        }
+    }
+
+    assert!(
+        result.len() <= 10_000,
+        "get_topics_by_wing: wing count must be bounded"
+    );
+    result
 }
 
 // ===================== PRIVATE HELPERS =====================
@@ -226,6 +274,62 @@ fn add_to_known_entities_new_list(names: &[String]) -> Vec<Value> {
     result
 }
 
+/// Replace `existing["topics_by_wing"][wing_name]` with a fresh deduplicated
+/// list from `topics`, preserving first-seen casing for each topic name.
+///
+/// Called by [`add_to_known_entities`] when a wing name is provided. The
+/// replace (not union) semantic mirrors the Python implementation so that
+/// re-running `init` reflects the user's latest confirmation rather than
+/// accumulating stale topic labels from previous runs.
+fn add_to_known_entities_set_wing_topics(
+    existing: &mut Map<String, Value>,
+    wing_name: &str,
+    topics: &[String],
+) {
+    assert!(
+        !wing_name.is_empty(),
+        "add_to_known_entities_set_wing_topics: wing must not be empty"
+    );
+
+    // Build a de-duplicated list from the provided topics.
+    let mut seen_lower: HashSet<String> = HashSet::new();
+    let mut ordered: Vec<Value> = Vec::new();
+    for name in topics.iter().take(NAMES_PER_CATEGORY_LIMIT) {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lower = trimmed.to_lowercase();
+        if seen_lower.contains(&lower) {
+            continue;
+        }
+        seen_lower.insert(lower);
+        ordered.push(Value::String(trimmed.to_string()));
+    }
+
+    // Postcondition: output cannot be larger than input.
+    debug_assert!(ordered.len() <= topics.len());
+
+    // Get or create the topics_by_wing map.
+    let topics_map = existing
+        .entry("topics_by_wing".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    let Some(map) = topics_map.as_object_mut() else {
+        return;
+    };
+
+    if ordered.is_empty() {
+        map.remove(wing_name);
+    } else {
+        map.insert(wing_name.to_string(), Value::Array(ordered));
+    }
+
+    // Remove the topics_by_wing key entirely if no wings remain.
+    if map.is_empty() {
+        existing.remove("topics_by_wing");
+    }
+}
+
 // ===================== TESTS =====================
 
 #[cfg(test)]
@@ -265,7 +369,7 @@ mod tests {
                 "people".to_string(),
                 vec!["Alice".to_string(), "Bob".to_string()],
             );
-            let result = add_to_known_entities(&entities).expect("add must succeed");
+            let result = add_to_known_entities(&entities, None).expect("add must succeed");
             assert!(result.ends_with("known_entities.json"));
             assert!(path.exists(), "registry must be created");
         });
@@ -277,7 +381,7 @@ mod tests {
         with_temp_registry(|path| {
             let mut entities = HashMap::new();
             entities.insert("people".to_string(), vec!["Alice".to_string()]);
-            let result = add_to_known_entities(&entities).expect("add must succeed");
+            let result = add_to_known_entities(&entities, None).expect("add must succeed");
             assert_eq!(result, path);
             assert!(result.ends_with("known_entities.json"));
         });
@@ -295,7 +399,7 @@ mod tests {
                 "people".to_string(),
                 vec!["Bob".to_string(), "Carol".to_string()],
             );
-            add_to_known_entities(&entities).expect("add");
+            add_to_known_entities(&entities, None).expect("add");
             let data: serde_json::Value =
                 serde_json::from_str(&std::fs::read_to_string(&path).expect("read"))
                     .expect("parse");
@@ -320,7 +424,7 @@ mod tests {
                 "people".to_string(),
                 vec!["alice".to_string(), "ALICE".to_string(), "Bob".to_string()],
             );
-            add_to_known_entities(&entities).expect("add");
+            add_to_known_entities(&entities, None).expect("add");
             let data: serde_json::Value =
                 serde_json::from_str(&std::fs::read_to_string(&path).expect("read"))
                     .expect("parse");
@@ -343,7 +447,7 @@ mod tests {
                 .expect("write");
             let mut entities = HashMap::new();
             entities.insert("people".to_string(), vec!["Bob".to_string()]);
-            add_to_known_entities(&entities).expect("add");
+            add_to_known_entities(&entities, None).expect("add");
             let data: serde_json::Value =
                 serde_json::from_str(&std::fs::read_to_string(&path).expect("read"))
                     .expect("parse");
@@ -368,7 +472,7 @@ mod tests {
                 "projects".to_string(),
                 vec!["foo".to_string(), "bar".to_string()],
             );
-            add_to_known_entities(&entities).expect("add");
+            add_to_known_entities(&entities, None).expect("add");
             let data: serde_json::Value =
                 serde_json::from_str(&std::fs::read_to_string(&path).expect("read"))
                     .expect("parse");
@@ -395,7 +499,7 @@ mod tests {
                 "people".to_string(),
                 vec!["Alice".to_string(), "Carol".to_string()],
             );
-            add_to_known_entities(&entities).expect("add");
+            add_to_known_entities(&entities, None).expect("add");
             let data: serde_json::Value =
                 serde_json::from_str(&std::fs::read_to_string(&path).expect("read"))
                     .expect("parse");
@@ -420,7 +524,7 @@ mod tests {
             std::fs::write(&path, "{ not valid json").expect("write");
             let mut entities = HashMap::new();
             entities.insert("people".to_string(), vec!["Alice".to_string()]);
-            add_to_known_entities(&entities).expect("add must succeed despite corruption");
+            add_to_known_entities(&entities, None).expect("add must succeed despite corruption");
             let data: serde_json::Value =
                 serde_json::from_str(&std::fs::read_to_string(&path).expect("read"))
                     .expect("parse");
@@ -444,7 +548,7 @@ mod tests {
                 "people".to_string(),
                 vec!["Alice".to_string(), String::new(), "  ".to_string()],
             );
-            let result_path = add_to_known_entities(&entities).expect("add");
+            let result_path = add_to_known_entities(&entities, None).expect("add");
             let data: serde_json::Value =
                 serde_json::from_str(&std::fs::read_to_string(&result_path).expect("read"))
                     .expect("parse");
@@ -472,7 +576,7 @@ mod tests {
                     "Alice".to_string(),
                 ],
             );
-            let result_path = add_to_known_entities(&entities).expect("add");
+            let result_path = add_to_known_entities(&entities, None).expect("add");
             let data: serde_json::Value =
                 serde_json::from_str(&std::fs::read_to_string(&result_path).expect("read"))
                     .expect("parse");
@@ -484,6 +588,119 @@ mod tests {
                 .collect();
             assert_eq!(names.len(), 1, "duplicates within input must be collapsed");
             assert_eq!(names[0], "Alice");
+        });
+    }
+
+    #[test]
+    fn add_with_wing_writes_topics_by_wing() {
+        // When wing is provided and entities contain "topics", the registry
+        // must store topics_by_wing[wing] with the topic list.
+        with_temp_registry(|path| {
+            let mut entities = HashMap::new();
+            entities.insert("people".to_string(), vec!["Alice".to_string()]);
+            entities.insert(
+                "topics".to_string(),
+                vec!["Rust".to_string(), "WebAssembly".to_string()],
+            );
+            add_to_known_entities(&entities, Some("wing_alpha")).expect("add with wing");
+            let data: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(path).expect("read")).expect("parse");
+            let topics_by_wing = &data["topics_by_wing"];
+            assert!(
+                topics_by_wing.is_object(),
+                "topics_by_wing must be written when wing is provided"
+            );
+            let wing_topics = &topics_by_wing["wing_alpha"];
+            assert!(wing_topics.is_array(), "wing_alpha must have a topic array");
+            let topics: Vec<&str> = wing_topics
+                .as_array()
+                .expect("array")
+                .iter()
+                .filter_map(|val| val.as_str())
+                .collect();
+            assert!(topics.contains(&"Rust"), "Rust must be in topics");
+            assert!(
+                topics.contains(&"WebAssembly"),
+                "WebAssembly must be in topics"
+            );
+        });
+    }
+
+    #[test]
+    fn add_without_wing_does_not_write_topics_by_wing() {
+        // When no wing is provided, topics_by_wing must NOT be written even
+        // if the entities map contains a "topics" key.
+        with_temp_registry(|path| {
+            let mut entities = HashMap::new();
+            entities.insert("topics".to_string(), vec!["Rust".to_string()]);
+            add_to_known_entities(&entities, None).expect("add without wing");
+            let data: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(path).expect("read")).expect("parse");
+            assert!(
+                data.get("topics_by_wing").is_none(),
+                "topics_by_wing must not be written without a wing"
+            );
+        });
+    }
+
+    #[test]
+    fn add_with_wing_replaces_existing_topics_for_wing() {
+        // A second call with the same wing must REPLACE (not union) the topic list.
+        with_temp_registry(|path| {
+            let mut entities_first = HashMap::new();
+            entities_first.insert(
+                "topics".to_string(),
+                vec!["Rust".to_string(), "Python".to_string()],
+            );
+            add_to_known_entities(&entities_first, Some("wing_beta")).expect("first add");
+
+            let mut entities_second = HashMap::new();
+            entities_second.insert("topics".to_string(), vec!["Go".to_string()]);
+            add_to_known_entities(&entities_second, Some("wing_beta")).expect("second add");
+
+            let data: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(path).expect("read")).expect("parse");
+            let topics: Vec<&str> = data["topics_by_wing"]["wing_beta"]
+                .as_array()
+                .expect("array")
+                .iter()
+                .filter_map(|val| val.as_str())
+                .collect();
+            assert_eq!(topics.len(), 1, "second call must replace, not union");
+            assert_eq!(topics[0], "Go", "only the second call's topics must remain");
+        });
+    }
+
+    #[test]
+    fn get_topics_by_wing_returns_empty_when_no_registry() {
+        with_temp_registry(|_path| {
+            // Empty registry — get_topics_by_wing must return empty map.
+            let result = get_topics_by_wing();
+            assert!(
+                result.is_empty(),
+                "must be empty when no topics_by_wing in registry"
+            );
+        });
+    }
+
+    #[test]
+    fn get_topics_by_wing_reads_written_data() {
+        with_temp_registry(|_path| {
+            let mut entities = HashMap::new();
+            entities.insert(
+                "topics".to_string(),
+                vec!["Angular".to_string(), "Vue".to_string()],
+            );
+            add_to_known_entities(&entities, Some("wing_frontend")).expect("add");
+
+            let result = get_topics_by_wing();
+            assert!(result.contains_key("wing_frontend"), "wing must be present");
+            let topics = &result["wing_frontend"];
+            assert!(
+                topics.contains(&"Angular".to_string()),
+                "Angular must be present"
+            );
+            assert!(topics.contains(&"Vue".to_string()), "Vue must be present");
         });
     }
 }

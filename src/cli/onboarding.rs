@@ -507,7 +507,7 @@ fn onboarding_seed_registry(
         !by_category.is_empty() || people.is_empty(),
         "non-empty people must populate registry"
     );
-    add_to_known_entities(&by_category)
+    add_to_known_entities(&by_category, None)
 }
 
 /// Seed the structured `EntityRegistry` (`entity_registry.json`) from onboarding data.
