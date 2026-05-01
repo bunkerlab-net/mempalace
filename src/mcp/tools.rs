@@ -3066,6 +3066,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn diary_write_topic_null_byte_rejected() {
+        with_isolated_env(|connection| async move {
+            let result = tool_diary_write(
+                &connection,
+                &json!({
+                    "agent_name": "TestAgent",
+                    "entry": "valid entry content for topic null byte test",
+                    "topic": "bad\x00topic",
+                }),
+            )
+            .await;
+            assert_eq!(result["success"], false, "null-byte topic must be rejected");
+            assert!(result["error"].is_string(), "must return error message");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn diary_write_topic_path_traversal_rejected() {
+        with_isolated_env(|connection| async move {
+            let result = tool_diary_write(
+                &connection,
+                &json!({
+                    "agent_name": "TestAgent",
+                    "entry": "valid entry for path traversal test",
+                    "topic": "../etc",
+                }),
+            )
+            .await;
+            assert_eq!(
+                result["success"], false,
+                "path-traversal topic must be rejected"
+            );
+            assert!(result["error"].is_string(), "must return error message");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn diary_write_topic_oversized_rejected() {
+        with_isolated_env(|connection| async move {
+            let oversized_topic = "a".repeat(129);
+            let result = tool_diary_write(
+                &connection,
+                &json!({
+                    "agent_name": "TestAgent",
+                    "entry": "valid entry for oversized topic test",
+                    "topic": oversized_topic,
+                }),
+            )
+            .await;
+            assert_eq!(
+                result["success"], false,
+                "topic exceeding 128 chars must be rejected"
+            );
+            assert!(result["error"].is_string(), "must return error message");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn diary_write_valid_topic_succeeds() {
+        with_isolated_env(|connection| async move {
+            let result = tool_diary_write(
+                &connection,
+                &json!({
+                    "agent_name": "TestAgent",
+                    "entry": "valid entry for valid topic test",
+                    "topic": "rust_async",
+                }),
+            )
+            .await;
+            assert_eq!(result["success"], true, "valid topic must succeed");
+            assert_eq!(result["topic"], "rust_async");
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn diary_read_filtered_by_wing_excludes_other_wings() {
         // When `wing` is supplied only entries from that wing must be returned.
         with_isolated_env(|connection| async move {
