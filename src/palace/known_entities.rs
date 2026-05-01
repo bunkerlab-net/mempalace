@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
-use crate::config::config_dir;
+use crate::config::{config_dir, normalize_wing_name};
 use crate::error::Result;
 
 // Safety bound: maximum names processed per category per call.
@@ -47,10 +47,16 @@ pub fn registry_path() -> PathBuf {
 /// - Missing categories: created as a fresh deduplicated list.
 /// - Corrupted or non-object registry JSON: starts fresh.
 ///
+/// When `wing` is `Some(w)` and `entities_by_category` contains a non-empty
+/// `"topics"` key, the registry's `topics_by_wing[w]` is replaced (not
+/// unioned) with the de-duplicated topic list. This is the signal source for
+/// `graph::compute_topic_tunnels` at mine time.
+///
 /// The registry file is chmod 0o600 after write so only the current user can
 /// read it. Returns the registry path so callers can log or display it.
 pub fn add_to_known_entities<S: std::hash::BuildHasher>(
     entities_by_category: &HashMap<String, Vec<String>, S>,
+    wing: Option<&str>,
 ) -> Result<PathBuf> {
     let path = registry_path();
     assert!(!path.as_os_str().is_empty());
@@ -62,10 +68,18 @@ pub fn add_to_known_entities<S: std::hash::BuildHasher>(
     let mut existing = add_to_known_entities_load(&path);
 
     for (category, names) in entities_by_category {
-        if names.is_empty() {
+        // topics_by_wing is managed separately below; skip as a regular category.
+        if category == "topics_by_wing" || names.is_empty() {
             continue;
         }
         add_to_known_entities_merge_category(&mut existing, category, names);
+    }
+
+    // Write topics_by_wing[wing] = deduped_topics (replace, not union).
+    if let Some(wing_name) = wing.filter(|wing_str| !wing_str.trim().is_empty())
+        && let Some(topics) = entities_by_category.get("topics")
+    {
+        add_to_known_entities_set_wing_topics(&mut existing, wing_name, topics);
     }
 
     let json = serde_json::to_string_pretty(&Value::Object(existing))?;
@@ -82,6 +96,74 @@ pub fn add_to_known_entities<S: std::hash::BuildHasher>(
     debug_assert!(path.exists(), "registry must exist after write");
 
     Ok(path)
+}
+
+/// Read `topics_by_wing` from the registry.
+///
+/// Returns an empty map when the registry is absent, unreadable, or lacks a
+/// valid `topics_by_wing` object. Wing-topic lists must be string arrays.
+///
+/// Wing keys are canonicalised via [`normalize_wing_name`] on read so legacy
+/// registries that stored raw spellings (e.g. `My-Proj` from before the
+/// write-side normalisation landed) line up with the read path used by
+/// `miner::mine_run_topic_tunnels` and `graph::topic_tunnels_for_wing`. When
+/// two raw keys collapse to the same slug, their topic lists are merged with
+/// case-insensitive de-duplication and first-seen casing wins, so neither
+/// variant silently overwrites the other.
+pub fn get_topics_by_wing() -> std::collections::BTreeMap<String, Vec<String>> {
+    let path = registry_path();
+    let existing = add_to_known_entities_load(&path);
+
+    let Some(Value::Object(topics_map)) = existing.get("topics_by_wing") else {
+        return std::collections::BTreeMap::new();
+    };
+
+    let mut result: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    // Track per-wing case-insensitive seen sets so collisions (raw key variants
+    // that normalise to the same slug) merge instead of overwrite.
+    let mut seen_lower_by_wing: std::collections::BTreeMap<String, HashSet<String>> =
+        std::collections::BTreeMap::new();
+    for (wing, topics_val) in topics_map {
+        let Some(arr) = topics_val.as_array() else {
+            continue;
+        };
+        // Trim before calling normalize_wing_name — `normalize_wing_name` asserts
+        // non-empty input, so a registry corrupted to `""` or `"   "` would
+        // panic. Skip those entries explicitly instead.
+        let wing_trimmed = wing.trim();
+        if wing_trimmed.is_empty() {
+            continue;
+        }
+        let wing_key = normalize_wing_name(wing_trimmed);
+        if wing_key.is_empty() {
+            continue;
+        }
+        let bucket = result.entry(wing_key.clone()).or_default();
+        let seen = seen_lower_by_wing.entry(wing_key).or_default();
+        for value in arr {
+            let Some(name) = value.as_str() else { continue };
+            let trimmed = name.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let lower = trimmed.to_lowercase();
+            if seen.contains(&lower) {
+                continue;
+            }
+            seen.insert(lower);
+            bucket.push(trimmed.to_string());
+        }
+    }
+    // Drop wings whose only entries were empty/whitespace topics so callers
+    // never see placeholder buckets.
+    result.retain(|_, names| !names.is_empty());
+
+    assert!(
+        result.len() <= 10_000,
+        "get_topics_by_wing: wing count must be bounded"
+    );
+    result
 }
 
 // ===================== PRIVATE HELPERS =====================
@@ -226,6 +308,86 @@ fn add_to_known_entities_new_list(names: &[String]) -> Vec<Value> {
     result
 }
 
+/// Replace `existing["topics_by_wing"][wing_key]` with a fresh deduplicated
+/// list from `topics`, preserving first-seen casing for each topic name.
+///
+/// Called by [`add_to_known_entities`] when a wing name is provided. The
+/// replace (not union) semantic mirrors the Python implementation so that
+/// re-running `init` reflects the user's latest confirmation rather than
+/// accumulating stale topic labels from previous runs.
+///
+/// The `wing_name` is canonicalised via [`normalize_wing_name`] before insertion
+/// so the read path (`graph::topic_tunnels_for_wing`,
+/// `compute_topic_tunnels_build_wing_map`) — which always normalises — finds
+/// the bucket regardless of how the caller spelled the wing.
+fn add_to_known_entities_set_wing_topics(
+    existing: &mut Map<String, Value>,
+    wing_name: &str,
+    topics: &[String],
+) {
+    assert!(
+        !wing_name.is_empty(),
+        "add_to_known_entities_set_wing_topics: wing must not be empty"
+    );
+
+    // Canonicalise the wing key so writes match the read path's normalisation.
+    let wing_key = normalize_wing_name(wing_name.trim());
+    if wing_key.is_empty() {
+        return;
+    }
+
+    // Build a de-duplicated list from the provided topics.
+    let mut seen_lower: HashSet<String> = HashSet::new();
+    let mut ordered: Vec<Value> = Vec::new();
+    for name in topics.iter().take(NAMES_PER_CATEGORY_LIMIT) {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lower = trimmed.to_lowercase();
+        if seen_lower.contains(&lower) {
+            continue;
+        }
+        seen_lower.insert(lower);
+        ordered.push(Value::String(trimmed.to_string()));
+    }
+
+    // Postcondition: output cannot be larger than input.
+    debug_assert!(ordered.len() <= topics.len());
+
+    // Get or create the topics_by_wing map. If it exists but is not an object
+    // (corrupted file or schema drift), rebuild it as a fresh object rather
+    // than returning early — silently dropping the user's wing topics on a
+    // malformed value would be a data-loss footgun.
+    let topics_map = existing
+        .entry("topics_by_wing".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    if !topics_map.is_object() {
+        *topics_map = Value::Object(Map::new());
+    }
+    // Pair assertion: regardless of the prior shape, the value is now an object.
+    debug_assert!(
+        topics_map.is_object(),
+        "topics_by_wing must be a JSON object after the rebuild guard"
+    );
+    // The guard above guarantees this is an object; the let-else bail-out is
+    // unreachable but kept so clippy::expect_used (denied repo-wide) is honored.
+    let Some(map) = topics_map.as_object_mut() else {
+        return;
+    };
+
+    if ordered.is_empty() {
+        map.remove(&wing_key);
+    } else {
+        map.insert(wing_key, Value::Array(ordered));
+    }
+
+    // Remove the topics_by_wing key entirely if no wings remain.
+    if map.is_empty() {
+        existing.remove("topics_by_wing");
+    }
+}
+
 // ===================== TESTS =====================
 
 #[cfg(test)]
@@ -265,7 +427,7 @@ mod tests {
                 "people".to_string(),
                 vec!["Alice".to_string(), "Bob".to_string()],
             );
-            let result = add_to_known_entities(&entities).expect("add must succeed");
+            let result = add_to_known_entities(&entities, None).expect("add must succeed");
             assert!(result.ends_with("known_entities.json"));
             assert!(path.exists(), "registry must be created");
         });
@@ -277,7 +439,7 @@ mod tests {
         with_temp_registry(|path| {
             let mut entities = HashMap::new();
             entities.insert("people".to_string(), vec!["Alice".to_string()]);
-            let result = add_to_known_entities(&entities).expect("add must succeed");
+            let result = add_to_known_entities(&entities, None).expect("add must succeed");
             assert_eq!(result, path);
             assert!(result.ends_with("known_entities.json"));
         });
@@ -295,7 +457,7 @@ mod tests {
                 "people".to_string(),
                 vec!["Bob".to_string(), "Carol".to_string()],
             );
-            add_to_known_entities(&entities).expect("add");
+            add_to_known_entities(&entities, None).expect("add");
             let data: serde_json::Value =
                 serde_json::from_str(&std::fs::read_to_string(&path).expect("read"))
                     .expect("parse");
@@ -320,7 +482,7 @@ mod tests {
                 "people".to_string(),
                 vec!["alice".to_string(), "ALICE".to_string(), "Bob".to_string()],
             );
-            add_to_known_entities(&entities).expect("add");
+            add_to_known_entities(&entities, None).expect("add");
             let data: serde_json::Value =
                 serde_json::from_str(&std::fs::read_to_string(&path).expect("read"))
                     .expect("parse");
@@ -343,7 +505,7 @@ mod tests {
                 .expect("write");
             let mut entities = HashMap::new();
             entities.insert("people".to_string(), vec!["Bob".to_string()]);
-            add_to_known_entities(&entities).expect("add");
+            add_to_known_entities(&entities, None).expect("add");
             let data: serde_json::Value =
                 serde_json::from_str(&std::fs::read_to_string(&path).expect("read"))
                     .expect("parse");
@@ -368,7 +530,7 @@ mod tests {
                 "projects".to_string(),
                 vec!["foo".to_string(), "bar".to_string()],
             );
-            add_to_known_entities(&entities).expect("add");
+            add_to_known_entities(&entities, None).expect("add");
             let data: serde_json::Value =
                 serde_json::from_str(&std::fs::read_to_string(&path).expect("read"))
                     .expect("parse");
@@ -395,7 +557,7 @@ mod tests {
                 "people".to_string(),
                 vec!["Alice".to_string(), "Carol".to_string()],
             );
-            add_to_known_entities(&entities).expect("add");
+            add_to_known_entities(&entities, None).expect("add");
             let data: serde_json::Value =
                 serde_json::from_str(&std::fs::read_to_string(&path).expect("read"))
                     .expect("parse");
@@ -420,7 +582,7 @@ mod tests {
             std::fs::write(&path, "{ not valid json").expect("write");
             let mut entities = HashMap::new();
             entities.insert("people".to_string(), vec!["Alice".to_string()]);
-            add_to_known_entities(&entities).expect("add must succeed despite corruption");
+            add_to_known_entities(&entities, None).expect("add must succeed despite corruption");
             let data: serde_json::Value =
                 serde_json::from_str(&std::fs::read_to_string(&path).expect("read"))
                     .expect("parse");
@@ -444,7 +606,7 @@ mod tests {
                 "people".to_string(),
                 vec!["Alice".to_string(), String::new(), "  ".to_string()],
             );
-            let result_path = add_to_known_entities(&entities).expect("add");
+            let result_path = add_to_known_entities(&entities, None).expect("add");
             let data: serde_json::Value =
                 serde_json::from_str(&std::fs::read_to_string(&result_path).expect("read"))
                     .expect("parse");
@@ -472,7 +634,7 @@ mod tests {
                     "Alice".to_string(),
                 ],
             );
-            let result_path = add_to_known_entities(&entities).expect("add");
+            let result_path = add_to_known_entities(&entities, None).expect("add");
             let data: serde_json::Value =
                 serde_json::from_str(&std::fs::read_to_string(&result_path).expect("read"))
                     .expect("parse");
@@ -484,6 +646,289 @@ mod tests {
                 .collect();
             assert_eq!(names.len(), 1, "duplicates within input must be collapsed");
             assert_eq!(names[0], "Alice");
+        });
+    }
+
+    #[test]
+    fn add_with_wing_writes_topics_by_wing() {
+        // When wing is provided and entities contain "topics", the registry
+        // must store topics_by_wing[wing] with the topic list.
+        with_temp_registry(|path| {
+            let mut entities = HashMap::new();
+            entities.insert("people".to_string(), vec!["Alice".to_string()]);
+            entities.insert(
+                "topics".to_string(),
+                vec!["Rust".to_string(), "WebAssembly".to_string()],
+            );
+            add_to_known_entities(&entities, Some("wing_alpha")).expect("add with wing");
+            let data: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(path).expect("read")).expect("parse");
+            let topics_by_wing = &data["topics_by_wing"];
+            assert!(
+                topics_by_wing.is_object(),
+                "topics_by_wing must be written when wing is provided"
+            );
+            let wing_topics = &topics_by_wing["wing_alpha"];
+            assert!(wing_topics.is_array(), "wing_alpha must have a topic array");
+            let topics: Vec<&str> = wing_topics
+                .as_array()
+                .expect("array")
+                .iter()
+                .filter_map(|val| val.as_str())
+                .collect();
+            assert!(topics.contains(&"Rust"), "Rust must be in topics");
+            assert!(
+                topics.contains(&"WebAssembly"),
+                "WebAssembly must be in topics"
+            );
+        });
+    }
+
+    #[test]
+    fn add_with_wing_rebuilds_non_object_topics_by_wing() {
+        // Regression: if an existing registry has `topics_by_wing` as something
+        // other than an object (e.g. corrupted file or stale schema), the helper
+        // must replace it with a fresh object and persist the new wing topics
+        // rather than silently dropping the user's input.
+        with_temp_registry(|path| {
+            // Seed the registry with `topics_by_wing` as a string (malformed).
+            std::fs::write(&path, r#"{"topics_by_wing":"oops"}"#).expect("write malformed");
+            let mut entities = HashMap::new();
+            entities.insert("topics".to_string(), vec!["Rust".to_string()]);
+            add_to_known_entities(&entities, Some("wing_alpha")).expect("add must succeed");
+
+            let data: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).expect("read"))
+                    .expect("parse");
+            assert!(
+                data["topics_by_wing"].is_object(),
+                "malformed topics_by_wing must be rebuilt as an object"
+            );
+            // Pair assertion: the user's wing topics must land in the rebuilt map.
+            let topics: Vec<&str> = data["topics_by_wing"]["wing_alpha"]
+                .as_array()
+                .expect("array")
+                .iter()
+                .filter_map(|val| val.as_str())
+                .collect();
+            assert_eq!(
+                topics,
+                ["Rust"],
+                "wing topics must be persisted after rebuild"
+            );
+        });
+    }
+
+    #[test]
+    fn add_without_wing_does_not_write_topics_by_wing() {
+        // When no wing is provided, topics_by_wing must NOT be written even
+        // if the entities map contains a "topics" key.
+        with_temp_registry(|path| {
+            let mut entities = HashMap::new();
+            entities.insert("topics".to_string(), vec!["Rust".to_string()]);
+            add_to_known_entities(&entities, None).expect("add without wing");
+            let data: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(path).expect("read")).expect("parse");
+            assert!(
+                data.get("topics_by_wing").is_none(),
+                "topics_by_wing must not be written without a wing"
+            );
+        });
+    }
+
+    #[test]
+    fn add_with_wing_normalises_wing_key_to_canonical_slug() {
+        // Regression: hyphenated and spaced wing names must be canonicalised
+        // via normalize_wing_name so the registry matches the read path
+        // (graph::topic_tunnels_for_wing) which always normalises.
+        with_temp_registry(|path| {
+            let mut entities = HashMap::new();
+            entities.insert("topics".to_string(), vec!["Rust".to_string()]);
+            // Hyphen + uppercase + space — all should collapse to one key.
+            add_to_known_entities(&entities, Some("My-Proj Alpha")).expect("add must succeed");
+            let data: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).expect("read"))
+                    .expect("parse");
+            let topics_map = data["topics_by_wing"].as_object().expect("object");
+            // Pair assertion: the canonical slug is the only key present.
+            assert!(
+                topics_map.contains_key("my_proj_alpha"),
+                "wing key must be normalised to canonical slug"
+            );
+            assert!(
+                !topics_map.contains_key("My-Proj Alpha"),
+                "raw wing spelling must not be persisted"
+            );
+        });
+    }
+
+    #[test]
+    fn add_with_wing_normalisation_collapses_to_one_bucket_on_replace() {
+        // Pair assertion: writing once with `my-proj` and again with `my_proj`
+        // must end with a single bucket because both normalise to `my_proj`.
+        // Replace semantic means the second write wins.
+        with_temp_registry(|path| {
+            let mut first = HashMap::new();
+            first.insert("topics".to_string(), vec!["Rust".to_string()]);
+            add_to_known_entities(&first, Some("my-proj")).expect("first add");
+
+            let mut second = HashMap::new();
+            second.insert("topics".to_string(), vec!["Go".to_string()]);
+            add_to_known_entities(&second, Some("my_proj")).expect("second add");
+
+            let data: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).expect("read"))
+                    .expect("parse");
+            let topics_map = data["topics_by_wing"].as_object().expect("object");
+            assert_eq!(
+                topics_map.len(),
+                1,
+                "both wing spellings must collapse to one bucket"
+            );
+            let topics: Vec<&str> = topics_map["my_proj"]
+                .as_array()
+                .expect("array")
+                .iter()
+                .filter_map(|val| val.as_str())
+                .collect();
+            assert_eq!(topics, ["Go"], "second write must replace, not union");
+        });
+    }
+
+    #[test]
+    fn add_with_wing_replaces_existing_topics_for_wing() {
+        // A second call with the same wing must REPLACE (not union) the topic list.
+        with_temp_registry(|path| {
+            let mut entities_first = HashMap::new();
+            entities_first.insert(
+                "topics".to_string(),
+                vec!["Rust".to_string(), "Python".to_string()],
+            );
+            add_to_known_entities(&entities_first, Some("wing_beta")).expect("first add");
+
+            let mut entities_second = HashMap::new();
+            entities_second.insert("topics".to_string(), vec!["Go".to_string()]);
+            add_to_known_entities(&entities_second, Some("wing_beta")).expect("second add");
+
+            let data: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(path).expect("read")).expect("parse");
+            let topics: Vec<&str> = data["topics_by_wing"]["wing_beta"]
+                .as_array()
+                .expect("array")
+                .iter()
+                .filter_map(|val| val.as_str())
+                .collect();
+            assert_eq!(topics.len(), 1, "second call must replace, not union");
+            assert_eq!(topics[0], "Go", "only the second call's topics must remain");
+        });
+    }
+
+    #[test]
+    fn get_topics_by_wing_returns_empty_when_no_registry() {
+        with_temp_registry(|_path| {
+            // Empty registry — get_topics_by_wing must return empty map.
+            let result = get_topics_by_wing();
+            assert!(
+                result.is_empty(),
+                "must be empty when no topics_by_wing in registry"
+            );
+        });
+    }
+
+    #[test]
+    fn get_topics_by_wing_skips_corrupt_empty_or_whitespace_keys() {
+        // Regression: a registry with `""` or `"   "` as a wing key would
+        // previously call normalize_wing_name with empty input, which asserts
+        // and panics. The read path must skip those entries instead.
+        with_temp_registry(|path| {
+            std::fs::write(
+                &path,
+                r#"{"topics_by_wing":{"":["Rust"],"   ":["Go"],"valid":["Async"]}}"#,
+            )
+            .expect("write registry with corrupt wing keys");
+            // Must not panic.
+            let result = get_topics_by_wing();
+            assert_eq!(result.len(), 1, "only the valid wing must survive");
+            assert!(result.contains_key("valid"));
+            assert_eq!(result["valid"], vec!["Async".to_string()]);
+        });
+    }
+
+    #[test]
+    fn get_topics_by_wing_normalises_legacy_raw_wing_keys() {
+        // Regression: registries written before the write-side normalisation
+        // landed may store raw wing keys ("My-Proj"). The read path must
+        // canonicalise them so the miner's `contains_key(normalised)` check
+        // still finds them.
+        with_temp_registry(|path| {
+            std::fs::write(&path, r#"{"topics_by_wing":{"My-Proj":["Rust","Async"]}}"#)
+                .expect("write legacy registry");
+            let result = get_topics_by_wing();
+            assert!(
+                result.contains_key("my_proj"),
+                "raw key must be normalised on read"
+            );
+            assert!(
+                !result.contains_key("My-Proj"),
+                "raw spelling must not be returned"
+            );
+            let topics = &result["my_proj"];
+            assert_eq!(topics.len(), 2);
+            assert!(topics.contains(&"Rust".to_string()));
+            assert!(topics.contains(&"Async".to_string()));
+        });
+    }
+
+    #[test]
+    fn get_topics_by_wing_merges_keys_that_normalise_to_same_slug() {
+        // When two raw keys collapse to one canonical slug, their topic lists
+        // must merge (with case-insensitive de-dup) rather than one
+        // overwriting the other. Pair assertion: neither variant's topic is
+        // dropped, and the duplicate is collapsed.
+        with_temp_registry(|path| {
+            std::fs::write(
+                &path,
+                r#"{"topics_by_wing":{"My-Proj":["Rust","Async"],"my_proj":["rust","WebAssembly"]}}"#,
+            )
+            .expect("write colliding registry");
+            let result = get_topics_by_wing();
+            assert_eq!(result.len(), 1, "both keys must collapse to one bucket");
+            let topics = &result["my_proj"];
+            // Pair assertion: every distinct topic shows up exactly once.
+            assert_eq!(
+                topics.len(),
+                3,
+                "case-insensitive dedup must collapse Rust/rust to one entry"
+            );
+            // First-seen casing wins for the collision (Rust before rust).
+            assert!(topics.contains(&"Rust".to_string()));
+            assert!(topics.contains(&"Async".to_string()));
+            assert!(topics.contains(&"WebAssembly".to_string()));
+            assert!(
+                !topics.contains(&"rust".to_string()),
+                "second-seen casing must be dropped"
+            );
+        });
+    }
+
+    #[test]
+    fn get_topics_by_wing_reads_written_data() {
+        with_temp_registry(|_path| {
+            let mut entities = HashMap::new();
+            entities.insert(
+                "topics".to_string(),
+                vec!["Angular".to_string(), "Vue".to_string()],
+            );
+            add_to_known_entities(&entities, Some("wing_frontend")).expect("add");
+
+            let result = get_topics_by_wing();
+            assert!(result.contains_key("wing_frontend"), "wing must be present");
+            let topics = &result["wing_frontend"];
+            assert!(
+                topics.contains(&"Angular".to_string()),
+                "Angular must be present"
+            );
+            assert!(topics.contains(&"Vue".to_string()), "Vue must be present");
         });
     }
 }

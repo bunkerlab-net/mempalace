@@ -142,6 +142,7 @@ src/
     known_entities.rs  Global entity registry (~/.local/share/mempalace/known_entities.json)
     project_scanner.rs Manifest parsing + git author scanning → DetectedDict
     session_scanner.rs Claude Code project dir scanning for entity discovery
+    corpus_origin.rs   Heuristic + LLM detection of whether corpus is AI conversation
     layers.rs          L0 identity + L1 essential story assembly
     graph.rs           BFS traversal, auto-tunnel detection, explicit tunnel CRUD
 
@@ -155,6 +156,7 @@ src/
     codex.rs           JSONL (OpenAI Codex CLI)
     chatgpt.rs         ChatGPT export JSON
     slack.rs           Slack export JSON
+    gemini_cli.rs      Gemini CLI JSONL (detects via session_metadata sentinel)
 
   dialect/             AAAK compression
     mod.rs             compress(): header + content line assembly
@@ -188,7 +190,7 @@ src/
 | ChromaDB import                | N/A                           | Not implemented (deferred)          |
 | Gitignore support              | Full (projects)               | Full (`ignore` crate)               |
 | Repair command                 | Yes                           | Yes (`mempalace repair`)            |
-| Conversation formats           | Limited                       | Extended (+ Codex CLI)              |
+| Conversation formats           | Limited                       | Extended (+ Codex CLI, Gemini CLI)  |
 | MCP error responses            | Generic                       | Generic                             |
 | Query sanitizer                | Yes (issue #333)              | Yes (ported from mempalace-py)      |
 

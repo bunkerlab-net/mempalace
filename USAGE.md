@@ -11,8 +11,10 @@ WING  (person or project)
 ```
 
 **Tunnels** connect rooms across wings — automatically when the same room name appears
-in multiple wings, or explicitly via MCP tools. **AAAK** is a lossy compression dialect
-for efficient LLM context loading. The **knowledge graph** stores temporal facts:
+in multiple wings, or explicitly via MCP tools. Tunnels carry a `kind` field:
+`explicit` (created by the AI or user) or `topic` (auto-created from shared topic terms
+that appear in multiple wings). **AAAK** is a lossy compression dialect for efficient
+LLM context loading. The **knowledge graph** stores temporal facts:
 `Maya → assigned_to → auth-migration, valid 2026-01-15 to 2026-02-01`.
 
 ---
@@ -133,6 +135,8 @@ saves them to `entities.json` and the global registry (`~/.local/share/mempalace
 ```bash
 mempalace init ~/my-project
 mempalace init ~/my-project --yes              # non-interactive / CI mode
+mempalace init ~/my-project --auto-mine        # skip mine prompt (mine immediately after init)
+mempalace init ~/my-project --yes --auto-mine  # fully non-interactive: accept entities + mine
 mempalace init ~/my-project --no-gitignore     # include gitignored files
 mempalace init ~/my-project --lang de,fr       # set entity detection languages
 
@@ -140,6 +144,9 @@ mempalace init ~/my-project --lang de,fr       # set entity detection languages
 mempalace init ~/my-project --llm
 mempalace init ~/my-project --llm --llm-provider anthropic --llm-api-key $ANTHROPIC_API_KEY
 mempalace init ~/my-project --llm --llm-provider openai-compat --llm-endpoint http://localhost:8080
+
+# Accept an external LLM provider without the interactive consent prompt
+mempalace init ~/my-project --llm --llm-provider anthropic --accept-external-llm
 ```
 
 After writing `mempalace.yaml`, `init` automatically appends `mempalace.yaml` and
@@ -147,15 +154,31 @@ After writing `mempalace.yaml`, `init` automatically appends `mempalace.yaml` an
 Pass `--lang` with comma-separated BCP-47 codes to persist the entity detection
 language list to `config.json`.
 
+**`--yes` vs `--auto-mine` behaviour:**
+
+- `--yes` alone: auto-accepts entity prompts but still asks whether to mine.
+- `--auto-mine` alone: skips the mine prompt (mines immediately) but still asks about entities.
+- `--yes --auto-mine` together: fully non-interactive — accepts entities and mines without prompting.
+
+Before prompting to mine, `init` prints a file count estimate:
+`~N files (~X MB) would be mined into this palace.`
+
+If the LLM provider sends requests to an external service and the API key was loaded
+from an environment variable (not the `--llm-api-key` flag), `init` shows a privacy
+warning and asks for consent before proceeding. Use `--accept-external-llm` to bypass
+the consent gate in automation.
+
 LLM flags:
 
-| Flag             | Default    | Description                                              |
-| ---------------- | ---------- | -------------------------------------------------------- |
-| `--llm`          | off        | Enable LLM-assisted entity refinement                    |
-| `--llm-provider` | `ollama`   | Provider: `ollama`, `openai-compat`, or `anthropic`      |
-| `--llm-model`    | `gemma3:4b`| Model identifier                                         |
-| `--llm-endpoint` | —          | Custom API endpoint (required for `openai-compat`)       |
-| `--llm-api-key`  | —          | API key (required for `anthropic`, optional for others)  |
+| Flag                   | Default    | Description                                              |
+| ---------------------- | ---------- | -------------------------------------------------------- |
+| `--llm`                | off        | Enable LLM-assisted entity refinement                    |
+| `--llm-provider`       | `ollama`   | Provider: `ollama`, `openai-compat`, or `anthropic`      |
+| `--llm-model`          | `gemma3:4b`| Model identifier                                         |
+| `--llm-endpoint`       | —          | Custom API endpoint (required for `openai-compat`)       |
+| `--llm-api-key`        | —          | API key (required for `anthropic`, optional for others)  |
+| `--accept-external-llm`| off        | Skip the external-LLM consent gate in automation         |
+| `--auto-mine`          | off        | Skip the post-init mine prompt and mine immediately      |
 
 `mempalace.yaml` controls the wing name and room taxonomy used during mining.
 Edit it before running `mine` if the auto-detected rooms need adjustment.
@@ -191,6 +214,7 @@ chunk to a room via folder/filename/keyword heuristics. Respects `.gitignore` by
 
 - Claude Code JSONL (`~/.claude/projects/`)
 - OpenAI Codex CLI JSONL (`~/.codex/sessions/*/rollout-*.jsonl`)
+- Gemini CLI JSONL (detected via `session_metadata` sentinel record)
 - Claude.ai JSON (standard export and privacy export)
 - ChatGPT JSON
 - Slack JSON export
@@ -336,9 +360,17 @@ Use this if search results seem wrong after an interrupted mine or a manual DB e
 
 ```bash
 mempalace repair
-mempalace repair --yes     # -y: skip confirmation (CI-friendly)
+mempalace repair --yes                    # skip confirmation (CI-friendly)
+mempalace repair --confirm-truncation-ok  # bypass truncation safety guard
 # Creates palace.db.bak, then re-indexes all drawers
 ```
+
+Before overwriting the inverted index, `repair` compares the number of drawers it
+extracted against the row count reported by the database. If fewer drawers came back
+than the database claims to contain, the operation is aborted to prevent data loss.
+
+Pass `--confirm-truncation-ok` only after independently verifying the palace size
+(e.g. via `mempalace status`) and confirming the discrepancy is expected.
 
 ---
 
@@ -486,6 +518,20 @@ The `hook_desktop_toast` config flag (default `false`) controls whether a
 desktop notification is emitted via `notify-send` after each save; toggle it
 through the `mempalace_hook_settings` MCP tool.
 
+**`MEMPAL_DIR` — additive project mining:**
+
+Setting `MEMPAL_DIR` to a project directory causes the hook to mine that directory
+(in `projects` mode) in addition to the conversation transcript — not instead of it.
+The transcript is always mined in `convos` mode; `MEMPAL_DIR` adds a separate
+`projects` pass for the source files.
+
+```bash
+export MEMPAL_DIR=~/my-project   # mine project files on every hook save
+```
+
+`..` path traversal segments in `MEMPAL_DIR` are rejected. Symlinks are resolved
+to their canonical path before the lock and mine pass.
+
 ---
 
 ## Project Config (`mempalace.yaml`)
@@ -573,12 +619,12 @@ Use explicit tunnels when content in one project relates to another (e.g. an API
 in `project_api` connects to a schema in `project_database`). Tunnels are symmetric —
 A→B and B→A share the same ID.
 
-| Tool                       | Parameters                                                                                                     | What it does                                           |
-| -------------------------- | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
-| `mempalace_create_tunnel`  | `source_wing`, `source_room`, `target_wing`, `target_room`, `label?`, `source_drawer_id?`, `target_drawer_id?` | Create a named cross-wing link between two rooms       |
-| `mempalace_list_tunnels`   | `wing?`                                                                                                        | List all explicit tunnels, optionally filtered by wing |
-| `mempalace_delete_tunnel`  | `tunnel_id`                                                                                                    | Delete an explicit tunnel by its ID                    |
-| `mempalace_follow_tunnels` | `wing`, `room`                                                                                                 | See what a room connects to via explicit tunnels       |
+| Tool                       | Parameters                                                                                                     | What it does                                                    |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| `mempalace_create_tunnel`  | `source_wing`, `source_room`, `target_wing`, `target_room`, `label?`, `source_drawer_id?`, `target_drawer_id?` | Create a named cross-wing link; `kind` defaults to `explicit`   |
+| `mempalace_list_tunnels`   | `wing?`                                                                                                        | List tunnels with their `kind` field; filter by wing            |
+| `mempalace_delete_tunnel`  | `tunnel_id`                                                                                                    | Delete a tunnel by its ID                                       |
+| `mempalace_follow_tunnels` | `wing`, `room`                                                                                                 | See what a room connects to; includes `kind` on each link       |
 
 ### Agent Diary
 
@@ -604,4 +650,4 @@ Single SQLite file at `$XDG_DATA_HOME/mempalace/palace.db` (default: `~/.local/s
 | `entities`         | Knowledge graph nodes: name, type, properties (JSON)                                                                |
 | `triples`          | Knowledge graph edges: subject, predicate, object, valid_from, valid_to, confidence, source_drawer_id, adapter_name |
 | `compressed`       | AAAK-compressed drawer versions                                                                                     |
-| `explicit_tunnels` | Agent-created cross-wing links: source/target wing+room, label, canonical SHA256 tunnel_id                          |
+| `explicit_tunnels` | Cross-wing links: source/target wing+room, label, canonical SHA256 tunnel_id, kind (`explicit`/`topic`)             |

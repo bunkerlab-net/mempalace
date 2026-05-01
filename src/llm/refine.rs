@@ -15,6 +15,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
+use crate::palace::corpus_origin::CorpusOriginResult;
 use crate::palace::entities::DetectedEntity;
 use crate::palace::project_scanner::DetectedDict;
 
@@ -38,7 +39,7 @@ const _: () = assert!(CORPUS_WALK_DEPTH_LIMIT > 0);
 const _: () = assert!(MAX_CONTEXT_SNIPPETS > 0);
 
 // Labels the LLM may return; anything else is discarded.
-const VALID_LABELS: &[&str] = &["person", "project", "drop"];
+const VALID_LABELS: &[&str] = &["person", "project", "topic", "drop"];
 
 const SYSTEM_PROMPT: &str = "\
 You are a named entity classifier for software projects.
@@ -48,15 +49,66 @@ Given candidates extracted from project files and git history, classify each ent
 Respond ONLY with a JSON object in this exact format:
 {
   \"decisions\": {
-    \"EntityName\": {\"label\": \"person|project|drop\", \"reason\": \"brief reason\"}
+    \"EntityName\": {\"label\": \"person|project|topic|drop\", \"reason\": \"brief reason\"}
   }
 }
 
 Labels:
 - person: a real human name (developer, author, contributor, researcher)
 - project: a software project, library, tool, product, technology, or brand
+- topic: a subject area, theme, or domain keyword (e.g. Rust, async, testing, concurrency)
 - drop: false positive, common word, generic term, URL fragment, or number
 ";
+
+// ===================== PUBLIC API — CORPUS ORIGIN =====================
+
+/// Build a system-prompt preamble from a corpus-origin detection result.
+///
+/// Returns an empty string when the origin adds no useful context (no platform,
+/// no persona names, non-AI corpus). A non-empty return value is prepended to
+/// [`SYSTEM_PROMPT`] in [`refine_entities`] so the classifier has full context.
+pub fn build_corpus_origin_preamble(origin: &CorpusOriginResult) -> String {
+    let has_context = origin.likely_ai_dialogue
+        || !origin.agent_persona_names.is_empty()
+        || origin.primary_platform.is_some()
+        || origin.user_name.is_some();
+    if !has_context {
+        return String::new();
+    }
+    let mut preamble = String::from("CORPUS CONTEXT (from corpus-origin Pass 0 detection):\n");
+    if origin.likely_ai_dialogue {
+        let platform = origin
+            .primary_platform
+            .as_deref()
+            .unwrap_or("unknown AI platform");
+        let _ = writeln!(
+            preamble,
+            "- This corpus is an AI-dialogue record ({platform})."
+        );
+    }
+    if !origin.agent_persona_names.is_empty() {
+        let names = origin.agent_persona_names.join(", ");
+        // Agent persona names are user-assigned labels for the AI agent — never real people.
+        let _ = writeln!(
+            preamble,
+            "- Agent persona names (user-assigned AI labels, NOT real people): {names}. \
+             If found as entity candidates, classify them as 'drop'."
+        );
+    }
+    if let Some(ref user_name) = origin.user_name {
+        let _ = writeln!(
+            preamble,
+            "- Corpus author: {user_name}. If found as a candidate, classify as 'drop' \
+             (the author, not a third-party contributor)."
+        );
+    }
+    assert!(
+        !preamble.is_empty(),
+        "non-empty context must produce non-empty preamble"
+    );
+    preamble.push('\n');
+    preamble
+}
 
 // ===================== PUBLIC TYPES =====================
 
@@ -83,11 +135,28 @@ pub struct RefineResult {
 /// Sends candidates in batches of [`BATCH_SIZE`] to `provider.classify`, parses
 /// the JSON decisions, and applies them to `detected`. Returns a [`RefineResult`]
 /// with the refined dict and processing statistics.
+///
+/// When `corpus_origin` is provided, a preamble with platform and persona context
+/// is prepended to the system prompt so the classifier avoids false-positive human
+/// classifications for AI agent persona names.
 pub fn refine_entities(
     detected: DetectedDict,
     corpus: &str,
     provider: &dyn LlmProvider,
+    corpus_origin: Option<&CorpusOriginResult>,
 ) -> RefineResult {
+    let system_prompt = match corpus_origin {
+        Some(origin) => {
+            let preamble = build_corpus_origin_preamble(origin);
+            if preamble.is_empty() {
+                SYSTEM_PROMPT.to_string()
+            } else {
+                format!("{preamble}{SYSTEM_PROMPT}")
+            }
+        }
+        None => SYSTEM_PROMPT.to_string(),
+    };
+
     let candidates = refine_entities_collect_candidates(&detected);
     let batches_total = candidates.len().div_ceil(BATCH_SIZE);
     assert!(batches_total <= candidates.len() + 1);
@@ -98,7 +167,7 @@ pub fn refine_entities(
     let mut errors: usize = 0;
 
     for batch in candidates.chunks(BATCH_SIZE) {
-        match refine_entities_batch(batch, &corpus_lines, provider) {
+        match refine_entities_batch(batch, &corpus_lines, provider, &system_prompt) {
             Some(decisions) => {
                 all_decisions.extend(decisions);
                 batches_completed += 1;
@@ -181,17 +250,20 @@ fn refine_entities_collect_candidates(detected: &DetectedDict) -> Vec<(&str, &st
 ///
 /// Returns `Some(decisions)` on success (map may be empty if the LLM drops all),
 /// or `None` when the LLM call or JSON parsing fails.
+/// `system_prompt` is the effective prompt including any corpus-origin preamble.
 /// Called by [`refine_entities`] for each chunk.
 fn refine_entities_batch(
     batch: &[(&str, &str)],
     corpus_lines: &[&str],
     provider: &dyn LlmProvider,
+    system_prompt: &str,
 ) -> Option<HashMap<String, (String, String)>> {
     assert!(!batch.is_empty());
     assert!(batch.len() <= BATCH_SIZE);
+    assert!(!system_prompt.is_empty(), "system_prompt must not be empty");
 
     let user_prompt = build_user_prompt(batch, corpus_lines);
-    let response = provider.classify(SYSTEM_PROMPT, &user_prompt, true).ok()?;
+    let response = provider.classify(system_prompt, &user_prompt, true).ok()?;
 
     let expected_names: Vec<&str> = batch.iter().map(|(name, _)| *name).collect();
     assert!(!expected_names.is_empty());
@@ -374,6 +446,10 @@ fn apply_classifications(
     assert!(total_input < 1_000_000, "entity count must be sane");
     assert!(decisions.len() < 1_000_000, "decisions count must be sane");
 
+    // Pass through existing topics unchanged — they feed the topic-tunnel pipeline
+    // and are not re-classified by the LLM.
+    let mut topics: Vec<DetectedEntity> = detected.topics;
+    let topics_passthrough = topics.len();
     let mut people: Vec<DetectedEntity> = Vec::new();
     let mut projects: Vec<DetectedEntity> = Vec::new();
     let mut uncertain: Vec<DetectedEntity> = Vec::new();
@@ -386,23 +462,33 @@ fn apply_classifications(
         .chain(detected.projects)
         .chain(detected.uncertain);
 
-    for entity in all_entities {
-        apply_classifications_route_entity(
-            entity,
-            decisions,
-            &mut people,
-            &mut projects,
-            &mut uncertain,
-            &mut reclassified,
-            &mut dropped,
-        );
-    }
+    {
+        let mut buckets = ClassifiedBuckets {
+            people: &mut people,
+            projects: &mut projects,
+            topics: &mut topics,
+            uncertain: &mut uncertain,
+        };
+        for entity in all_entities {
+            apply_classifications_route_entity(
+                entity,
+                decisions,
+                &mut buckets,
+                &mut reclassified,
+                &mut dropped,
+            );
+        }
+    } // `buckets` drops here, releasing the borrows on `people`, `projects`, etc.
 
     let total_output = people.len() + projects.len() + uncertain.len();
-    // Pair assertion: every input entity was either kept or dropped.
+    // Entities newly classified as "topic" by the LLM are excluded from total_output
+    // but still consumed from total_input; account for them separately.
+    let topics_classified = topics.len() - topics_passthrough;
+    // Pair assertion: every input entity was kept (in any bucket) or dropped.
     debug_assert!(
-        total_output + dropped == total_input,
-        "entity count must balance: {total_output} kept + {dropped} dropped != {total_input} input"
+        total_output + dropped + topics_classified == total_input,
+        "entity count must balance: {total_output} kept + {dropped} dropped + {topics_classified} \
+         topics != {total_input} input"
     );
 
     (
@@ -410,10 +496,22 @@ fn apply_classifications(
             people,
             projects,
             uncertain,
+            topics,
         },
         reclassified,
         dropped,
     )
+}
+
+/// Output buckets written by [`apply_classifications_route_entity`].
+///
+/// Grouping the four mutable vecs keeps the argument count of the routing
+/// helper within the pedantic `too_many_arguments` limit (7).
+struct ClassifiedBuckets<'a> {
+    people: &'a mut Vec<DetectedEntity>,
+    projects: &'a mut Vec<DetectedEntity>,
+    topics: &'a mut Vec<DetectedEntity>,
+    uncertain: &'a mut Vec<DetectedEntity>,
 }
 
 /// Route a single entity to the correct output bucket based on the LLM decision.
@@ -423,9 +521,7 @@ fn apply_classifications(
 fn apply_classifications_route_entity(
     entity: DetectedEntity,
     decisions: &HashMap<String, (String, String)>,
-    people: &mut Vec<DetectedEntity>,
-    projects: &mut Vec<DetectedEntity>,
-    uncertain: &mut Vec<DetectedEntity>,
+    buckets: &mut ClassifiedBuckets<'_>,
     reclassified: &mut usize,
     dropped: &mut usize,
 ) {
@@ -443,9 +539,10 @@ fn apply_classifications_route_entity(
         *reclassified += 1;
     }
     match label {
-        "person" => people.push(entity),
-        "project" => projects.push(entity),
-        _ => uncertain.push(entity),
+        "person" => buckets.people.push(entity),
+        "project" => buckets.projects.push(entity),
+        "topic" => buckets.topics.push(entity),
+        _ => buckets.uncertain.push(entity),
     }
 }
 
@@ -542,6 +639,7 @@ mod tests {
                 .into_iter()
                 .map(|n| make_entity(n, "uncertain"))
                 .collect(),
+            topics: vec![],
         }
     }
 
@@ -687,6 +785,49 @@ mod tests {
         assert_eq!(kept + dropped, 4, "total must balance");
     }
 
+    #[test]
+    fn apply_classifications_routes_topic_label_to_topics_bucket() {
+        // A "topic" decision from the LLM must move the entity to `topics`, not `uncertain`.
+        let detected = make_dict(vec![], vec![], vec!["async_programming"]);
+        let mut decisions = HashMap::new();
+        decisions.insert(
+            "async_programming".to_string(),
+            ("topic".to_string(), "domain keyword".to_string()),
+        );
+        let (result, reclassified, dropped) = apply_classifications(detected, &decisions);
+        assert_eq!(
+            result.topics.len(),
+            1,
+            "topic-classified entity must be in topics bucket"
+        );
+        assert!(
+            result.uncertain.is_empty(),
+            "topics must not leak into uncertain"
+        );
+        assert_eq!(
+            reclassified, 1,
+            "routing from uncertain to topic counts as reclassified"
+        );
+        assert_eq!(dropped, 0);
+    }
+
+    #[test]
+    fn apply_classifications_passes_through_existing_topics() {
+        // Pre-existing topics (passed in detected.topics) must appear in output even
+        // without a matching LLM decision.
+        let mut detected = make_dict(vec!["Alice"], vec![], vec![]);
+        detected.topics = vec![make_entity("Rust", "topic")];
+        let decisions = HashMap::new();
+        let (result, _, dropped) = apply_classifications(detected, &decisions);
+        assert_eq!(
+            result.topics.len(),
+            1,
+            "pre-existing topic must pass through unchanged"
+        );
+        assert_eq!(result.topics[0].name, "Rust");
+        assert_eq!(dropped, 0);
+    }
+
     // -- collect_contexts --
 
     #[test]
@@ -799,6 +940,13 @@ mod tests {
         fn name(&self) -> &'static str {
             "mock"
         }
+        #[allow(clippy::unnecessary_literal_bound)] // return type fixed by trait signature
+        fn endpoint(&self) -> &str {
+            ""
+        }
+        fn api_key_source(&self) -> Option<crate::llm::client::ApiKeySource> {
+            None
+        }
     }
 
     struct FailProvider;
@@ -820,6 +968,13 @@ mod tests {
         fn name(&self) -> &'static str {
             "fail"
         }
+        #[allow(clippy::unnecessary_literal_bound)] // return type fixed by trait signature
+        fn endpoint(&self) -> &str {
+            ""
+        }
+        fn api_key_source(&self) -> Option<crate::llm::client::ApiKeySource> {
+            None
+        }
     }
 
     // -- refine_entities --
@@ -831,7 +986,7 @@ mod tests {
             response: "{}".to_string(),
         };
         let detected = make_dict(vec![], vec![], vec![]);
-        let result = refine_entities(detected, "", &provider);
+        let result = refine_entities(detected, "", &provider, None);
         assert_eq!(result.batches_total, 0);
         assert_eq!(result.batches_completed, 0);
         assert_eq!(result.errors, 0);
@@ -845,7 +1000,7 @@ mod tests {
             response: response.to_string(),
         };
         let detected = make_dict(vec!["Alice"], vec!["MyLib"], vec![]);
-        let result = refine_entities(detected, "Alice wrote MyLib", &provider);
+        let result = refine_entities(detected, "Alice wrote MyLib", &provider, None);
         assert_eq!(result.batches_completed, 1);
         assert_eq!(result.errors, 0);
         assert_eq!(result.batches_total, 1);
@@ -857,7 +1012,7 @@ mod tests {
     fn refine_entities_with_failing_provider_counts_errors() {
         // A provider that always fails must produce an error for each batch.
         let detected = make_dict(vec!["Alice"], vec![], vec![]);
-        let result = refine_entities(detected, "", &FailProvider);
+        let result = refine_entities(detected, "", &FailProvider, None);
         assert_eq!(result.errors, 1);
         assert_eq!(result.batches_completed, 0);
         assert_eq!(result.batches_total, 1);
@@ -871,7 +1026,7 @@ mod tests {
             response: response.to_string(),
         };
         let detected = make_dict(vec!["Bot42"], vec![], vec![]);
-        let result = refine_entities(detected, "", &provider);
+        let result = refine_entities(detected, "", &provider, None);
         assert_eq!(result.dropped, 1);
         assert!(result.merged.people.is_empty());
         assert!(result.merged.projects.is_empty());
@@ -935,5 +1090,158 @@ mod tests {
         let corpus = collect_corpus_text(temp.path());
         assert!(corpus.contains("txt content"), "must include .txt files");
         assert!(corpus.contains("rst content"), "must include .rst files");
+    }
+
+    // -- build_corpus_origin_preamble --
+
+    fn empty_origin() -> crate::palace::corpus_origin::CorpusOriginResult {
+        crate::palace::corpus_origin::CorpusOriginResult {
+            likely_ai_dialogue: false,
+            confidence: 0.5,
+            primary_platform: None,
+            user_name: None,
+            agent_persona_names: vec![],
+            evidence: vec![],
+        }
+    }
+
+    #[test]
+    fn build_corpus_origin_preamble_no_context_returns_empty() {
+        // When no context signals are set the function must return an empty string
+        // so the entity-refinement system prompt is unchanged.
+        let origin = empty_origin();
+        let preamble = build_corpus_origin_preamble(&origin);
+        assert!(
+            preamble.is_empty(),
+            "no-context origin must produce an empty preamble"
+        );
+        // Negative: the preamble must not contain any stray text.
+        assert!(
+            !preamble.contains("CORPUS"),
+            "no-context preamble must have no content"
+        );
+    }
+
+    #[test]
+    fn build_corpus_origin_preamble_ai_dialogue_with_platform() {
+        // When `likely_ai_dialogue` is true the preamble must name the platform.
+        let mut origin = empty_origin();
+        origin.likely_ai_dialogue = true;
+        origin.primary_platform = Some("Claude Code".to_string());
+        let preamble = build_corpus_origin_preamble(&origin);
+        assert!(
+            preamble.contains("Claude Code"),
+            "preamble must name the detected platform"
+        );
+        assert!(
+            preamble.contains("AI-dialogue record"),
+            "preamble must describe the corpus as an AI-dialogue record"
+        );
+    }
+
+    #[test]
+    fn build_corpus_origin_preamble_ai_dialogue_no_platform_uses_fallback() {
+        // When `primary_platform` is None the preamble must fall back to
+        // "unknown AI platform" so the classifier still has a hint.
+        let mut origin = empty_origin();
+        origin.likely_ai_dialogue = true;
+        let preamble = build_corpus_origin_preamble(&origin);
+        assert!(
+            preamble.contains("unknown AI platform"),
+            "preamble must contain fallback platform text when primary_platform is None"
+        );
+        // Pair assertion: must not be empty despite the fallback.
+        assert!(!preamble.is_empty(), "preamble must be non-empty");
+    }
+
+    #[test]
+    fn build_corpus_origin_preamble_persona_names_listed() {
+        // Agent persona names must appear in the preamble with a 'drop' instruction.
+        let mut origin = empty_origin();
+        origin.agent_persona_names = vec!["Claude".to_string(), "Assistant".to_string()];
+        let preamble = build_corpus_origin_preamble(&origin);
+        assert!(
+            preamble.contains("Claude"),
+            "preamble must list persona 'Claude'"
+        );
+        assert!(
+            preamble.contains("Assistant"),
+            "preamble must list persona 'Assistant'"
+        );
+        assert!(
+            preamble.contains("drop"),
+            "preamble must instruct the classifier to 'drop' personas"
+        );
+    }
+
+    #[test]
+    fn build_corpus_origin_preamble_user_name_included() {
+        // A known `user_name` must appear in the preamble so the classifier drops
+        // the corpus author as a false-positive contributor.
+        let mut origin = empty_origin();
+        origin.user_name = Some("Robbie".to_string());
+        let preamble = build_corpus_origin_preamble(&origin);
+        assert!(
+            preamble.contains("Robbie"),
+            "preamble must include the author's name"
+        );
+        assert!(
+            preamble.contains("Corpus author"),
+            "preamble must label the entry as 'Corpus author'"
+        );
+    }
+
+    // -- apply_classifications_route_entity unknown-label branch --
+
+    #[test]
+    fn apply_classifications_unknown_label_routes_to_uncertain() {
+        // An unrecognised label from the LLM (not person/project/topic/drop) must
+        // land in `uncertain` so the entity is not silently discarded.
+        let entity = make_entity("Gadget", "uncertain");
+
+        let mut people = vec![];
+        let mut projects = vec![];
+        let mut topics = vec![];
+        let mut uncertain = vec![];
+        let mut buckets = ClassifiedBuckets {
+            people: &mut people,
+            projects: &mut projects,
+            topics: &mut topics,
+            uncertain: &mut uncertain,
+        };
+
+        let mut decisions: HashMap<String, (String, String)> = HashMap::new();
+        // Inject a decision with a label the routing match does not recognise.
+        decisions.insert(
+            "Gadget".to_string(),
+            ("gadget".to_string(), "unrecognised label".to_string()),
+        );
+
+        let mut reclassified = 0usize;
+        let mut dropped = 0usize;
+
+        apply_classifications_route_entity(
+            entity,
+            &decisions,
+            &mut buckets,
+            &mut reclassified,
+            &mut dropped,
+        );
+
+        assert_eq!(
+            uncertain.len(),
+            1,
+            "unknown label must route entity to uncertain"
+        );
+        assert_eq!(dropped, 0, "unknown label must not drop the entity");
+        // Pair assertion: no other bucket must receive the entity.
+        assert!(
+            people.is_empty(),
+            "unknown label must not put entity in people"
+        );
+        assert!(
+            projects.is_empty(),
+            "unknown label must not put entity in projects"
+        );
     }
 }

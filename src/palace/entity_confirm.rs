@@ -25,6 +25,9 @@ pub struct ConfirmedEntities {
     pub people: Vec<String>,
     /// Accepted project names.
     pub projects: Vec<String>,
+    /// Topic labels passed through verbatim; not interactively reviewed.
+    /// Fed into the topic-tunnel pipeline via `known_entities`.
+    pub topics: Vec<String>,
 }
 
 /// Accept or interactively confirm detected entities.
@@ -47,9 +50,19 @@ pub fn confirm_entities(detected: &DetectedDict, yes: bool) -> ConfirmedEntities
         confirm_entities_interactive(detected, &mut confirmed);
     }
 
+    // Topics pass through verbatim — they are not interactively reviewed
+    // and feed the topic-tunnel pipeline via `known_entities`.
+    confirmed.topics = detected
+        .topics
+        .iter()
+        .filter(|entity| !entity.name.is_empty())
+        .map(|entity| entity.name.clone())
+        .collect();
+
     // Postconditions: confirmed lists cannot exceed the input lists.
     debug_assert!(confirmed.people.len() <= people_count);
     debug_assert!(confirmed.projects.len() <= projects_count);
+    debug_assert!(confirmed.topics.len() <= detected.topics.len());
 
     confirmed
 }
@@ -173,6 +186,7 @@ mod tests {
             people,
             projects,
             uncertain: vec![],
+            topics: vec![],
         }
     }
 
@@ -327,6 +341,63 @@ mod tests {
         assert!(
             accepted,
             "empty response from EOF stdin must mean acceptance"
+        );
+    }
+
+    #[test]
+    fn confirm_entities_passes_through_topics_verbatim() {
+        // Topics must appear in ConfirmedEntities.topics regardless of yes/no mode.
+        use crate::palace::entities::DetectedEntity;
+        let mut detected = make_dict(vec![], vec![]);
+        detected.topics = vec![
+            DetectedEntity {
+                name: "async_rust".to_string(),
+                entity_type: "topic".to_string(),
+                confidence: 0.85,
+                frequency: 3,
+                signals: vec![],
+            },
+            DetectedEntity {
+                name: "distributed_systems".to_string(),
+                entity_type: "topic".to_string(),
+                confidence: 0.72,
+                frequency: 2,
+                signals: vec![],
+            },
+        ];
+        let confirmed = confirm_entities(&detected, true);
+        assert_eq!(
+            confirmed.topics.len(),
+            2,
+            "both topics must pass through verbatim"
+        );
+        assert!(confirmed.topics.contains(&"async_rust".to_string()));
+        assert!(
+            confirmed
+                .topics
+                .contains(&"distributed_systems".to_string())
+        );
+        // Pair assertion: topics are not duplicated into people/projects.
+        assert!(confirmed.people.is_empty());
+        assert!(confirmed.projects.is_empty());
+    }
+
+    #[test]
+    fn confirm_entities_topics_empty_name_filtered() {
+        // Topics with empty names must be filtered out.
+        use crate::palace::entities::DetectedEntity;
+        let mut detected = make_dict(vec![], vec![]);
+        detected.topics = vec![DetectedEntity {
+            name: String::new(),
+            entity_type: "topic".to_string(),
+            confidence: 0.9,
+            frequency: 1,
+            signals: vec![],
+        }];
+        let confirmed = confirm_entities(&detected, true);
+        assert!(
+            confirmed.topics.is_empty(),
+            "empty-name topic must be filtered from confirmed.topics"
         );
     }
 }

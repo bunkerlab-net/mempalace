@@ -33,7 +33,7 @@ pub async fn run(
     for (i, result) in results.iter().enumerate() {
         println!("  [{}] {} / {}", i + 1, result.wing, result.room);
         println!("      Source: {}", result.source_file);
-        println!("      Match:  {} word hits", result.relevance);
+        println!("      Match:  bm25={:.4}", result.relevance);
         println!();
         for line in result.text.lines() {
             println!("      {line}");

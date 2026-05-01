@@ -92,6 +92,7 @@ CREATE TABLE IF NOT EXISTS explicit_tunnels (
     source_drawer_id TEXT,
     target_drawer_id TEXT,
     label TEXT DEFAULT '',
+    kind TEXT NOT NULL DEFAULT 'explicit',
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT
 );
@@ -123,6 +124,9 @@ fn ignore_duplicate_column(result: turso::Result<u64>) -> Result<()> {
 /// added after initial release).  Each migration is expected to be idempotent —
 /// `SQLite` returns an error when a column already exists, which we deliberately
 /// ignore.
+// Each migration step is one DDL statement with context; extracting them into
+// helpers would obscure the sequential dependency between migrations.
+#[allow(clippy::too_many_lines)]
 pub async fn ensure_schema(connection: &Connection) -> Result<()> {
     connection.execute_batch(SCHEMA).await?;
 
@@ -165,6 +169,21 @@ pub async fn ensure_schema(connection: &Connection) -> Result<()> {
             (),
         )
         .await?;
+
+    // Migration: add kind column to explicit_tunnels (introduced to distinguish
+    // user-created "explicit" tunnels from auto-generated "topic" tunnels).
+    // Mirror the fresh-schema definition exactly — TEXT NOT NULL DEFAULT 'explicit'
+    // — so an upgraded DB matches a freshly-created one. SQLite (>=3.3.0) honours
+    // a non-NULL DEFAULT inside ALTER TABLE ADD COLUMN, so the back-fill happens
+    // at column-add time and the NOT NULL constraint is satisfied on existing rows.
+    ignore_duplicate_column(
+        connection
+            .execute(
+                "ALTER TABLE explicit_tunnels ADD COLUMN kind TEXT NOT NULL DEFAULT 'explicit'",
+                (),
+            )
+            .await,
+    )?;
 
     // Pair assertion: verify all six core tables were created.
     let rows = crate::db::query_all(

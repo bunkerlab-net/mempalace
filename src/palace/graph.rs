@@ -5,6 +5,7 @@ use serde::Serialize;
 use sha2::Digest as _;
 use turso::Connection;
 
+use crate::config::normalize_wing_name;
 use crate::db::query_all;
 use crate::error::Result;
 
@@ -61,6 +62,20 @@ pub struct GraphStats {
     pub rooms_per_wing: HashMap<String, usize>,
     /// Top rooms by number of wings spanned.
     pub top_tunnels: Vec<RoomNode>,
+}
+
+/// Normalize a wing slug: trim whitespace, then apply the canonical slug rule.
+///
+/// Callers that filter by wing name must normalize before querying so that
+/// "mempalace-rs" and "`mempalace_rs`" resolve to the same wing. Wraps
+/// `config::normalize_wing_name` after trimming.
+fn normalize_wing(wing: &str) -> String {
+    let trimmed = wing.trim();
+    assert!(
+        !trimmed.is_empty(),
+        "normalize_wing: wing must not be empty after trim"
+    );
+    normalize_wing_name(trimmed)
 }
 
 /// Build the palace graph from drawer metadata.
@@ -246,6 +261,9 @@ fn traverse_expand_frontier(
 ///
 /// Returns `(tunnels, truncated)` where `truncated` is `true` when the full
 /// result set exceeded `GRAPH_RESULT_CAP` and was capped.
+// `wing_a_norm`/`wing_b_norm` are intentionally parallel: `a` and `b` are
+// the canonical endpoint labels for a tunnel; suppressing similar_names here.
+#[allow(clippy::similar_names)]
 pub async fn find_tunnels(
     connection: &Connection,
     wing_a: Option<&str>,
@@ -253,19 +271,23 @@ pub async fn find_tunnels(
 ) -> Result<(Vec<RoomNode>, bool)> {
     let (nodes, _) = build_graph(connection).await?;
 
+    // Normalize filters so "mempalace-rs" and "mempalace_rs" resolve identically.
+    let wing_a_norm = wing_a.map(normalize_wing);
+    let wing_b_norm = wing_b.map(normalize_wing);
+
     let mut tunnels: Vec<RoomNode> = nodes
         .into_values()
         .filter(|node| {
             if node.wings.len() < 2 {
                 return false;
             }
-            if let Some(wa) = wing_a
-                && !node.wings.contains(&wa.to_string())
+            if let Some(ref wa) = wing_a_norm
+                && !node.wings.contains(wa)
             {
                 return false;
             }
-            if let Some(wb) = wing_b
-                && !node.wings.contains(&wb.to_string())
+            if let Some(ref wb) = wing_b_norm
+                && !node.wings.contains(wb)
             {
                 return false;
             }
@@ -346,6 +368,8 @@ pub struct ExplicitTunnel {
     pub target_drawer_id: Option<String>,
     /// Human-readable description of the connection.
     pub label: String,
+    /// Tunnel category: `"explicit"` (user-created) or `"topic"` (auto-generated).
+    pub kind: String,
     /// ISO timestamp when the tunnel was created.
     pub created_at: String,
     /// ISO timestamp when the tunnel was last updated (if it has been).
@@ -423,6 +447,8 @@ pub struct CreateTunnelParams<'a> {
     pub target_room: &'a str,
     /// Human-readable description of the connection.
     pub label: &'a str,
+    /// Tunnel category: `"explicit"` for user-created, `"topic"` for auto-generated.
+    pub kind: &'a str,
     /// Optional specific source drawer ID.
     pub source_drawer_id: Option<&'a str>,
     /// Optional specific target drawer ID.
@@ -455,15 +481,43 @@ pub async fn create_tunnel(
         "target_room must not be empty"
     );
 
+    // Reject any tunnel kind outside the closed taxonomy. The schema column
+    // `explicit_tunnels.kind` is consumed by the MCP `find_tunnels` filter and
+    // by downstream UI labelling, so an unexpected value would leak into both
+    // — fail fast at the write boundary instead of persisting bad data.
+    if !matches!(params.kind, "explicit" | "topic") {
+        return Err(crate::error::Error::Other(format!(
+            "create_tunnel: kind must be \"explicit\" or \"topic\", got {:?}",
+            params.kind
+        )));
+    }
+
+    // Normalize wing slugs so "my-project" and "my_project" resolve identically.
+    let source_wing_norm = normalize_wing(params.source_wing);
+    let target_wing_norm = normalize_wing(params.target_wing);
+    assert!(!source_wing_norm.is_empty());
+    assert!(!target_wing_norm.is_empty());
+
+    let norm_params = CreateTunnelParams {
+        source_wing: &source_wing_norm,
+        target_wing: &target_wing_norm,
+        source_room: params.source_room,
+        target_room: params.target_room,
+        label: params.label,
+        kind: params.kind,
+        source_drawer_id: params.source_drawer_id,
+        target_drawer_id: params.target_drawer_id,
+    };
+
     let tunnel_id = canonical_tunnel_id(
-        params.source_wing,
-        params.source_room,
-        params.target_wing,
-        params.target_room,
+        norm_params.source_wing,
+        norm_params.source_room,
+        norm_params.target_wing,
+        norm_params.target_room,
     );
     let now = Utc::now().to_rfc3339();
 
-    create_tunnel_upsert(connection, &tunnel_id, params, &now).await?;
+    create_tunnel_upsert(connection, &tunnel_id, &norm_params, &now).await?;
     create_tunnel_read_back(connection, &tunnel_id).await
 }
 
@@ -483,8 +537,15 @@ async fn create_tunnel_upsert(
 
     let rows_updated = connection
         .execute(
-            "UPDATE explicit_tunnels SET label = ?1, source_drawer_id = ?2, target_drawer_id = ?3, updated_at = ?4 WHERE id = ?5",
-            turso::params![params.label, params.source_drawer_id, params.target_drawer_id, now, tunnel_id],
+            "UPDATE explicit_tunnels SET label = ?1, source_drawer_id = ?2, target_drawer_id = ?3, kind = ?4, updated_at = ?5 WHERE id = ?6",
+            turso::params![
+                params.label,
+                params.source_drawer_id,
+                params.target_drawer_id,
+                params.kind,
+                now,
+                tunnel_id,
+            ],
         )
         .await?;
 
@@ -498,7 +559,7 @@ async fn create_tunnel_upsert(
         // No existing row — insert the new tunnel.
         connection
             .execute(
-                "INSERT INTO explicit_tunnels (id, source_wing, source_room, target_wing, target_room, source_drawer_id, target_drawer_id, label, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "INSERT INTO explicit_tunnels (id, source_wing, source_room, target_wing, target_room, source_drawer_id, target_drawer_id, label, kind, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 turso::params![
                     tunnel_id,
                     params.source_wing,
@@ -508,6 +569,7 @@ async fn create_tunnel_upsert(
                     params.source_drawer_id,
                     params.target_drawer_id,
                     params.label,
+                    params.kind,
                     now
                 ],
             )
@@ -526,7 +588,7 @@ async fn create_tunnel_read_back(
 
     let rows = query_all(
         connection,
-        "SELECT id, source_wing, source_room, target_wing, target_room, source_drawer_id, target_drawer_id, label, created_at, updated_at FROM explicit_tunnels WHERE id = ?1",
+        "SELECT id, source_wing, source_room, target_wing, target_room, source_drawer_id, target_drawer_id, label, kind, created_at, updated_at FROM explicit_tunnels WHERE id = ?1",
         [tunnel_id],
     )
     .await?;
@@ -547,8 +609,9 @@ async fn create_tunnel_read_back(
         source_drawer_id: row.get(5).ok(),
         target_drawer_id: row.get(6).ok(),
         label: row.get(7).unwrap_or_default(),
-        created_at: row.get(8).unwrap_or_default(),
-        updated_at: row.get(9).ok(),
+        kind: row.get(8).unwrap_or_else(|_| "explicit".to_string()),
+        created_at: row.get(9).unwrap_or_default(),
+        updated_at: row.get(10).ok(),
     })
 }
 
@@ -557,24 +620,26 @@ pub async fn list_tunnels(
     connection: &Connection,
     wing: Option<&str>,
 ) -> Result<Vec<ExplicitTunnel>> {
-    if let Some(w) = wing {
+    // Normalize the filter slug so hyphenated and underscored names match stored values.
+    let wing_norm = wing.map(normalize_wing);
+    if let Some(ref w) = wing_norm {
         assert!(!w.is_empty(), "wing filter must not be an empty string");
     }
 
     // Two separate queries rather than one with a `?1 IS NULL OR ...` guard,
     // so SQLite can use the wing column index when a filter is present instead
     // of falling back to a full table scan.
-    let rows = if let Some(w) = wing {
+    let rows = if let Some(ref w) = wing_norm {
         query_all(
             connection,
-            "SELECT id, source_wing, source_room, target_wing, target_room, source_drawer_id, target_drawer_id, label, created_at, updated_at FROM explicit_tunnels WHERE source_wing = ?1 OR target_wing = ?1 ORDER BY created_at DESC",
-            [w],
+            "SELECT id, source_wing, source_room, target_wing, target_room, source_drawer_id, target_drawer_id, label, kind, created_at, updated_at FROM explicit_tunnels WHERE source_wing = ?1 OR target_wing = ?1 ORDER BY created_at DESC",
+            [w.as_str()],
         )
         .await?
     } else {
         query_all(
             connection,
-            "SELECT id, source_wing, source_room, target_wing, target_room, source_drawer_id, target_drawer_id, label, created_at, updated_at FROM explicit_tunnels ORDER BY created_at DESC",
+            "SELECT id, source_wing, source_room, target_wing, target_room, source_drawer_id, target_drawer_id, label, kind, created_at, updated_at FROM explicit_tunnels ORDER BY created_at DESC",
             (),
         )
         .await?
@@ -591,8 +656,9 @@ pub async fn list_tunnels(
             source_drawer_id: row.get(5).ok(),
             target_drawer_id: row.get(6).ok(),
             label: row.get(7).unwrap_or_default(),
-            created_at: row.get(8).unwrap_or_default(),
-            updated_at: row.get(9).ok(),
+            kind: row.get(8).unwrap_or_else(|_| "explicit".to_string()),
+            created_at: row.get(9).unwrap_or_default(),
+            updated_at: row.get(10).ok(),
         })
         .collect();
 
@@ -630,10 +696,14 @@ pub async fn follow_tunnels(
     assert!(!wing.is_empty(), "wing must not be empty");
     assert!(!room.is_empty(), "room must not be empty");
 
+    // Normalize so "my-project" and "my_project" resolve to the same wing.
+    let wing = normalize_wing(wing);
+    assert!(!wing.is_empty());
+
     let rows = query_all(
         connection,
         "SELECT id, source_wing, source_room, target_wing, target_room, source_drawer_id, target_drawer_id, label FROM explicit_tunnels WHERE (source_wing = ?1 AND source_room = ?2) OR (target_wing = ?1 AND target_room = ?2)",
-        [wing, room],
+        [wing.as_str(), room],
     )
     .await?;
 
@@ -682,6 +752,208 @@ pub async fn follow_tunnels(
     );
 
     Ok(connections)
+}
+
+// =============================================================================
+// TOPIC TUNNELS — auto-link wings that share confirmed TOPIC labels
+// =============================================================================
+
+/// Prefix for synthetic topic-tunnel room identifiers.
+///
+/// Namespaces topic rooms away from literal folder-derived rooms so a wing
+/// with both an "Angular" folder room and a "shared topic: Angular" tunnel
+/// remains distinguishable in `follow_tunnels` / `list_tunnels` output.
+pub const TOPIC_ROOM_PREFIX: &str = "topic:";
+
+/// Normalize a topic name for case-insensitive overlap detection.
+fn topic_normalize(name: &str) -> String {
+    assert!(!name.is_empty(), "topic_normalize: name must not be empty");
+    name.trim().to_lowercase()
+}
+
+/// Return the synthetic room identifier for a topic tunnel.
+///
+/// The `topic:` prefix avoids collisions with literal folder-derived rooms
+/// of the same name and signals auto-generated rooms to human and LLM readers.
+pub fn topic_room(name: &str) -> String {
+    assert!(!name.is_empty(), "topic_room: name must not be empty");
+    format!("{TOPIC_ROOM_PREFIX}{name}")
+}
+
+/// Create tunnels for every pair of wings that share `>= min_count` topics.
+///
+/// Topics are compared case-insensitively; the first-observed casing (from
+/// whichever wing sorts lexicographically first) is used for the room name.
+/// Wings with no topics and the empty-map case are no-ops. `min_count` is
+/// Build a normalized-topic → first-seen-casing map per wing from the raw topic lists.
+///
+/// Called by `compute_topic_tunnels` before intersecting pairs. Empty wing names
+/// and empty topic names are silently skipped so the caller only sees clean data.
+///
+/// Wing keys are normalized via [`normalize_wing`] (the canonical slug rule used
+/// elsewhere in the graph) so different raw spellings of the same wing — e.g.
+/// `my-proj` and `my_proj` — collapse into one bucket here rather than colliding
+/// later inside `create_tunnel`. Topics from each variant merge into the shared
+/// bucket with first-observed casing winning per topic key.
+fn compute_topic_tunnels_build_wing_map(
+    topics_by_wing: &std::collections::BTreeMap<String, Vec<String>>,
+) -> std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>> {
+    let mut wing_topics: std::collections::BTreeMap<
+        String,
+        std::collections::BTreeMap<String, String>,
+    > = std::collections::BTreeMap::new();
+    for (wing, names) in topics_by_wing {
+        let wing_trimmed = wing.trim();
+        if wing_trimmed.is_empty() {
+            continue;
+        }
+        let wing_key = normalize_wing_name(wing_trimmed);
+        if wing_key.is_empty() {
+            continue;
+        }
+        let bucket = wing_topics.entry(wing_key).or_default();
+        for name in names {
+            let trimmed = name.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let key = topic_normalize(trimmed);
+            // setdefault: keep the first-observed casing across every variant
+            // of this wing key (e.g. both `my-proj` and `my_proj` contribute
+            // into the same bucket; whichever entry we see first wins).
+            bucket.entry(key).or_insert_with(|| trimmed.to_string());
+        }
+    }
+    // Drop wings that contributed only empty topic names — keeps the downstream
+    // pair-intersection loop free of placeholder buckets.
+    wing_topics.retain(|_, bucket| !bucket.is_empty());
+    wing_topics
+}
+
+/// clamped to `max(1, min_count)` so a value of 0 still requires one match.
+/// Returns the number of tunnels created or refreshed.
+pub async fn compute_topic_tunnels(
+    connection: &Connection,
+    topics_by_wing: &std::collections::BTreeMap<String, Vec<String>>,
+    min_count: usize,
+    label_prefix: &str,
+) -> Result<usize> {
+    assert!(
+        !label_prefix.is_empty(),
+        "compute_topic_tunnels: label_prefix must not be empty"
+    );
+
+    if topics_by_wing.is_empty() {
+        return Ok(0);
+    }
+
+    let effective_min = min_count.max(1);
+    let wing_topics = compute_topic_tunnels_build_wing_map(topics_by_wing);
+
+    let wings: Vec<&str> = wing_topics.keys().map(String::as_str).collect();
+    let wing_count = wings.len();
+    assert!(
+        wing_count <= 10_000,
+        "compute_topic_tunnels: wing count must be bounded"
+    );
+
+    let mut created: usize = 0;
+    for i in 0..wing_count {
+        let wing_a = wings[i];
+        let topics_a = &wing_topics[wing_a];
+        for wing_b in wings.iter().skip(i + 1) {
+            let topics_b = &wing_topics[*wing_b];
+            let shared: Vec<String> = topics_a
+                .keys()
+                .filter(|key| topics_b.contains_key(*key))
+                .cloned()
+                .collect();
+
+            if shared.len() < effective_min {
+                continue;
+            }
+
+            for key in &shared {
+                let topic_name = topics_a[key].as_str();
+                let room = topic_room(topic_name);
+                create_tunnel(
+                    connection,
+                    &CreateTunnelParams {
+                        source_wing: wing_a,
+                        source_room: &room,
+                        target_wing: wing_b,
+                        target_room: &room,
+                        label: &format!("{label_prefix}: {topic_name}"),
+                        kind: "topic",
+                        source_drawer_id: None,
+                        target_drawer_id: None,
+                    },
+                )
+                .await?;
+                created += 1;
+            }
+        }
+    }
+
+    Ok(created)
+}
+
+/// Compute topic tunnels involving a single wing only.
+///
+/// Used by the miner to incrementally update tunnels for the wing that just
+/// finished mining without recomputing all pairs. Returns the number of
+/// tunnels created or refreshed.
+pub async fn topic_tunnels_for_wing(
+    connection: &Connection,
+    wing: &str,
+    topics_by_wing: &std::collections::BTreeMap<String, Vec<String>>,
+    min_count: usize,
+    label_prefix: &str,
+) -> Result<usize> {
+    assert!(
+        !wing.is_empty(),
+        "topic_tunnels_for_wing: wing must not be empty"
+    );
+    assert!(
+        !label_prefix.is_empty(),
+        "topic_tunnels_for_wing: label_prefix must not be empty"
+    );
+
+    if topics_by_wing.is_empty() {
+        return Ok(0);
+    }
+
+    // Callers may pass an unnormalised wing spelling (e.g. `my-proj`) while
+    // `topics_by_wing` is keyed by the canonical slug (`my_proj`) — produced by
+    // `compute_topic_tunnels_build_wing_map` for the same reason. Normalise
+    // here so the lookup hits the right bucket and the slice we hand to
+    // `compute_topic_tunnels` keeps the slug invariant on both keys.
+    let normalized_wing = normalize_wing(wing);
+    assert!(
+        !normalized_wing.is_empty(),
+        "topic_tunnels_for_wing: normalized wing must not be empty"
+    );
+
+    let own = match topics_by_wing.get(&normalized_wing) {
+        Some(names) if !names.is_empty() => names,
+        _ => return Ok(0),
+    };
+
+    // Build two-wing slices for each (wing, other) pair and reuse
+    // compute_topic_tunnels to keep threshold and casing logic in one place.
+    let mut total: usize = 0;
+    for (other, other_topics) in topics_by_wing {
+        if other == &normalized_wing || other_topics.is_empty() {
+            continue;
+        }
+        let mut slice: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        slice.insert(normalized_wing.clone(), own.clone());
+        slice.insert(other.clone(), other_topics.clone());
+        total += compute_topic_tunnels(connection, &slice, min_count, label_prefix).await?;
+    }
+
+    Ok(total)
 }
 
 #[cfg(test)]
@@ -779,6 +1051,7 @@ mod tests {
                 target_wing: "wing_db",
                 target_room: "migrations",
                 label: "API schema drives DB migration",
+                kind: "explicit",
                 source_drawer_id: None,
                 target_drawer_id: None,
             },
@@ -807,6 +1080,7 @@ mod tests {
                 target_wing: "wB",
                 target_room: "rB",
                 label: "first label",
+                kind: "explicit",
                 source_drawer_id: None,
                 target_drawer_id: None,
             },
@@ -822,6 +1096,7 @@ mod tests {
                 target_wing: "wB",
                 target_room: "rB",
                 label: "updated label",
+                kind: "explicit",
                 source_drawer_id: None,
                 target_drawer_id: None,
             },
@@ -856,6 +1131,7 @@ mod tests {
                 target_wing: "wB",
                 target_room: "rB",
                 label: "",
+                kind: "explicit",
                 source_drawer_id: None,
                 target_drawer_id: None,
             },
@@ -870,6 +1146,7 @@ mod tests {
                 target_wing: "wD",
                 target_room: "rD",
                 label: "",
+                kind: "explicit",
                 source_drawer_id: None,
                 target_drawer_id: None,
             },
@@ -877,13 +1154,15 @@ mod tests {
         .await
         .expect("create CD");
 
+        // Wing names are normalized to lowercase on insert, so "wA" → "wa".
+        // The filter is also normalized so querying with "wA" finds the stored "wa" row.
         let tunnels = list_tunnels(&connection, Some("wA"))
             .await
             .expect("list by wA");
         assert_eq!(tunnels.len(), 1, "filter by wA should return 1 tunnel");
         assert!(
-            tunnels[0].source_wing == "wA" || tunnels[0].target_wing == "wA",
-            "returned tunnel must involve wA"
+            tunnels[0].source_wing == "wa" || tunnels[0].target_wing == "wa",
+            "returned tunnel must involve normalized wA (stored as 'wa')"
         );
     }
 
@@ -898,6 +1177,7 @@ mod tests {
                 target_wing: "wy",
                 target_room: "ry",
                 label: "",
+                kind: "explicit",
                 source_drawer_id: None,
                 target_drawer_id: None,
             },
@@ -936,6 +1216,7 @@ mod tests {
                 target_wing: "wing_db",
                 target_room: "schema",
                 label: "api design → db schema",
+                kind: "explicit",
                 source_drawer_id: None,
                 target_drawer_id: None,
             },
@@ -958,5 +1239,230 @@ mod tests {
         assert_eq!(reverse.len(), 1);
         assert_eq!(reverse[0].direction, "incoming");
         assert_eq!(reverse[0].connected_wing, "wing_api");
+    }
+
+    #[test]
+    fn topic_room_prefix_is_correct() {
+        let room = topic_room("Rust");
+        assert_eq!(room, "topic:Rust", "topic_room must prefix with 'topic:'");
+        assert!(
+            room.starts_with(TOPIC_ROOM_PREFIX),
+            "topic_room must start with TOPIC_ROOM_PREFIX"
+        );
+    }
+
+    #[tokio::test]
+    async fn compute_topic_tunnels_creates_shared_topic_tunnels() {
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let mut topics_by_wing = std::collections::BTreeMap::new();
+        topics_by_wing.insert(
+            "wing_alpha".to_string(),
+            vec!["Rust".to_string(), "WebAssembly".to_string()],
+        );
+        topics_by_wing.insert(
+            "wing_beta".to_string(),
+            vec!["rust".to_string(), "Python".to_string()],
+        );
+
+        let count = compute_topic_tunnels(&connection, &topics_by_wing, 1, "shared topic")
+            .await
+            .expect("compute_topic_tunnels must succeed");
+
+        // "rust" overlaps (case-insensitive) → 1 tunnel between wing_alpha and wing_beta.
+        assert!(count >= 1, "at least one topic tunnel must be created");
+
+        let tunnels = list_tunnels(&connection, None)
+            .await
+            .expect("list_tunnels must succeed");
+        assert!(!tunnels.is_empty(), "tunnels must exist after compute");
+        assert!(
+            tunnels.iter().any(|t| t.kind == "topic"),
+            "at least one tunnel must have kind='topic'"
+        );
+        assert!(
+            tunnels
+                .iter()
+                .any(|t| t.source_room.starts_with(TOPIC_ROOM_PREFIX)),
+            "topic tunnel room must use topic: prefix"
+        );
+    }
+
+    #[tokio::test]
+    async fn compute_topic_tunnels_min_count_filters_pairs() {
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let mut topics_by_wing = std::collections::BTreeMap::new();
+        topics_by_wing.insert("wing_a".to_string(), vec!["Rust".to_string()]);
+        topics_by_wing.insert("wing_b".to_string(), vec!["rust".to_string()]);
+
+        // min_count=2 requires 2 shared topics; only 1 shared → no tunnels.
+        let count = compute_topic_tunnels(&connection, &topics_by_wing, 2, "shared topic")
+            .await
+            .expect("compute_topic_tunnels with min_count=2");
+        assert_eq!(
+            count, 0,
+            "min_count=2 with 1 shared topic must create 0 tunnels"
+        );
+
+        let tunnels = list_tunnels(&connection, None).await.expect("list_tunnels");
+        assert!(
+            tunnels.is_empty(),
+            "no tunnels must exist when threshold not met"
+        );
+    }
+
+    #[tokio::test]
+    async fn compute_topic_tunnels_collapses_wing_key_variants() {
+        // Regression: `my-proj` and `my_proj` must normalise to a single wing key
+        // so the loop that pairs wings cannot accidentally create a self-tunnel
+        // between two spellings of the same underlying wing.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let mut topics_by_wing = std::collections::BTreeMap::new();
+        topics_by_wing.insert("my-proj".to_string(), vec!["Rust".to_string()]);
+        topics_by_wing.insert("my_proj".to_string(), vec!["rust".to_string()]);
+        topics_by_wing.insert("other_proj".to_string(), vec!["Rust".to_string()]);
+
+        // After normalisation the inputs reduce to two distinct wings: `my_proj`
+        // and `other_proj` — exactly one pair, so exactly one tunnel.
+        let count = compute_topic_tunnels(&connection, &topics_by_wing, 1, "shared topic")
+            .await
+            .expect("compute_topic_tunnels must succeed");
+        assert_eq!(
+            count, 1,
+            "wing-key variants must collapse: exactly one pair → one tunnel"
+        );
+
+        let tunnels = list_tunnels(&connection, None)
+            .await
+            .expect("list_tunnels must succeed");
+        // Pair assertion: no tunnel should ever have source == target wing.
+        assert!(
+            tunnels.iter().all(|t| t.source_wing != t.target_wing),
+            "wing-key variants must not produce a self-tunnel: {tunnels:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn topic_tunnels_for_wing_pairs_only_with_wing() {
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let mut topics_by_wing = std::collections::BTreeMap::new();
+        topics_by_wing.insert("wing_x".to_string(), vec!["Angular".to_string()]);
+        topics_by_wing.insert("wing_y".to_string(), vec!["angular".to_string()]);
+        topics_by_wing.insert("wing_z".to_string(), vec!["Vue".to_string()]);
+
+        // wing_x shares "angular" with wing_y but not wing_z.
+        let count =
+            topic_tunnels_for_wing(&connection, "wing_x", &topics_by_wing, 1, "shared topic")
+                .await
+                .expect("topic_tunnels_for_wing must succeed");
+        assert_eq!(
+            count, 1,
+            "exactly one topic tunnel must be created for wing_x"
+        );
+
+        let tunnels = list_tunnels(&connection, Some("wing_x"))
+            .await
+            .expect("list_tunnels for wing_x");
+        assert_eq!(tunnels.len(), 1, "one tunnel must involve wing_x");
+        assert_eq!(tunnels[0].kind, "topic", "tunnel kind must be 'topic'");
+    }
+
+    #[tokio::test]
+    async fn topic_tunnels_for_wing_normalizes_caller_wing() {
+        // Regression: callers may pass an unnormalised wing slug ("my-proj")
+        // while the registry was populated with the canonical slug
+        // ("my_proj"). The lookup must still hit the right bucket so the
+        // incremental update from the miner does not silently no-op when the
+        // wing was stored under its hyphen form.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let mut topics_by_wing = std::collections::BTreeMap::new();
+        topics_by_wing.insert("my_proj".to_string(), vec!["Rust".to_string()]);
+        topics_by_wing.insert("other_proj".to_string(), vec!["rust".to_string()]);
+
+        // Hyphenated alias must resolve to the canonical bucket above.
+        let count =
+            topic_tunnels_for_wing(&connection, "my-proj", &topics_by_wing, 1, "shared topic")
+                .await
+                .expect("topic_tunnels_for_wing must succeed for hyphen alias");
+        assert_eq!(
+            count, 1,
+            "hyphenated alias must resolve to canonical wing bucket and create one tunnel"
+        );
+        let tunnels = list_tunnels(&connection, Some("my_proj"))
+            .await
+            .expect("list_tunnels for my_proj");
+        assert_eq!(
+            tunnels.len(),
+            1,
+            "exactly one tunnel must reference the canonical slug"
+        );
+    }
+
+    #[tokio::test]
+    async fn kind_column_preserved_on_explicit_tunnel() {
+        // Explicit tunnels written via MCP or API must carry kind="explicit".
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let tunnel = create_tunnel(
+            &connection,
+            &CreateTunnelParams {
+                source_wing: "alpha",
+                source_room: "code",
+                target_wing: "beta",
+                target_room: "code",
+                label: "linked code rooms",
+                kind: "explicit",
+                source_drawer_id: None,
+                target_drawer_id: None,
+            },
+        )
+        .await
+        .expect("create explicit tunnel");
+        assert_eq!(
+            tunnel.kind, "explicit",
+            "explicit tunnel must carry kind='explicit'"
+        );
+
+        let tunnels = list_tunnels(&connection, None).await.expect("list_tunnels");
+        assert_eq!(tunnels.len(), 1, "exactly one tunnel");
+        assert_eq!(
+            tunnels[0].kind, "explicit",
+            "listed tunnel must carry kind='explicit'"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_tunnel_rejects_invalid_kind() {
+        // Negative space: any kind outside the closed {"explicit","topic"}
+        // taxonomy must be refused before the row is persisted, otherwise the
+        // value would leak through `find_tunnels`/`list_tunnels` filters.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let result = create_tunnel(
+            &connection,
+            &CreateTunnelParams {
+                source_wing: "alpha",
+                source_room: "code",
+                target_wing: "beta",
+                target_room: "code",
+                label: "bad kind",
+                kind: "bogus",
+                source_drawer_id: None,
+                target_drawer_id: None,
+            },
+        )
+        .await;
+        let error = result.expect_err("invalid kind must error");
+        let message = error.to_string();
+        assert!(
+            message.contains("kind must be"),
+            "error must explain valid kinds, got {message:?}"
+        );
+        // Pair: nothing was written even though the error fired late on the
+        // path — list_tunnels must report zero rows.
+        let tunnels = list_tunnels(&connection, None)
+            .await
+            .expect("list_tunnels must succeed");
+        assert!(
+            tunnels.is_empty(),
+            "no row may be persisted for an invalid kind"
+        );
     }
 }

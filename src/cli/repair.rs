@@ -8,10 +8,18 @@ use crate::db::query_all;
 use crate::error::Result;
 
 /// Backup the palace database, scan for inconsistencies, and rebuild the inverted word index.
-pub async fn run(connection: &Connection, palace_path: &Path) -> Result<()> {
+///
+/// `confirm_truncation_ok` bypasses the truncation safety check in `rebuild_index`
+/// (`--confirm-truncation-ok` CLI flag). Pass `false` unless the user has explicitly
+/// opted in after independently verifying the palace size.
+pub async fn run(
+    connection: &Connection,
+    palace_path: &Path,
+    confirm_truncation_ok: bool,
+) -> Result<()> {
     run_create_backup(connection, palace_path).await?;
     run_scan(connection).await?;
-    run_rebuild_index(connection).await
+    run_rebuild_index(connection, confirm_truncation_ok).await
 }
 
 /// Scan for index inconsistencies and report them.
@@ -102,8 +110,8 @@ pub(crate) async fn run_create_backup(connection: &Connection, palace_path: &Pat
 /// Delegates the transaction and index work to `palace::repair::rebuild_index`,
 /// which wraps everything in a `BEGIN IMMEDIATE` transaction. The CLI layer adds
 /// the completion message.
-async fn run_rebuild_index(connection: &Connection) -> Result<()> {
-    let total = crate::palace::repair::rebuild_index(connection).await?;
+async fn run_rebuild_index(connection: &Connection, confirm_truncation_ok: bool) -> Result<()> {
+    let total = crate::palace::repair::rebuild_index(connection, confirm_truncation_ok).await?;
     assert!(
         total < usize::MAX,
         "run_rebuild_index: reindexed count must be within usize range"
@@ -165,7 +173,7 @@ mod tests {
         .await
         .expect("failed to add drawer for repair test setup");
 
-        run(&connection, &database_path)
+        run(&connection, &database_path, false)
             .await
             .expect("repair::run should succeed after adding a test drawer");
 
@@ -189,7 +197,7 @@ mod tests {
         let database_path = temp_directory.path().join("empty_palace.db");
         let (_database, connection) = open_file_db(&database_path).await;
 
-        run(&connection, &database_path)
+        run(&connection, &database_path, false)
             .await
             .expect("repair::run should succeed on a palace with zero drawers");
 

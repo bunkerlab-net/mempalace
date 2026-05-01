@@ -64,10 +64,10 @@ jobs:
         env:
           BINSTALL_VERSION: v1.18.1 # https://github.com/cargo-bins/cargo-binstall/releases/latest
           BINSTALL_SHA: c2e963fbab3bdd8653b59c28d349bf85740cf4998e5e398d250dcd2884cd667d
-          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           commit_sha=$(curl -fsSL --proto '=https' --tlsv1.2 \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
             "https://api.github.com/repos/cargo-bins/cargo-binstall/git/ref/tags/${BINSTALL_VERSION}" \
             | jq -r '.object.sha')
           curl -fsSL --proto '=https' --tlsv1.2 \

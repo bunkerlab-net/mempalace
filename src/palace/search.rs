@@ -173,11 +173,16 @@ async fn search_memories_candidates(
         let _ = write!(filters, " AND d.room = ?{param_offset}");
     }
 
+    // Exclude rows with empty id or content directly in SQL so that malformed
+    // drawers (schema drift, bypass writes) cannot eat into the LIMIT before
+    // the Rust-side filter culls them. Without this predicate, ten empty rows
+    // and zero good rows would fill the candidate window.
     let sql = format!(
         "SELECT d.id, d.content, d.wing, d.room, d.source_file, d.chunk_index, d.filed_at \
          FROM drawers d \
          JOIN drawer_words dw ON d.id = dw.drawer_id \
          WHERE dw.word IN ({in_clause}){filters} \
+           AND d.id <> '' AND d.content <> '' \
          GROUP BY d.id \
          ORDER BY SUM(dw.count) DESC \
          LIMIT ?{}",
@@ -470,7 +475,9 @@ fn search_memories_parse_candidates(rows: &[turso::Row]) -> Vec<Candidate> {
             .ok()
             .and_then(|cell| cell.as_text().cloned())
             .unwrap_or_default();
-        if !id.is_empty() {
+        // Skip rows where the id or content is missing — defensive against
+        // schema mismatches or direct DB writes that bypass `add_drawer`.
+        if !id.is_empty() && !text.is_empty() {
             candidates.push(Candidate {
                 id,
                 text,
@@ -1170,6 +1177,48 @@ mod async_tests {
         assert!(
             results_short.is_empty(),
             "all-short-token query must produce empty results"
+        );
+    }
+
+    // ── null/empty document tolerance ────────────────────────────────────
+
+    #[tokio::test]
+    async fn search_skips_empty_content_drawers() {
+        // Insert a drawer row directly via SQL (bypassing add_drawer assertions) with
+        // empty content, then verify search does not crash and does not return it.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+
+        connection
+            .execute(
+                "INSERT INTO drawers (id, wing, room, content) VALUES ('empty-doc', 'w', 'r', '')",
+                (),
+            )
+            .await
+            .expect("raw SQL insert of empty-content drawer must succeed");
+
+        // Also index the drawer_words table so the candidate query can match it.
+        connection
+            .execute(
+                "INSERT OR IGNORE INTO drawer_words (word, drawer_id, count) VALUES ('testword', 'empty-doc', 1)",
+                (),
+            )
+            .await
+            .expect("indexing empty-doc drawer_words must succeed");
+
+        let results = search_memories(&connection, "testword", None, None, 10)
+            .await
+            .expect("search must not crash on empty-content drawers");
+
+        // The empty-content drawer must be filtered out.
+        assert!(
+            results.is_empty(),
+            "empty-content drawer must not appear in results"
+        );
+        assert!(
+            !results
+                .iter()
+                .any(|r| r.source_path.is_empty() && r.text.is_empty()),
+            "no empty-text result must leak through"
         );
     }
 

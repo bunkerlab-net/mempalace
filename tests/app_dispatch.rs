@@ -30,6 +30,8 @@ async fn app_run_init_creates_config_with_yes_flag() {
             llm_model: "gemma3:4b".to_string(),
             llm_endpoint: None,
             llm_api_key: None,
+            accept_external_llm: false,
+            auto_mine: false,
         },
     };
 
@@ -494,7 +496,10 @@ async fn app_run_repair_with_palace() {
 
     let cli_instance = Cli {
         palace: None,
-        command: Command::Repair { skip_confirm: true },
+        command: Command::Repair {
+            skip_confirm: true,
+            confirm_truncation_ok: false,
+        },
     };
 
     temp_env::async_with_vars(

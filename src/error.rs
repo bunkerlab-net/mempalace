@@ -63,6 +63,28 @@ pub enum Error {
     #[error("config not found: {0}")]
     ConfigNotFound(PathBuf),
 
+    /// Extraction count is less than the DB count, or matches the default extraction cap
+    /// when the DB count is unavailable. Proceeding would destroy data; re-run with
+    /// `--confirm-truncation-ok` to override after independently verifying the palace size.
+    #[error("{message}")]
+    TruncationDetected {
+        /// Row count reported by the database (0 when unavailable — weak-signal path).
+        sqlite_count: u64,
+        /// Row count returned by the extraction step.
+        extracted: u64,
+        /// Estimated percentage of rows that would be lost (0.0 when unavailable).
+        percent_lost: f64,
+        /// Human-readable abort message for display.
+        message: String,
+    },
+
+    /// Operator-initiated interruption (Ctrl-C / SIGINT) caught by a long-running
+    /// command. Returning this variant — rather than calling `std::process::exit`
+    /// — lets RAII guards (e.g. the mine lock) release on the unwind. The CLI
+    /// translates this variant into POSIX exit code 130 after cleanup.
+    #[error("interrupted")]
+    Interrupted,
+
     #[error("{0}")]
     Other(String),
 }
@@ -143,6 +165,66 @@ mod tests {
             !display.contains('{'),
             "AdapterClosed must not have a format placeholder"
         );
+    }
+
+    #[test]
+    fn truncation_detected_displays_message() {
+        // TruncationDetected must surface the message field verbatim for user-facing output.
+        let error = Error::TruncationDetected {
+            sqlite_count: 100,
+            extracted: 50,
+            percent_lost: 50.0,
+            message: "ABORT: test truncation message".to_string(),
+        };
+        let display = error.to_string();
+        assert!(
+            display.contains("ABORT: test truncation message"),
+            "must display message field verbatim"
+        );
+        assert!(
+            !display.contains("sqlite_count"),
+            "must not expose internal field name"
+        );
+    }
+
+    #[test]
+    fn truncation_detected_weak_signal_has_zero_sqlite_count() {
+        // Weak-signal path uses sqlite_count = 0 (unknown); must still display the message.
+        let error = Error::TruncationDetected {
+            sqlite_count: 0,
+            extracted: 10_000,
+            percent_lost: 0.0,
+            message: "ABORT: cap signal".to_string(),
+        };
+        let display = error.to_string();
+        assert!(
+            display.contains("ABORT: cap signal"),
+            "weak signal must display message"
+        );
+        // Structural check: sqlite_count and extracted fields are accessible via pattern.
+        assert!(
+            matches!(
+                error,
+                Error::TruncationDetected {
+                    sqlite_count: 0,
+                    extracted: 10_000,
+                    ..
+                }
+            ),
+            "weak signal fields must match expected values"
+        );
+    }
+
+    #[test]
+    fn interrupted_error_displays_fixed_message() {
+        // Error::Interrupted has no payload — its display must always be
+        // exactly "interrupted" so callers can pattern-match on the string in
+        // logs without worrying about a payload that drifts.
+        let error = Error::Interrupted;
+        let display = error.to_string();
+        assert_eq!(display, "interrupted");
+        // Pair assertion: matches! on the variant works (used by main.rs).
+        assert!(matches!(error, Error::Interrupted));
     }
 
     #[test]

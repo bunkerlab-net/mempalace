@@ -383,6 +383,13 @@ mod tests {
         fn name(&self) -> &'static str {
             "mock"
         }
+        #[allow(clippy::unnecessary_literal_bound)] // return type fixed by trait signature
+        fn endpoint(&self) -> &str {
+            ""
+        }
+        fn api_key_source(&self) -> Option<crate::llm::client::ApiKeySource> {
+            None
+        }
     }
 
     // ── regenerate_closets_parse_response ─────────────────────────────
@@ -469,6 +476,13 @@ mod tests {
         fn name(&self) -> &'static str {
             "mock-ok"
         }
+        #[allow(clippy::unnecessary_literal_bound)] // return type fixed by trait signature
+        fn endpoint(&self) -> &str {
+            ""
+        }
+        fn api_key_source(&self) -> Option<crate::llm::client::ApiKeySource> {
+            None
+        }
     }
 
     // Mock provider that returns an empty string — triggers the empty-response error path.
@@ -489,6 +503,13 @@ mod tests {
         }
         fn name(&self) -> &'static str {
             "mock-empty"
+        }
+        #[allow(clippy::unnecessary_literal_bound)] // return type fixed by trait signature
+        fn endpoint(&self) -> &str {
+            ""
+        }
+        fn api_key_source(&self) -> Option<crate::llm::client::ApiKeySource> {
+            None
         }
     }
 
@@ -739,6 +760,13 @@ mod tests {
         fn name(&self) -> &'static str {
             "mock-empty-output"
         }
+        #[allow(clippy::unnecessary_literal_bound)] // return type fixed by trait signature
+        fn endpoint(&self) -> &str {
+            ""
+        }
+        fn api_key_source(&self) -> Option<crate::llm::client::ApiKeySource> {
+            None
+        }
     }
 
     // ── regenerate_closets_fetch_drawers: skip rows with empty id or content ───
@@ -963,5 +991,64 @@ mod tests {
             "long content drawer must be processed successfully"
         );
         assert_eq!(stats.failed, 0, "long content must not trigger a failure");
+    }
+
+    // ── Mock provider trait methods: endpoint + api_key_source ───────────────
+
+    #[test]
+    fn fail_provider_endpoint_and_api_key_source() {
+        // endpoint() must return an empty string and api_key_source must be None.
+        // These new methods are required by the LlmProvider trait.
+        let provider = FailProvider;
+        assert!(
+            provider.endpoint().is_empty(),
+            "FailProvider endpoint must be empty"
+        );
+        assert!(
+            provider.api_key_source().is_none(),
+            "FailProvider must have no api key source"
+        );
+    }
+
+    #[test]
+    fn ok_provider_endpoint_and_api_key_source() {
+        // OkProvider must also satisfy the new trait methods.
+        let provider = OkProvider;
+        assert!(
+            provider.endpoint().is_empty(),
+            "OkProvider endpoint must be empty"
+        );
+        assert!(
+            provider.api_key_source().is_none(),
+            "OkProvider must have no api key source"
+        );
+    }
+
+    #[test]
+    fn empty_response_provider_endpoint_and_api_key_source() {
+        // EmptyResponseProvider must satisfy the new trait methods.
+        let provider = EmptyResponseProvider;
+        assert!(
+            provider.endpoint().is_empty(),
+            "EmptyResponseProvider endpoint must be empty"
+        );
+        assert!(
+            provider.api_key_source().is_none(),
+            "EmptyResponseProvider must have no api key source"
+        );
+    }
+
+    #[test]
+    fn empty_output_provider_endpoint_and_api_key_source() {
+        // EmptyOutputProvider must satisfy the new trait methods.
+        let provider = EmptyOutputProvider;
+        assert!(
+            provider.endpoint().is_empty(),
+            "EmptyOutputProvider endpoint must be empty"
+        );
+        assert!(
+            provider.api_key_source().is_none(),
+            "EmptyOutputProvider must have no api key source"
+        );
     }
 }

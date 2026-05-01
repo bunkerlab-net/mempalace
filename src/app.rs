@@ -51,6 +51,8 @@ pub async fn run(cli: Cli) -> error::Result<()> {
             llm_model,
             llm_endpoint,
             llm_api_key,
+            accept_external_llm,
+            auto_mine,
         } => {
             let llm_opts = cli::init::LlmOpts {
                 enabled: llm,
@@ -58,8 +60,15 @@ pub async fn run(cli: Cli) -> error::Result<()> {
                 model: llm_model,
                 endpoint: llm_endpoint,
                 api_key: llm_api_key,
+                accept_external_llm,
             };
-            cli::init::run(&directory, yes, no_gitignore, &lang, &llm_opts)?;
+            // init::run returns Some(files) when the user agrees to mine immediately.
+            if let Some(pre_scanned_files) =
+                cli::init::run(&directory, yes, auto_mine, no_gitignore, &lang, &llm_opts)?
+            {
+                run_mine_after_init(palace_override, &directory, no_gitignore, pre_scanned_files)
+                    .await?;
+            }
         }
 
         Command::Mine {
@@ -143,8 +152,11 @@ pub async fn run(cli: Cli) -> error::Result<()> {
             run_dedup(palace_override, wing, threshold, dry_run, stats).await?;
         }
 
-        Command::Repair { skip_confirm } => {
-            run_repair(palace_override, skip_confirm).await?;
+        Command::Repair {
+            skip_confirm,
+            confirm_truncation_ok,
+        } => {
+            run_repair(palace_override, skip_confirm, confirm_truncation_ok).await?;
         }
 
         Command::Mcp { setup } => {
@@ -188,6 +200,8 @@ pub async fn run(cli: Cli) -> error::Result<()> {
                 model: llm_model,
                 endpoint: llm_endpoint,
                 api_key: llm_api_key,
+                // closet-llm is a direct command invocation — no consent gate needed.
+                accept_external_llm: false,
             };
             run_closet_llm(palace_override, wing, sample, dry_run, llm_opts).await?;
         }
@@ -207,6 +221,44 @@ pub async fn run(cli: Cli) -> error::Result<()> {
     }
 
     Ok(())
+}
+
+/// Mine the just-initialised project directory using pre-scanned files.
+///
+/// Called by the `init` arm when the user confirms mining. Opens the palace,
+/// acquires the mine lock, and delegates to `palace::miner::mine` with the
+/// file list that `init::run` already computed so the directory walk is not
+/// repeated.
+async fn run_mine_after_init(
+    palace_override: Option<&std::path::Path>,
+    directory: &std::path::Path,
+    no_gitignore: bool,
+    pre_scanned_files: Vec<std::path::PathBuf>,
+) -> error::Result<()> {
+    assert!(
+        !pre_scanned_files.is_empty() || directory.is_dir(),
+        "run_mine_after_init: directory must exist"
+    );
+    let opts = palace::miner::MineParams {
+        wing: None,
+        agent: "mempalace".to_string(),
+        limit: 0,
+        dry_run: false,
+        respect_gitignore: !no_gitignore,
+        include_ignored_paths: vec![],
+        pre_scanned_files: Some(pre_scanned_files),
+    };
+    let (_db, connection, palace_path) = open_palace(palace_override).await?;
+    let lock_dir = palace_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let _mine_guard = palace::miner::acquire_mine_lock(lock_dir)?;
+    assert!(
+        lock_dir.is_dir(),
+        "run_mine_after_init: lock_dir must be a directory"
+    );
+    palace::miner::mine(&connection, directory, &opts).await
 }
 
 /// Handle the `search` sub-command — opens the palace and runs the search.
@@ -282,10 +334,12 @@ async fn run_dedup(
 /// Handle the `repair` sub-command — prompts for confirmation then rebuilds the index.
 ///
 /// `skip_confirm` maps to the `-y` / `--yes` CLI flag; when false the user must
-/// type "y" before the repair proceeds.
+/// type "y" before the repair proceeds. `confirm_truncation_ok` maps to
+/// `--confirm-truncation-ok` and bypasses the truncation safety check.
 async fn run_repair(
     palace_override: Option<&std::path::Path>,
     skip_confirm: bool,
+    confirm_truncation_ok: bool,
 ) -> error::Result<()> {
     if !skip_confirm {
         use std::io::Write;
@@ -302,7 +356,7 @@ async fn run_repair(
         !palace_path.as_os_str().is_empty(),
         "run_repair: palace_path must not be empty"
     );
-    cli::repair::run(&connection, &palace_path).await
+    cli::repair::run(&connection, &palace_path, confirm_truncation_ok).await
 }
 
 /// Read one line from `reader` and return `true` iff the user typed "y" (case-insensitive).
@@ -452,6 +506,7 @@ async fn run_mine(
         dry_run,
         respect_gitignore: !no_gitignore,
         include_ignored_paths: include_ignored,
+        pre_scanned_files: None,
     };
     match mode.as_str() {
         "projects" => {
@@ -868,5 +923,170 @@ mod tests {
             "Command::WakeUp on an empty palace must return Ok"
         );
         assert!(palace_path.exists());
+    }
+
+    // ── run_repair_confirm oversized input ────────────────────────────────
+
+    #[test]
+    fn run_repair_confirm_oversized_input_returns_false() {
+        // Input longer than 1024 bytes must be treated as invalid and return false
+        // rather than panicking — users may paste clipboard contents into the prompt.
+        let oversized = vec![b'y'; 1025];
+        let cursor = std::io::Cursor::new(oversized);
+        assert!(
+            !run_repair_confirm(cursor),
+            "oversized input must not confirm the repair"
+        );
+    }
+
+    // ── Command::Split dispatch ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn run_command_split_dry_run_on_empty_dir_returns_ok() {
+        // Command::Split on an empty directory with dry_run must succeed without
+        // writing any files; it does not open a palace so no palace override is needed.
+        let temp_directory = tempfile::tempdir()
+            .expect("failed to create temporary directory for Command::Split test");
+        let cli = Cli {
+            palace: None,
+            command: Command::Split {
+                directory: temp_directory.path().to_path_buf(),
+                output_dir: None,
+                dry_run: true,
+                sessions_min: 2, // minimum valid value; 1 is rejected by cli::split::run
+                no_gitignore: false,
+            },
+        };
+        let result = run(cli).await;
+        assert!(
+            result.is_ok(),
+            "Command::Split dry-run on an empty directory must return Ok"
+        );
+    }
+
+    // ── Command::ClosetLlm dispatch ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn run_command_closet_llm_no_llm_returns_ok() {
+        // When LLM is disabled Command::ClosetLlm must return Ok without touching
+        // the palace — so no palace DB is required.
+        let temp_directory = tempfile::tempdir()
+            .expect("failed to create temporary directory for Command::ClosetLlm test");
+        let palace_path = temp_directory.path().join("palace.db");
+        let cli = Cli {
+            palace: Some(palace_path.clone()),
+            command: Command::ClosetLlm {
+                wing: None,
+                sample: 0,
+                dry_run: true,
+                llm: false, // disabled — no LLM calls made
+                llm_provider: "ollama".to_string(),
+                llm_model: "llama3".to_string(),
+                llm_endpoint: None,
+                llm_api_key: None,
+            },
+        };
+        let result = run(cli).await;
+        assert!(
+            result.is_ok(),
+            "Command::ClosetLlm with LLM disabled must return Ok"
+        );
+    }
+
+    // ── Command::Repair skip_confirm path ────────────────────────────────
+
+    #[tokio::test]
+    async fn run_command_repair_skip_confirm_returns_ok() {
+        // When skip_confirm=true, repair proceeds directly without a stdin prompt.
+        let temp_directory = tempfile::tempdir()
+            .expect("failed to create temporary directory for Command::Repair skip_confirm test");
+        let palace_path = temp_directory.path().join("palace.db");
+        let cli = Cli {
+            palace: Some(palace_path.clone()),
+            command: Command::Repair {
+                skip_confirm: true,
+                confirm_truncation_ok: false,
+            },
+        };
+        let result = run(cli).await;
+        assert!(
+            result.is_ok(),
+            "Command::Repair with skip_confirm=true must return Ok on an empty palace"
+        );
+        // Pair assertion: the palace was opened and created at the override path.
+        assert!(
+            palace_path.exists(),
+            "palace.db must exist after repair opens the palace"
+        );
+    }
+
+    // ── Command::Mine projects and convos ────────────────────────────────
+
+    #[tokio::test]
+    async fn run_command_mine_projects_dry_run_returns_ok() {
+        // Command::Mine in projects mode with dry_run=true must open the palace
+        // and return Ok without writing any drawers.
+        let temp_directory = tempfile::tempdir()
+            .expect("failed to create temporary directory for Command::Mine projects test");
+        let palace_path = temp_directory.path().join("palace.db");
+        let mine_dir = temp_directory.path().join("source");
+        std::fs::create_dir_all(&mine_dir).expect("must create mine directory");
+        let cli = Cli {
+            palace: Some(palace_path.clone()),
+            command: Command::Mine {
+                directory: mine_dir,
+                mode: "projects".to_string(),
+                extract_mode: "full".to_string(),
+                wing: None,
+                agent: "test".to_string(),
+                limit: 0,
+                dry_run: true,
+                no_gitignore: false,
+                include_ignored: vec![],
+            },
+        };
+        let result = run(cli).await;
+        assert!(
+            result.is_ok(),
+            "Command::Mine projects dry-run must return Ok"
+        );
+        assert!(
+            palace_path.exists(),
+            "palace.db must be created by open_palace during mine"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_command_mine_convos_dry_run_returns_ok() {
+        // Command::Mine in convos mode with dry_run=true must open the palace
+        // and return Ok without writing any drawers.
+        let temp_directory = tempfile::tempdir()
+            .expect("failed to create temporary directory for Command::Mine convos test");
+        let palace_path = temp_directory.path().join("palace.db");
+        let mine_dir = temp_directory.path().join("convos");
+        std::fs::create_dir_all(&mine_dir).expect("must create convos directory");
+        let cli = Cli {
+            palace: Some(palace_path.clone()),
+            command: Command::Mine {
+                directory: mine_dir,
+                mode: "convos".to_string(),
+                extract_mode: "full".to_string(),
+                wing: None,
+                agent: "test".to_string(),
+                limit: 0,
+                dry_run: true,
+                no_gitignore: false,
+                include_ignored: vec![],
+            },
+        };
+        let result = run(cli).await;
+        assert!(
+            result.is_ok(),
+            "Command::Mine convos dry-run must return Ok"
+        );
+        assert!(
+            palace_path.exists(),
+            "palace.db must be created by open_palace during mine"
+        );
     }
 }

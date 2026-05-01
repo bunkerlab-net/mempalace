@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use turso::Connection;
 
+use crate::config::normalize_wing_name;
 use crate::error::Result;
 use crate::normalize;
 use crate::palace::chunker::Chunk;
@@ -665,19 +666,19 @@ fn mine_convos_resolve_wing(directory: &Path, opts: &MineParams) -> Result<(Path
     // file_name() returns None for filesystem roots (e.g. `/`), producing an empty
     // dir_name.  An empty wing triggers the assert in drawer::add_drawer, so surface
     // a clear error here instead.
-    let dir_name = directory
+    let raw = directory
         .file_name()
         .unwrap_or_default()
         .to_string_lossy()
-        .to_lowercase()
-        .replace([' ', '-'], "_");
-    if dir_name.is_empty() {
+        .into_owned();
+    if raw.is_empty() {
         return Err(crate::error::Error::Other(
             "mine convos: cannot determine wing name — directory is a filesystem root; \
              pass --wing to specify one explicitly"
                 .to_string(),
         ));
     }
+    let dir_name = normalize_wing_name(&raw);
     assert!(
         !dir_name.is_empty(),
         "mine_convos_resolve_wing: derived wing must not be empty"
@@ -1179,6 +1180,7 @@ mod tests {
             dry_run: false,
             respect_gitignore: true,
             include_ignored_paths: vec![],
+            pre_scanned_files: None,
         };
 
         mine_convos_write_chunks(
@@ -1231,6 +1233,7 @@ mod tests {
             dry_run: false,
             respect_gitignore: true,
             include_ignored_paths: vec![],
+            pre_scanned_files: None,
         };
 
         mine_convos(&connection, temp_directory.path(), "full", &opts)
@@ -1275,6 +1278,7 @@ mod tests {
             dry_run: true,
             respect_gitignore: true,
             include_ignored_paths: vec![],
+            pre_scanned_files: None,
         };
 
         mine_convos(&connection, temp_directory.path(), "full", &opts)
@@ -1315,6 +1319,7 @@ mod tests {
             dry_run: false,
             respect_gitignore: true,
             include_ignored_paths: vec![],
+            pre_scanned_files: None,
         };
 
         // First run: file gets mined.
@@ -1367,6 +1372,7 @@ mod tests {
             dry_run: false,
             respect_gitignore: true,
             include_ignored_paths: vec![],
+            pre_scanned_files: None,
         };
 
         mine_convos(&connection, temp_directory.path(), "full", &opts)
@@ -1406,6 +1412,7 @@ mod tests {
             dry_run: false,
             respect_gitignore: true,
             include_ignored_paths: vec![],
+            pre_scanned_files: None,
         };
 
         mine_convos(&connection, temp_directory.path(), "full", &opts)
@@ -1458,6 +1465,7 @@ mod tests {
             dry_run: false,
             respect_gitignore: true,
             include_ignored_paths: vec![],
+            pre_scanned_files: None,
         };
 
         mine_convos(&connection, temp_directory.path(), "full", &opts)
@@ -1483,6 +1491,7 @@ mod tests {
             dry_run: false,
             respect_gitignore: true,
             include_ignored_paths: vec![],
+            pre_scanned_files: None,
         };
         mine_convos(&connection2, temp_directory.path(), "full", &opts_unlimited)
             .await
@@ -1522,6 +1531,7 @@ mod tests {
             dry_run: false,
             respect_gitignore: true,
             include_ignored_paths: vec![],
+            pre_scanned_files: None,
         };
 
         let result = mine_convos(&connection, &file_path, "full", &opts).await;
@@ -1663,6 +1673,7 @@ mod tests {
             dry_run: false,
             respect_gitignore: true,
             include_ignored_paths: vec![],
+            pre_scanned_files: None,
         };
         let result = mine_convos_resolve_wing(temp_directory.path(), &opts)
             .expect("resolve_wing must succeed with explicit wing");
@@ -1704,6 +1715,7 @@ mod tests {
             dry_run: false,
             respect_gitignore: true,
             include_ignored_paths: vec![],
+            pre_scanned_files: None,
         };
 
         mine_convos(&connection, temp_dir.path(), "full", &opts)
@@ -1736,6 +1748,7 @@ mod tests {
             dry_run: false,
             respect_gitignore: true,
             include_ignored_paths: vec![],
+            pre_scanned_files: None,
         };
         let result = mine_convos_resolve_wing(temp_directory.path(), &opts)
             .expect("resolve_wing must succeed with derived wing");
@@ -1768,6 +1781,7 @@ mod tests {
             dry_run: false,
             respect_gitignore: true,
             include_ignored_paths: vec![],
+            pre_scanned_files: None,
         };
         let result = mine_convos_resolve_wing(
             std::path::Path::new("/nonexistent/path/that/cannot/canonicalize"),
@@ -1889,6 +1903,7 @@ mod tests {
             dry_run: false,
             respect_gitignore: true,
             include_ignored_paths: vec![],
+            pre_scanned_files: None,
         };
         // "/" canonicalizes successfully but has no file_name component, so
         // unwrap_or_default() returns "" and the empty-check fires.
@@ -1986,6 +2001,7 @@ mod tests {
             dry_run: false,
             respect_gitignore: true,
             include_ignored_paths: vec![],
+            pre_scanned_files: None,
         };
 
         // mine_convos must succeed — unreadable files are counted but do not abort.

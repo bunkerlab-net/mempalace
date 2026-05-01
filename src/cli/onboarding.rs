@@ -5,7 +5,7 @@
 //! `onboarding.py` module.
 
 use std::collections::HashMap;
-use std::io::Write as _;
+use std::io::{BufRead, Write as _};
 use std::path::Path;
 
 use crate::config::config_dir;
@@ -115,12 +115,14 @@ pub struct PersonEntry {
 pub fn run(directory: &Path) -> Result<()> {
     println!("\n  Welcome to MemPalace! Let's set up your palace.\n");
 
-    let mode = onboarding_ask_mode()?;
-    let people = onboarding_ask_people(&mode)?;
-    let projects = onboarding_ask_projects(&mode)?;
-    let wings = onboarding_ask_wings(&mode)?;
+    let mut reader = std::io::BufReader::new(std::io::stdin());
 
-    let all_people = onboarding_maybe_scan(directory, people, &mode)?;
+    let mode = onboarding_ask_mode(&mut reader)?;
+    let people = onboarding_ask_people(&mode, &mut reader)?;
+    let projects = onboarding_ask_projects(&mode, &mut reader)?;
+    let wings = onboarding_ask_wings(&mode, &mut reader)?;
+
+    let all_people = onboarding_maybe_scan(directory, people, &mode, &mut reader)?;
 
     let ambiguous = onboarding_warn_ambiguous(&all_people);
     if !ambiguous.is_empty() {
@@ -153,7 +155,7 @@ pub fn run(directory: &Path) -> Result<()> {
 /// Print the three mode choices and read the user's selection.
 ///
 /// Returns one of `"work"`, `"personal"`, or `"combo"`. Loops until valid.
-fn onboarding_ask_mode() -> Result<String> {
+fn onboarding_ask_mode(reader: &mut impl BufRead) -> Result<String> {
     println!("  How are you using MemPalace?");
     println!("    1. Work — clients, projects, team");
     println!("    2. Personal — family, health, relationships");
@@ -161,7 +163,7 @@ fn onboarding_ask_mode() -> Result<String> {
     println!();
 
     loop {
-        let input = onboarding_readline("Your choice [1/2/3]", None)?;
+        let input = onboarding_readline("Your choice [1/2/3]", None, reader)?;
         let mode = match input.trim() {
             "1" => "work",
             "2" => "personal",
@@ -180,7 +182,7 @@ fn onboarding_ask_mode() -> Result<String> {
 ///
 /// For "combo" mode the context (personal vs work) is asked per person.
 /// Returns up to `PEOPLE_LIMIT` entries.
-fn onboarding_ask_people(mode: &str) -> Result<Vec<PersonEntry>> {
+fn onboarding_ask_people(mode: &str, reader: &mut impl BufRead) -> Result<Vec<PersonEntry>> {
     assert!(!mode.is_empty());
     println!(
         "\n  Who are the people in your {}? (enter to finish)",
@@ -193,7 +195,7 @@ fn onboarding_ask_people(mode: &str) -> Result<Vec<PersonEntry>> {
         if people.len() >= PEOPLE_LIMIT {
             break;
         }
-        let entry = onboarding_ask_people_one(mode, people.len() + 1)?;
+        let entry = onboarding_ask_people_one(mode, people.len() + 1, reader)?;
         if entry.name.is_empty() {
             break;
         }
@@ -208,11 +210,15 @@ fn onboarding_ask_people(mode: &str) -> Result<Vec<PersonEntry>> {
 ///
 /// Returns a `PersonEntry` with an empty `name` when the user presses enter
 /// to signal end-of-input.
-fn onboarding_ask_people_one(mode: &str, index: usize) -> Result<PersonEntry> {
+fn onboarding_ask_people_one(
+    mode: &str,
+    index: usize,
+    reader: &mut impl BufRead,
+) -> Result<PersonEntry> {
     assert!(!mode.is_empty());
     assert!(index > 0);
 
-    let name = onboarding_readline(&format!("  Person {index}"), None)?;
+    let name = onboarding_readline(&format!("  Person {index}"), None, reader)?;
     if name.is_empty() {
         return Ok(PersonEntry {
             name: String::new(),
@@ -224,15 +230,16 @@ fn onboarding_ask_people_one(mode: &str, index: usize) -> Result<PersonEntry> {
     let nickname = onboarding_readline(
         &format!("  Nickname for {name}? (or enter to skip)"),
         Some(""),
+        reader,
     )?;
-    let relationship = onboarding_readline("  Relationship/role", Some(""))?;
+    let relationship = onboarding_readline("  Relationship/role", Some(""), reader)?;
     let context = match mode {
         "personal" => "personal".to_string(),
         "work" => "work".to_string(),
         _ => {
             // Lowercase before matching so "W"/"P" are accepted as readily as
             // "w"/"p"; the prompt makes no claim about case sensitivity.
-            let raw = onboarding_readline("  Context (p=personal / w=work)", Some("p"))?
+            let raw = onboarding_readline("  Context (p=personal / w=work)", Some("p"), reader)?
                 .to_ascii_lowercase();
             if raw.starts_with('w') {
                 "work".to_string()
@@ -254,7 +261,7 @@ fn onboarding_ask_people_one(mode: &str, index: usize) -> Result<PersonEntry> {
 /// Collect project names from stdin until the user enters an empty line.
 ///
 /// Returns up to `PROJECTS_LIMIT` project name strings.
-fn onboarding_ask_projects(mode: &str) -> Result<Vec<String>> {
+fn onboarding_ask_projects(mode: &str, reader: &mut impl BufRead) -> Result<Vec<String>> {
     assert!(!mode.is_empty());
     if mode == "personal" {
         println!("\n  Any creative projects or personal goals? (enter to skip)");
@@ -268,7 +275,7 @@ fn onboarding_ask_projects(mode: &str) -> Result<Vec<String>> {
         if projects.len() >= PROJECTS_LIMIT {
             break;
         }
-        let name = onboarding_readline(&format!("  Project {}", projects.len() + 1), None)?;
+        let name = onboarding_readline(&format!("  Project {}", projects.len() + 1), None, reader)?;
         if name.is_empty() {
             break;
         }
@@ -282,7 +289,7 @@ fn onboarding_ask_projects(mode: &str) -> Result<Vec<String>> {
 /// Show the default wings for the selected mode and allow the user to override.
 ///
 /// The user may accept the defaults (enter) or type comma-separated names.
-fn onboarding_ask_wings(mode: &str) -> Result<Vec<String>> {
+fn onboarding_ask_wings(mode: &str, reader: &mut impl BufRead) -> Result<Vec<String>> {
     assert!(!mode.is_empty());
     let defaults: &[&str] = match mode {
         "work" => DEFAULT_WINGS_WORK,
@@ -296,6 +303,7 @@ fn onboarding_ask_wings(mode: &str) -> Result<Vec<String>> {
     let input = onboarding_readline(
         "  Customize wings (comma-separated, or enter to accept defaults)",
         Some(""),
+        reader,
     )?;
 
     let parsed: Vec<String> = if input.is_empty() {
@@ -334,11 +342,13 @@ fn onboarding_maybe_scan(
     directory: &Path,
     people: Vec<PersonEntry>,
     mode: &str,
+    reader: &mut impl BufRead,
 ) -> Result<Vec<PersonEntry>> {
     assert!(!mode.is_empty());
     if !onboarding_readline_yn(
         "Scan your files for additional names we might have missed?",
         true,
+        reader,
     )? {
         return Ok(people);
     }
@@ -357,7 +367,7 @@ fn onboarding_maybe_scan(
         println!("  No additional candidates found.");
         return Ok(people);
     }
-    onboarding_prompt_detected(people, detected, mode)
+    onboarding_prompt_detected(people, detected, mode, reader)
 }
 
 /// Scan `directory` for entity candidates not already in `known_people`.
@@ -403,6 +413,7 @@ fn onboarding_prompt_detected(
     mut people: Vec<PersonEntry>,
     detected: Vec<DetectedEntity>,
     mode: &str,
+    reader: &mut impl BufRead,
 ) -> Result<Vec<PersonEntry>> {
     assert!(!mode.is_empty());
     println!("\n  Found {} additional name candidates:\n", detected.len());
@@ -415,7 +426,7 @@ fn onboarding_prompt_detected(
         );
     }
     println!();
-    if !onboarding_readline_yn("  Add any of these to your registry?", false)? {
+    if !onboarding_readline_yn("  Add any of these to your registry?", false, reader)? {
         return Ok(people);
     }
 
@@ -427,19 +438,21 @@ fn onboarding_prompt_detected(
         let choice = onboarding_readline(
             &format!("    {} — (p)erson, (s)kip?", entity.name),
             Some("s"),
+            reader,
         )?
         .to_ascii_lowercase();
         if !choice.starts_with('p') {
             continue;
         }
-        let relationship = onboarding_readline("    Relationship/role", Some(""))?;
+        let relationship = onboarding_readline("    Relationship/role", Some(""), reader)?;
         let context = match mode {
             "personal" => "personal".to_string(),
             "work" => "work".to_string(),
             _ => {
                 // Same case-insensitive policy as `onboarding_ask_people_one`.
-                let raw = onboarding_readline("    Context (p=personal / w=work)", Some("p"))?
-                    .to_ascii_lowercase();
+                let raw =
+                    onboarding_readline("    Context (p=personal / w=work)", Some("p"), reader)?
+                        .to_ascii_lowercase();
                 if raw.starts_with('w') {
                     "work".to_string()
                 } else {
@@ -507,7 +520,7 @@ fn onboarding_seed_registry(
         !by_category.is_empty() || people.is_empty(),
         "non-empty people must populate registry"
     );
-    add_to_known_entities(&by_category)
+    add_to_known_entities(&by_category, None)
 }
 
 /// Seed the structured `EntityRegistry` (`entity_registry.json`) from onboarding data.
@@ -784,11 +797,15 @@ fn onboarding_write_critical_facts_file(
     Ok(())
 }
 
-/// Print a prompt to stdout and read one trimmed line from stdin.
+/// Print a prompt to stdout and read one trimmed line from `reader`.
 ///
 /// When `default` is `Some("")` the prompt shows nothing extra; when
 /// `default` is `Some(val)` it shows `[val]` to guide the user.
-fn onboarding_readline(prompt: &str, default: Option<&str>) -> Result<String> {
+fn onboarding_readline(
+    prompt: &str,
+    default: Option<&str>,
+    reader: &mut impl BufRead,
+) -> Result<String> {
     assert!(!prompt.is_empty());
     let suffix = match default {
         Some(default_val) if !default_val.is_empty() => format!(" [{default_val}]"),
@@ -798,7 +815,7 @@ fn onboarding_readline(prompt: &str, default: Option<&str>) -> Result<String> {
     std::io::stdout().flush()?;
 
     let mut input = String::new();
-    std::io::stdin().read_line(&mut input)?;
+    reader.read_line(&mut input)?;
     let trimmed = input.trim().to_string();
 
     // When user presses enter on a defaulted field, return the default value.
@@ -818,14 +835,18 @@ fn onboarding_readline(prompt: &str, default: Option<&str>) -> Result<String> {
 /// Print a yes/no prompt and return true for yes, false for no.
 ///
 /// The default answer is used when the user presses enter without input.
-fn onboarding_readline_yn(prompt: &str, default_yes: bool) -> Result<bool> {
+fn onboarding_readline_yn(
+    prompt: &str,
+    default_yes: bool,
+    reader: &mut impl BufRead,
+) -> Result<bool> {
     assert!(!prompt.is_empty());
     let hint = if default_yes { "Y/n" } else { "y/N" };
     print!("  {prompt} [{hint}]: ");
     std::io::stdout().flush()?;
 
     let mut input = String::new();
-    std::io::stdin().read_line(&mut input)?;
+    reader.read_line(&mut input)?;
     let trimmed = input.trim().to_lowercase();
 
     let answer = if trimmed.is_empty() {
@@ -1188,6 +1209,331 @@ mod tests {
                 .iter()
                 .all(|entity| entity.name.to_lowercase() != "alice"),
             "known names must be filtered out"
+        );
+    }
+
+    // ── onboarding_readline ────────────────────────────────────────────────
+
+    #[test]
+    fn onboarding_readline_returns_trimmed_input() {
+        // Standard input is trimmed and returned as-is.
+        let mut reader = std::io::Cursor::new(b"  hello  \n");
+        let result = onboarding_readline("test", None, &mut reader).expect("must succeed");
+        assert_eq!(result, "hello", "trimmed input must be returned");
+        // Pair assertion: no surrounding whitespace must remain.
+        assert!(!result.starts_with(' ') && !result.ends_with(' '));
+    }
+
+    #[test]
+    fn onboarding_readline_empty_input_returns_default() {
+        // An empty line when a default is set must return the default string.
+        let mut reader = std::io::Cursor::new(b"\n");
+        let result =
+            onboarding_readline("test", Some("fallback"), &mut reader).expect("must succeed");
+        assert_eq!(result, "fallback", "empty input must yield the default");
+    }
+
+    #[test]
+    fn onboarding_readline_empty_input_no_default_returns_empty() {
+        // An empty line with no default must return an empty string.
+        let mut reader = std::io::Cursor::new(b"\n");
+        let result = onboarding_readline("test", None, &mut reader).expect("must succeed");
+        assert!(
+            result.is_empty(),
+            "empty input with no default must return empty string"
+        );
+    }
+
+    // ── onboarding_readline_yn ─────────────────────────────────────────────
+
+    #[test]
+    fn onboarding_readline_yn_y_returns_true() {
+        let mut reader = std::io::Cursor::new(b"y\n");
+        let answer = onboarding_readline_yn("continue?", false, &mut reader).expect("must succeed");
+        assert!(answer, "'y' must return true");
+    }
+
+    #[test]
+    fn onboarding_readline_yn_n_returns_false() {
+        let mut reader = std::io::Cursor::new(b"n\n");
+        let answer = onboarding_readline_yn("continue?", true, &mut reader).expect("must succeed");
+        assert!(!answer, "'n' must return false");
+    }
+
+    #[test]
+    fn onboarding_readline_yn_empty_uses_default() {
+        // Empty input must fall through to the default_yes value.
+        let mut reader_yes = std::io::Cursor::new(b"\n");
+        assert!(
+            onboarding_readline_yn("continue?", true, &mut reader_yes).expect("must succeed"),
+            "empty with default_yes=true must return true"
+        );
+        let mut reader_no = std::io::Cursor::new(b"\n");
+        assert!(
+            !onboarding_readline_yn("continue?", false, &mut reader_no).expect("must succeed"),
+            "empty with default_yes=false must return false"
+        );
+    }
+
+    // ── onboarding_ask_mode ───────────────────────────────────────────────
+
+    #[test]
+    fn ask_mode_choice_1_returns_work() {
+        let mut reader = std::io::Cursor::new(b"1\n");
+        let mode = onboarding_ask_mode(&mut reader).expect("must succeed");
+        assert_eq!(mode, "work", "choice 1 must return work mode");
+    }
+
+    #[test]
+    fn ask_mode_choice_2_returns_personal() {
+        let mut reader = std::io::Cursor::new(b"2\n");
+        let mode = onboarding_ask_mode(&mut reader).expect("must succeed");
+        assert_eq!(mode, "personal", "choice 2 must return personal mode");
+    }
+
+    #[test]
+    fn ask_mode_choice_3_returns_combo() {
+        let mut reader = std::io::Cursor::new(b"3\n");
+        let mode = onboarding_ask_mode(&mut reader).expect("must succeed");
+        assert_eq!(mode, "combo", "choice 3 must return combo mode");
+    }
+
+    #[test]
+    fn ask_mode_empty_returns_combo() {
+        // An empty line defaults to combo (the "3 | ''" arm in the match).
+        let mut reader = std::io::Cursor::new(b"\n");
+        let mode = onboarding_ask_mode(&mut reader).expect("must succeed");
+        assert_eq!(mode, "combo", "empty input must default to combo");
+    }
+
+    #[test]
+    fn ask_mode_invalid_then_valid_loops() {
+        // An invalid choice must prompt again; the second valid entry is used.
+        let mut reader = std::io::Cursor::new(b"9\n1\n");
+        let mode = onboarding_ask_mode(&mut reader).expect("must succeed");
+        assert_eq!(
+            mode, "work",
+            "loop must continue until a valid choice is entered"
+        );
+    }
+
+    // ── onboarding_ask_people_one ─────────────────────────────────────────
+
+    #[test]
+    fn ask_people_one_empty_name_returns_empty_entry() {
+        // An immediately empty line signals end-of-input.
+        let mut reader = std::io::Cursor::new(b"\n");
+        let entry = onboarding_ask_people_one("work", 1, &mut reader).expect("must succeed");
+        assert!(
+            entry.name.is_empty(),
+            "empty input must produce an empty-name entry"
+        );
+    }
+
+    #[test]
+    fn ask_people_one_work_mode_fills_entry() {
+        // In work mode no context prompt is shown.
+        // Input: name, empty nickname, relationship.
+        let mut reader = std::io::Cursor::new(b"Alice\n\nengineer\n");
+        let entry = onboarding_ask_people_one("work", 1, &mut reader).expect("must succeed");
+        assert_eq!(entry.name, "Alice");
+        assert_eq!(entry.context, "work", "work mode must set context to work");
+        assert_eq!(entry.relationship, "engineer");
+        // Pair assertion: empty nickname line must produce empty nickname.
+        assert!(
+            entry.nickname.is_empty(),
+            "empty nick line must produce empty nickname"
+        );
+    }
+
+    #[test]
+    fn ask_people_one_personal_mode_sets_context() {
+        // Personal mode sets context automatically — no prompt.
+        let mut reader = std::io::Cursor::new(b"Bob\n\nfriend\n");
+        let entry = onboarding_ask_people_one("personal", 1, &mut reader).expect("must succeed");
+        assert_eq!(
+            entry.context, "personal",
+            "personal mode must set context automatically"
+        );
+        assert_eq!(entry.name, "Bob");
+    }
+
+    #[test]
+    fn ask_people_one_combo_mode_work_context() {
+        // In combo mode 'w' selects work context.
+        // Input: name, empty nick, empty rel, context='w'.
+        let mut reader = std::io::Cursor::new(b"Carol\n\n\nw\n");
+        let entry = onboarding_ask_people_one("combo", 1, &mut reader).expect("must succeed");
+        assert_eq!(
+            entry.context, "work",
+            "w input must produce work context in combo mode"
+        );
+    }
+
+    #[test]
+    fn ask_people_one_combo_mode_personal_context() {
+        // In combo mode 'p' (or default) selects personal context.
+        let mut reader = std::io::Cursor::new(b"Dave\n\n\np\n");
+        let entry = onboarding_ask_people_one("combo", 1, &mut reader).expect("must succeed");
+        assert_eq!(
+            entry.context, "personal",
+            "p input must produce personal context in combo mode"
+        );
+    }
+
+    // ── onboarding_ask_people ─────────────────────────────────────────────
+
+    #[test]
+    fn ask_people_stops_on_empty_name() {
+        // After Alice is added, an empty line stops the loop.
+        // Input: name, empty nick, empty rel → entry added; then empty name → stop.
+        let mut reader = std::io::Cursor::new(b"Alice\n\n\n\n");
+        let people = onboarding_ask_people("work", &mut reader).expect("must succeed");
+        assert_eq!(people.len(), 1, "one person must be collected");
+        assert_eq!(people[0].name, "Alice");
+        // Pair assertion: the loop exit condition is the empty name, not a limit hit.
+        assert!(people.len() < PEOPLE_LIMIT, "limit must not have been hit");
+    }
+
+    // ── onboarding_ask_projects ───────────────────────────────────────────
+
+    #[test]
+    fn ask_projects_stops_on_empty_input() {
+        // Two projects then an empty line to stop.
+        let mut reader = std::io::Cursor::new(b"Alpha\nBeta\n\n");
+        let projects = onboarding_ask_projects("work", &mut reader).expect("must succeed");
+        assert_eq!(projects.len(), 2, "two projects must be collected");
+        assert_eq!(projects[0], "Alpha");
+        assert_eq!(projects[1], "Beta");
+    }
+
+    #[test]
+    fn ask_projects_personal_mode_empty_yields_none() {
+        // Personal mode shows a different prompt but behaves identically.
+        let mut reader = std::io::Cursor::new(b"\n");
+        let projects = onboarding_ask_projects("personal", &mut reader).expect("must succeed");
+        assert!(
+            projects.is_empty(),
+            "empty input in personal mode must yield no projects"
+        );
+    }
+
+    // ── onboarding_ask_wings ──────────────────────────────────────────────
+
+    #[test]
+    fn ask_wings_empty_input_returns_work_defaults() {
+        // An empty line must fall back to the mode-specific default wings.
+        let mut reader = std::io::Cursor::new(b"\n");
+        let wings = onboarding_ask_wings("work", &mut reader).expect("must succeed");
+        let expected: Vec<String> = DEFAULT_WINGS_WORK
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        assert_eq!(
+            wings, expected,
+            "empty input must return default work wings"
+        );
+        assert!(!wings.is_empty(), "default wings must be non-empty");
+    }
+
+    #[test]
+    fn ask_wings_custom_input_overrides_defaults() {
+        // A comma-separated list must replace the defaults entirely.
+        let mut reader = std::io::Cursor::new(b"alpha,beta,gamma\n");
+        let wings = onboarding_ask_wings("work", &mut reader).expect("must succeed");
+        assert_eq!(
+            wings,
+            vec!["alpha", "beta", "gamma"],
+            "custom wings must be returned verbatim"
+        );
+    }
+
+    #[test]
+    fn ask_wings_personal_mode_returns_personal_defaults() {
+        let mut reader = std::io::Cursor::new(b"\n");
+        let wings = onboarding_ask_wings("personal", &mut reader).expect("must succeed");
+        let expected: Vec<String> = DEFAULT_WINGS_PERSONAL
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        assert_eq!(
+            wings, expected,
+            "empty input in personal mode must return personal defaults"
+        );
+    }
+
+    // ── onboarding_prompt_detected ─────────────────────────────────────────
+
+    fn detected_entity(name: &str) -> DetectedEntity {
+        DetectedEntity {
+            name: name.to_string(),
+            entity_type: "person".to_string(),
+            confidence: 0.9,
+            frequency: 3,
+            signals: vec![],
+        }
+    }
+
+    #[test]
+    fn prompt_detected_skip_all_when_user_declines() {
+        // 'n' to "Add any?" must return people list unchanged.
+        let detected = vec![detected_entity("Carol")];
+        let people = vec![person_entry("Alice", "", "work", "")];
+        let mut reader = std::io::Cursor::new(b"n\n");
+        let result = onboarding_prompt_detected(people, detected, "work", &mut reader)
+            .expect("must succeed");
+        assert_eq!(
+            result.len(),
+            1,
+            "declining must leave people list unchanged"
+        );
+        assert_eq!(result[0].name, "Alice");
+        // Pair assertion: Carol must not be in the result.
+        assert!(
+            result.iter().all(|p| p.name != "Carol"),
+            "Carol must not be added"
+        );
+    }
+
+    #[test]
+    fn prompt_detected_accept_adds_person_and_skips_other() {
+        // 'y' to add any, 'p' to accept Carol, 's' to skip Dave.
+        let detected = vec![detected_entity("Carol"), detected_entity("Dave")];
+        let people = vec![person_entry("Alice", "", "work", "")];
+        // y=add any; p=accept Carol; engineer=rel; s=skip Dave.
+        let mut reader = std::io::Cursor::new(b"y\np\nengineer\ns\n");
+        let result = onboarding_prompt_detected(people, detected, "work", &mut reader)
+            .expect("must succeed");
+        assert_eq!(
+            result.len(),
+            2,
+            "accepting one entity must add it to people"
+        );
+        assert_eq!(result[1].name, "Carol", "accepted entity must be Carol");
+        assert_eq!(result[1].relationship, "engineer");
+        // Pair assertion: skipped entity must not appear.
+        assert!(
+            result.iter().all(|p| p.name != "Dave"),
+            "skipped entity must not be added"
+        );
+    }
+
+    // ── onboarding_maybe_scan ─────────────────────────────────────────────
+
+    #[test]
+    fn maybe_scan_declines_returns_people_unchanged() {
+        // When the user answers 'n' to the scan prompt, the list is returned as-is.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let people = vec![person_entry("Alice", "", "work", "")];
+        let mut reader = std::io::Cursor::new(b"n\n");
+        let result =
+            onboarding_maybe_scan(temp.path(), people, "work", &mut reader).expect("must succeed");
+        assert_eq!(result.len(), 1, "declining scan must preserve people list");
+        assert_eq!(result[0].name, "Alice");
+        // Pair assertion: no extra entries were added.
+        assert!(
+            result.len() <= 1,
+            "no entities must have been added after declining"
         );
     }
 }

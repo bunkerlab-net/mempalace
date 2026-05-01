@@ -39,6 +39,8 @@ pub struct DetectionResult {
     pub people: Vec<DetectedEntity>,
     pub projects: Vec<DetectedEntity>,
     pub uncertain: Vec<DetectedEntity>,
+    /// Topic entities; populated by downstream LLM reclassification, always empty here.
+    pub topics: Vec<DetectedEntity>,
 }
 
 /// Scan files and detect entity candidates using the specified locale languages.
@@ -65,6 +67,7 @@ pub fn detect_entities(
             people: vec![],
             projects: vec![],
             uncertain: vec![],
+            topics: vec![],
         };
     }
 
@@ -77,6 +80,7 @@ pub fn detect_entities(
             people: vec![],
             projects: vec![],
             uncertain: vec![],
+            topics: vec![],
         };
     }
 
@@ -102,6 +106,7 @@ pub fn detect_entities(
         people,
         projects,
         uncertain,
+        topics: vec![],
     }
 }
 
@@ -790,6 +795,56 @@ pub fn scan_for_detection(project_dir: &Path, max_files: usize) -> Vec<std::path
     // Postcondition: result does not exceed max_files.
     debug_assert!(result.len() <= max_files);
     result
+}
+
+/// Filter AI agent persona names out of `detected` to prevent them from being
+/// confirmed as human entities during the init pipeline.
+///
+/// When `origin.agent_persona_names` is non-empty, any entity in `people` or
+/// `uncertain` whose lowercased name exactly matches a persona name is removed.
+/// This prevents custom AI agent names (e.g. "Echo", "Sparrow") from being
+/// mistaken for real human contributors. Called by `run_discover_entities` in
+/// `cli/init.rs` after corpus-origin Pass 0.
+pub fn apply_corpus_origin(
+    detected: &mut crate::palace::project_scanner::DetectedDict,
+    origin: &crate::palace::corpus_origin::CorpusOriginResult,
+) {
+    if origin.agent_persona_names.is_empty() {
+        return;
+    }
+
+    // Build a lowercase set of persona names for O(1) lookup.
+    let persona_set: std::collections::HashSet<String> = origin
+        .agent_persona_names
+        .iter()
+        .map(String::as_str)
+        .map(str::to_lowercase)
+        .collect();
+
+    assert!(
+        !persona_set.is_empty(),
+        "persona set must be non-empty when persona_names is not"
+    );
+
+    let before_people = detected.people.len();
+    let before_uncertain = detected.uncertain.len();
+
+    detected
+        .people
+        .retain(|entity| !persona_set.contains(&entity.name.to_lowercase()));
+    detected
+        .uncertain
+        .retain(|entity| !persona_set.contains(&entity.name.to_lowercase()));
+
+    // Pair assertion: filtered lists cannot grow.
+    debug_assert!(
+        detected.people.len() <= before_people,
+        "people must not grow after filter"
+    );
+    debug_assert!(
+        detected.uncertain.len() <= before_uncertain,
+        "uncertain must not grow after filter"
+    );
 }
 
 #[cfg(test)]
@@ -1876,5 +1931,97 @@ Clara said the migration is complete. He agreed.\n";
             result.uncertain.is_empty(),
             "no candidates above threshold must yield no uncertain"
         );
+    }
+
+    // -- apply_corpus_origin --
+
+    fn make_entity_for_origin(name: &str) -> DetectedEntity {
+        DetectedEntity {
+            name: name.to_string(),
+            entity_type: "person".to_string(),
+            confidence: 0.8,
+            frequency: 5,
+            signals: vec![],
+        }
+    }
+
+    fn empty_origin() -> crate::palace::corpus_origin::CorpusOriginResult {
+        crate::palace::corpus_origin::CorpusOriginResult {
+            likely_ai_dialogue: false,
+            confidence: 0.5,
+            primary_platform: None,
+            user_name: None,
+            agent_persona_names: vec![],
+            evidence: vec![],
+        }
+    }
+
+    fn make_detected_dict(
+        people: &[&str],
+        uncertain: &[&str],
+    ) -> crate::palace::project_scanner::DetectedDict {
+        crate::palace::project_scanner::DetectedDict {
+            people: people.iter().copied().map(make_entity_for_origin).collect(),
+            projects: vec![],
+            uncertain: uncertain
+                .iter()
+                .copied()
+                .map(make_entity_for_origin)
+                .collect(),
+            topics: vec![],
+        }
+    }
+
+    #[test]
+    fn apply_corpus_origin_no_personas_is_noop() {
+        // When agent_persona_names is empty, the detected dict must not change.
+        let mut detected = make_detected_dict(&["Alice", "Bob"], &["Zephyr"]);
+        let origin = empty_origin(); // agent_persona_names empty
+        apply_corpus_origin(&mut detected, &origin);
+        assert_eq!(
+            detected.people.len(),
+            2,
+            "people must be unchanged when no personas"
+        );
+        assert_eq!(
+            detected.uncertain.len(),
+            1,
+            "uncertain must be unchanged when no personas"
+        );
+    }
+
+    #[test]
+    fn apply_corpus_origin_removes_matching_person() {
+        // A persona name that exactly matches an entry in `people` must be removed.
+        let mut detected = make_detected_dict(&["Claude", "Alice"], &[]);
+        let mut origin = empty_origin();
+        origin.agent_persona_names = vec!["Claude".to_string()];
+        apply_corpus_origin(&mut detected, &origin);
+        assert_eq!(
+            detected.people.len(),
+            1,
+            "Claude must be removed from people"
+        );
+        assert_eq!(
+            detected.people[0].name, "Alice",
+            "only Alice must remain in people"
+        );
+        // Pair assertion: uncertain list must be unaffected when no uncertain entries.
+        assert!(detected.uncertain.is_empty(), "uncertain must remain empty");
+    }
+
+    #[test]
+    fn apply_corpus_origin_case_insensitive_match_removes_from_uncertain() {
+        // Persona names must be matched case-insensitively across both people and uncertain.
+        let mut detected = make_detected_dict(&[], &["ASSISTANT"]);
+        let mut origin = empty_origin();
+        origin.agent_persona_names = vec!["assistant".to_string()];
+        apply_corpus_origin(&mut detected, &origin);
+        assert!(
+            detected.uncertain.is_empty(),
+            "case-insensitive persona match must remove entity from uncertain"
+        );
+        // Pair assertion: people list was empty and must stay empty.
+        assert!(detected.people.is_empty(), "people must remain empty");
     }
 }

@@ -1,6 +1,6 @@
 // https://hk.jdx.dev
-amends "package://github.com/jdx/hk/releases/download/v1.43.0/hk@1.43.0#/Config.pkl"
-import "package://github.com/jdx/hk/releases/download/v1.43.0/hk@1.43.0#/Builtins.pkl"
+amends "package://github.com/jdx/hk/releases/download/v1.44.1/hk@1.44.1#/Config.pkl"
+import "package://github.com/jdx/hk/releases/download/v1.44.1/hk@1.44.1#/Builtins.pkl"
 
 exclude = List("mempalace-py/**")
 
@@ -34,6 +34,8 @@ local linters = new Mapping<String, Step> {
   ["sort_package_json"] = Builtins.sort_package_json
   // No trailing whitespace allowed
   ["trailing_whitespace"] = Builtins.trailing_whitespace
+  // Zizmor
+  ["zizmor"] = Builtins.zizmor
 }
 
 hooks {

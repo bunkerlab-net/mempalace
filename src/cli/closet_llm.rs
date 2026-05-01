@@ -154,6 +154,13 @@ mod tests {
         fn name(&self) -> &'static str {
             "mock-ok"
         }
+        #[allow(clippy::unnecessary_literal_bound)] // return type fixed by trait signature
+        fn endpoint(&self) -> &str {
+            ""
+        }
+        fn api_key_source(&self) -> Option<crate::llm::client::ApiKeySource> {
+            None
+        }
     }
 
     #[tokio::test]
@@ -175,6 +182,7 @@ mod tests {
             model: "llama3:8b".to_string(),
             endpoint: Some("http://localhost:11434/v1".to_string()),
             api_key: None,
+            accept_external_llm: false,
         };
         // Provider is not reachable in tests — run will log "LLM unavailable" and return Ok.
         let result = run(&connection, None, 0, true, &opts).await;
@@ -217,5 +225,64 @@ mod tests {
         assert!(result.is_ok(), "live run on empty palace must return Ok");
         // Pair assertion: success path must not leave an error.
         assert!(result.err().is_none(), "no error must be returned");
+    }
+
+    #[tokio::test]
+    async fn run_with_provider_live_with_drawer_exercises_classify() {
+        // A live run on a palace with one drawer must call classify on the provider.
+        // This covers the processing loop and OkProvider::classify.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        crate::palace::drawer::add_drawer(
+            &connection,
+            &crate::palace::drawer::DrawerParams {
+                id: "closet-llm-cls-001",
+                wing: "test",
+                room: "general",
+                content: "content for classify coverage test",
+                source_file: "test.rs",
+                chunk_index: 0,
+                added_by: "test",
+                ingest_mode: "projects",
+                source_mtime: None,
+            },
+        )
+        .await
+        .expect("add_drawer must succeed for classify test");
+
+        let result = run_with_provider(
+            &connection,
+            None,
+            0,
+            false, // not dry_run — exercises the classify path
+            &OkProvider,
+            "mock-ok",
+            "mock-model",
+        )
+        .await;
+        assert!(result.is_ok(), "live run with one drawer must return Ok");
+        // Pair assertion: OkProvider always succeeds, so no error must be returned.
+        assert!(result.err().is_none(), "classify must not produce an error");
+    }
+
+    #[tokio::test]
+    async fn run_with_provider_sample_limit_covers_assertion_branch() {
+        // Passing sample > 0 exercises the sample-limit branch of the stats assertion.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        let result = run_with_provider(
+            &connection,
+            None,
+            1, // sample=1 → assertion uses `sample` rather than usize::MAX
+            true,
+            &OkProvider,
+            "mock-ok",
+            "mock-model",
+        )
+        .await;
+        assert!(result.is_ok(), "dry-run with sample=1 must return Ok");
+        // Pair assertion: sample branch must not cause an assertion failure.
+        assert!(
+            result.err().is_none(),
+            "no error must be returned with sample=1"
+        );
     }
 }

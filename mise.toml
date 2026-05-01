@@ -10,12 +10,13 @@ npm.package_manager = "bun"
 actionlint = "1.7"
 bun = "1"
 gh = "2"
-hk = "1.43.0"
+hk = "1.44.1"
 jq = "latest"
 node = "24"
 pkl = "0.31"
 taplo = "0.10"
 usage = "latest"
+zizmor = "1"
 
 [hooks]
 enter = ["hk install --mise"]

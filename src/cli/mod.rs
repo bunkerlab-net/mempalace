@@ -73,6 +73,16 @@ pub enum Command {
         /// LLM API key (for anthropic or authenticated openai-compat endpoints)
         #[arg(long)]
         llm_api_key: Option<String>,
+
+        /// Bypass the consent prompt when an external LLM is configured via an
+        /// environment-variable API key (use in CI / non-interactive runs)
+        #[arg(long)]
+        accept_external_llm: bool,
+
+        /// Automatically start mining after init without prompting
+        /// (separate from --yes which only auto-accepts the init summary)
+        #[arg(long)]
+        auto_mine: bool,
     },
 
     /// Mine files into the palace
@@ -228,6 +238,14 @@ pub enum Command {
         /// Skip the confirmation prompt (non-interactive / CI mode)
         #[arg(long, short = 'y')]
         skip_confirm: bool,
+        /// Override an aborting truncation safety guard after independently verifying the palace size.
+        ///
+        /// Use only when the guard actually aborts — e.g. the database count exceeds the
+        /// extracted 10,000 drawers, or the database count cannot be read at the 10,000
+        /// extraction limit. Pass this flag only after confirming the palace genuinely
+        /// holds the reported count; it does not need to be set when the guard is silent.
+        #[arg(long)]
+        confirm_truncation_ok: bool,
     },
 
     /// Run as MCP server (JSON-RPC over stdio)

@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 use turso::Connection;
 
-use crate::config::{ProjectConfig, RoomConfig};
-use crate::error::Result;
+use crate::config::{ProjectConfig, RoomConfig, normalize_wing_name};
+use crate::error::{Error, Result};
 use crate::palace::chunker::chunk_text;
 use crate::palace::drawer;
 use crate::palace::room_detect::{detect_room, is_skip_dir};
@@ -28,6 +28,12 @@ pub struct MineParams {
     /// entries are skipped — only regular files are added. Ignored when
     /// `respect_gitignore` is `false` since all paths are already included.
     pub include_ignored_paths: Vec<std::path::PathBuf>,
+    /// Pre-scanned file list from a prior `scan_project_with_opts` call.
+    ///
+    /// When `Some`, the scan step inside `mine()` is skipped entirely so the
+    /// directory walk is not repeated. `init::run` passes this to avoid
+    /// double-walking after computing the file-count estimate.
+    pub pre_scanned_files: Option<Vec<std::path::PathBuf>>,
 }
 
 /// Files larger than this are skipped — prevents OOM on huge files.
@@ -454,7 +460,68 @@ async fn mine_process_file_one(
     Ok(Some((drawers_added, room, hall, entity_count)))
 }
 
-/// Process all files in the mine loop. Returns `(drawers_total, files_skipped, files_unreadable_or_too_short, room_counts)`.
+/// Wrap a path in single quotes for safe shell re-use in a resume hint.
+///
+/// Single quotes in the path itself are escaped via `'"'"'`. Called by
+/// `mine_process_files` when Ctrl-C is detected to print a safe resume command.
+fn mine_shell_quote(path_str: &str) -> String {
+    assert!(
+        !path_str.is_empty(),
+        "mine_shell_quote: path must not be empty"
+    );
+    let escaped = path_str.replace('\'', "'\"'\"'");
+    format!("'{escaped}'")
+}
+
+/// Reconstruct the user's `mempalace mine` invocation from `opts` and
+/// `project_dir`, suitable for printing in the Ctrl-C resume hint.
+///
+/// Only non-default flags are emitted so the printed command stays close to
+/// what the user originally typed. Each path component is escaped via
+/// [`mine_shell_quote`] so the line round-trips through `sh -c` even when
+/// paths contain spaces or single quotes. Called by `mine_process_files`.
+fn mine_resume_command(project_dir: &Path, opts: &MineParams) -> String {
+    let mut parts: Vec<String> = vec![
+        "mempalace".to_string(),
+        "mine".to_string(),
+        mine_shell_quote(&project_dir.display().to_string()),
+    ];
+    if let Some(wing) = opts.wing.as_deref()
+        && !wing.is_empty()
+    {
+        parts.push("--wing".to_string());
+        parts.push(mine_shell_quote(wing));
+    }
+    // Default agent is "mempalace" — only emit when the user overrode it.
+    if !opts.agent.is_empty() && opts.agent != "mempalace" {
+        parts.push("--agent".to_string());
+        parts.push(mine_shell_quote(&opts.agent));
+    }
+    if opts.limit > 0 {
+        parts.push("--limit".to_string());
+        parts.push(opts.limit.to_string());
+    }
+    if opts.dry_run {
+        parts.push("--dry-run".to_string());
+    }
+    // CLI default for respect_gitignore is true; emit `--no-gitignore` only
+    // when the user disabled gitignore filtering.
+    if !opts.respect_gitignore {
+        parts.push("--no-gitignore".to_string());
+    }
+    for include_path in &opts.include_ignored_paths {
+        parts.push("--include-ignored".to_string());
+        parts.push(mine_shell_quote(&include_path.display().to_string()));
+    }
+    parts.join(" ")
+}
+
+/// Process all files in the mine loop.
+///
+/// Returns `(drawers_total, files_skipped, files_unreadable_or_too_short, room_counts)`.
+/// Checks `ctrl_c_flag` before each file; on interrupt prints a resume hint and
+/// returns [`Error::Interrupted`] so RAII guards (the mine lock) release on the
+/// unwind. The CLI translates the variant into POSIX exit code 130 after cleanup.
 async fn mine_process_files(
     connection: &Connection,
     files: &[PathBuf],
@@ -462,13 +529,33 @@ async fn mine_process_files(
     rooms: &[crate::config::RoomConfig],
     project_dir: &Path,
     opts: &MineParams,
+    ctrl_c_flag: &std::sync::atomic::AtomicBool,
 ) -> Result<(usize, usize, usize, HashMap<String, usize>)> {
+    assert!(
+        !wing.is_empty(),
+        "mine_process_files: wing must not be empty"
+    );
     let mut drawers_total: usize = 0;
     let mut files_skipped: usize = 0;
     let mut files_unreadable_or_too_short: usize = 0;
     let mut room_counts: HashMap<String, usize> = HashMap::new();
+    let mut last_file: Option<&Path> = None;
 
     for (i, filepath) in files.iter().enumerate() {
+        if ctrl_c_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            let files_processed = i - files_skipped - files_unreadable_or_too_short;
+            let last = last_file.map_or("-".to_string(), |p| p.display().to_string());
+            eprintln!(
+                "\nInterrupted after {files_processed} file(s), {drawers_total} drawer(s). \
+                 Last: {last}"
+            );
+            eprintln!("Resume with: {}", mine_resume_command(project_dir, opts));
+            // Bubble out as a typed error so MineGuard::drop runs on the unwind.
+            // main.rs maps Error::Interrupted to POSIX exit code 130 explicitly,
+            // matching the prior std::process::exit(130) behaviour for the user.
+            return Err(Error::Interrupted);
+        }
+
         let source_file = filepath.to_string_lossy().to_string();
 
         // Always check for duplicates so dry runs report accurate skip counts.
@@ -484,6 +571,7 @@ async fn mine_process_files(
             }
             Some((drawers_added, room, hall, entity_count)) => {
                 drawers_total += drawers_added;
+                last_file = Some(filepath.as_path());
                 *room_counts.entry(room.clone()).or_insert(0) += 1;
                 let file_name = filepath.file_name().unwrap_or_default().to_string_lossy();
                 let hall_label = hall.as_deref().unwrap_or("-");
@@ -540,19 +628,19 @@ fn mine_load_config(project_dir: &Path, override_wing: Option<&str>) -> Result<P
         }
         trimmed
     } else {
-        let inferred = project_dir
+        let raw = project_dir
             .file_name()
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned();
-        if inferred.is_empty() {
+        if raw.is_empty() {
             return Err(crate::error::Error::Other(format!(
                 "cannot infer wing name: {} has no basename; \
                  add mempalace.yaml with an explicit wing name",
                 project_dir.display()
             )));
         }
-        inferred
+        normalize_wing_name(&raw)
     };
     eprintln!(
         "  No mempalace.yaml/.yml found in {} \
@@ -606,6 +694,165 @@ fn mine_apply_include_ignored(
     scanned
 }
 
+/// Install a Ctrl-C handler that flips an atomic flag on first signal.
+///
+/// `mine_process_files` polls the returned flag once per file and aborts the
+/// loop cleanly when it is set. If `tokio::signal::ctrl_c` fails to register
+/// (e.g. inside a runtime that has already taken the SIGINT slot), the flag
+/// stays `false` and the miner runs to completion without interrupt
+/// support — a registration error must never falsely mark the miner as
+/// interrupted, since that would abort every mine on the affected runtime.
+/// Called by [`mine`] to keep that function under the 70-line guideline.
+fn mine_install_ctrl_c_handler() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    let ctrl_c_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag_clone = ctrl_c_flag.clone();
+    tokio::spawn(async move {
+        match tokio::signal::ctrl_c().await {
+            Ok(()) => {
+                flag_clone.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            Err(error) => {
+                eprintln!(
+                    "  warning: Ctrl-C handler registration failed; mine will run without interrupt support: {error}"
+                );
+            }
+        }
+    });
+    ctrl_c_flag
+}
+
+/// Rebase pre-scanned file paths onto the canonicalised `project_dir`.
+///
+/// Callers (`init::run` → `app::run_mine_after_init`) scan with their own
+/// idea of the project root — which may differ from [`mine`]'s canonical
+/// `project_dir` if the caller passed a relative or symlinked path.
+/// `detect_hall` later relies on `strip_prefix(project_dir)` to locate the
+/// hall name, so any path that does not share the canonical prefix would
+/// silently lose its hall tag.
+///
+/// Strategy: try the cheap path first (already starts with `project_dir`),
+/// fall back to canonicalising each candidate, and drop entries that still
+/// don't land under `project_dir` after canonicalisation. Files that have
+/// been deleted between scan and mine canonicalise-fail and are dropped.
+/// Called by [`mine`] when `MineParams::pre_scanned_files` is `Some`.
+fn mine_canonicalise_pre_scanned(files: &[PathBuf], project_dir: &Path) -> Vec<PathBuf> {
+    assert!(
+        project_dir.is_absolute(),
+        "mine_canonicalise_pre_scanned: project_dir must be canonical (absolute)"
+    );
+    // Bound: file lists from `scan_project_with_opts` are already capped at
+    // the OS's directory traversal limits; this assertion documents the
+    // expectation rather than enforcing a hard bound.
+    assert!(
+        files.len() <= 10_000_000,
+        "mine_canonicalise_pre_scanned: file count must be bounded"
+    );
+
+    let mut result: Vec<PathBuf> = Vec::with_capacity(files.len());
+    for path in files {
+        if path.starts_with(project_dir) {
+            result.push(path.clone());
+            continue;
+        }
+        let Ok(canonical) = path.canonicalize() else {
+            continue;
+        };
+        if canonical.starts_with(project_dir) {
+            result.push(canonical);
+        }
+    }
+    // Postcondition: result cannot grow beyond the input list.
+    debug_assert!(result.len() <= files.len());
+    result
+}
+
+/// Compute topic tunnels for `wing` after mining completes.
+///
+/// Reads `topics_by_wing` from the global registry and calls
+/// `graph::topic_tunnels_for_wing`. Degrades quietly on error so a
+/// registry issue never aborts a mine. Called by [`mine`].
+async fn mine_run_topic_tunnels(connection: &Connection, wing: &str) {
+    assert!(
+        !wing.is_empty(),
+        "mine_run_topic_tunnels: wing must not be empty"
+    );
+
+    let topics_by_wing = crate::palace::known_entities::get_topics_by_wing();
+    // Normalise the lookup key — older registries (or rare write paths that
+    // bypass the normalisation in `add_to_known_entities_set_wing_topics`) may
+    // contain raw wing names; mirroring `graph.rs`'s read-side normalisation
+    // keeps this function tolerant of both shapes.
+    let normalized_wing = crate::config::normalize_wing_name(wing);
+    if !topics_by_wing.contains_key(&normalized_wing) {
+        return;
+    }
+    let min_count = crate::config::MempalaceConfig::topic_tunnel_min_count();
+    match crate::palace::graph::topic_tunnels_for_wing(
+        connection,
+        wing,
+        &topics_by_wing,
+        min_count,
+        "shared topic",
+    )
+    .await
+    {
+        Ok(count) if count > 0 => {
+            println!("\n  Topic tunnels: +{count} cross-wing link(s)");
+        }
+        Ok(_) => {}
+        Err(error) => {
+            eprintln!("\n  WARNING: topic tunnel computation skipped — {error}");
+        }
+    }
+}
+
+/// Resolve the canonical wing slug and the room list `mine` will use, given
+/// the user-supplied [`MineParams`] and a canonicalised `project_dir`.
+///
+/// This helper exists so [`mine`] stays under the 70-line guideline. It handles:
+/// 1. Trimming the `--wing` override (whitespace-only counts as no override).
+/// 2. Loading the project config (yaml lookup → basename fallback synth).
+/// 3. Canonicalising the resolved wing through [`normalize_wing_name`] so a
+///    hand-edited yaml `wing: my-proj` and a CLI `--wing my-proj` produce
+///    the same slug as the basename fallback (`my_proj`). Without this, the
+///    `topics_by_wing` registry would never find a partner for the wing.
+/// 4. Synthesising a default `general` room when the yaml supplied an empty
+///    rooms list — `detect_room`'s precondition forbids empty room slices.
+fn mine_resolve_wing_and_rooms(
+    project_dir: &Path,
+    opts: &MineParams,
+) -> Result<(String, Vec<crate::config::RoomConfig>)> {
+    let normalized_wing: Option<String> = opts
+        .wing
+        .as_deref()
+        .map(str::trim)
+        .filter(|w| !w.is_empty())
+        .map(str::to_string);
+
+    let config = mine_load_config(project_dir, normalized_wing.as_deref())?;
+
+    let wing_resolved = normalized_wing.as_deref().unwrap_or(&config.wing);
+    let wing_owned = normalize_wing_name(wing_resolved);
+    assert!(
+        !wing_owned.is_empty(),
+        "mine_resolve_wing_and_rooms: canonical wing must not be empty"
+    );
+
+    let mut rooms = config.rooms;
+    if rooms.is_empty() {
+        rooms.push(crate::config::RoomConfig {
+            name: "general".to_string(),
+            description: String::new(),
+            keywords: vec![],
+        });
+    }
+    assert!(
+        !rooms.is_empty(),
+        "mine_resolve_wing_and_rooms: rooms must be non-empty after fallback"
+    );
+    Ok((wing_owned, rooms))
+}
+
 /// Mine a project directory into the palace.
 pub async fn mine(connection: &Connection, project_dir: &Path, opts: &MineParams) -> Result<()> {
     if !project_dir.is_dir() {
@@ -622,19 +869,8 @@ pub async fn mine(connection: &Connection, project_dir: &Path, opts: &MineParams
         ))
     })?;
 
-    // Normalize the wing override: trim whitespace and treat empty/whitespace-only
-    // values as no override, falling back to config or directory basename.
-    let normalized_wing: Option<String> = opts
-        .wing
-        .as_deref()
-        .map(str::trim)
-        .filter(|w| !w.is_empty())
-        .map(str::to_string);
-
-    let config = mine_load_config(&project_dir, normalized_wing.as_deref())?;
-
-    let wing = normalized_wing.as_deref().unwrap_or(&config.wing);
-    let mut rooms = config.rooms;
+    let (wing_owned, mut rooms) = mine_resolve_wing_and_rooms(&project_dir, opts)?;
+    let wing: &str = &wing_owned;
     if rooms.is_empty() {
         // Empty rooms list in mempalace.yaml would violate detect_room's precondition;
         // fall back to a single general room so mining can proceed.
@@ -644,7 +880,17 @@ pub async fn mine(connection: &Connection, project_dir: &Path, opts: &MineParams
             keywords: vec![],
         });
     }
-    let scanned = scan_project_with_opts(&project_dir, opts.respect_gitignore);
+
+    // Use pre-scanned files when provided (e.g. passed from init) to avoid a
+    // second walk. Pre-scanned paths are rebased onto `project_dir` so
+    // `detect_hall`'s `strip_prefix(project_dir)` lookup matches even when
+    // the caller scanned with a non-canonical directory (relative path,
+    // symlinked root). Without this the ingest would silently drop hall
+    // metadata for every file because `strip_prefix` would return `None`.
+    let scanned = match opts.pre_scanned_files.as_ref() {
+        Some(files) => mine_canonicalise_pre_scanned(files, &project_dir),
+        None => scan_project_with_opts(&project_dir, opts.respect_gitignore),
+    };
     let all_files = mine_apply_include_ignored(scanned, &opts.include_ignored_paths);
     let files: Vec<_> = if opts.limit == 0 {
         all_files
@@ -654,8 +900,23 @@ pub async fn mine(connection: &Connection, project_dir: &Path, opts: &MineParams
 
     mine_print_header(wing, &rooms, files.len(), opts.dry_run);
 
+    let ctrl_c_flag = mine_install_ctrl_c_handler();
+
     let (drawers_total, files_skipped, files_unreadable_or_too_short, room_counts) =
-        mine_process_files(connection, &files, wing, &rooms, &project_dir, opts).await?;
+        mine_process_files(
+            connection,
+            &files,
+            wing,
+            &rooms,
+            &project_dir,
+            opts,
+            &ctrl_c_flag,
+        )
+        .await?;
+
+    if !opts.dry_run {
+        mine_run_topic_tunnels(connection, wing).await;
+    }
 
     mine_print_summary(
         opts.dry_run,
@@ -853,6 +1114,40 @@ mod tests {
                 .err()
                 .is_some_and(|e| e.to_string().contains("already running")),
             "error message must mention 'already running'"
+        );
+    }
+
+    #[test]
+    fn acquire_mine_lock_different_lock_dirs_do_not_contend() {
+        // Locks in different directories must not block each other — two distinct
+        // palaces can be mined concurrently.
+        let dir_a = tempfile::tempdir().expect("tempdir A must succeed");
+        let dir_b = tempfile::tempdir().expect("tempdir B must succeed");
+
+        let guard_a = acquire_mine_lock(dir_a.path()).expect("first palace lock must succeed");
+        let guard_b = acquire_mine_lock(dir_b.path()).expect("second palace lock must not contend");
+
+        // Positive space: both lockfiles must exist simultaneously.
+        assert!(
+            dir_a.path().join("mine.lock").exists(),
+            "mine.lock must exist in dir_a while guard_a is held"
+        );
+        assert!(
+            dir_b.path().join("mine.lock").exists(),
+            "mine.lock must exist in dir_b while guard_b is held"
+        );
+
+        drop(guard_a);
+        drop(guard_b);
+
+        // Negative space: both lockfiles must be removed after guards are dropped.
+        assert!(
+            !dir_a.path().join("mine.lock").exists(),
+            "mine.lock must be removed from dir_a after drop"
+        );
+        assert!(
+            !dir_b.path().join("mine.lock").exists(),
+            "mine.lock must be removed from dir_b after drop"
         );
     }
 
@@ -1062,15 +1357,17 @@ mod tests {
 
     #[test]
     fn mine_load_config_synthesises_defaults_when_no_config() {
-        // No config files present — defaults use the directory basename as wing.
+        // No config files present — defaults use the normalized directory basename as wing.
+        // Normalization lowercases and replaces spaces/hyphens with underscores.
         let dir = tempfile::tempdir().expect("tempdir should be created");
         let config = mine_load_config(dir.path(), None).expect("should synthesise defaults");
-        let expected_wing = dir
+        let raw_basename = dir
             .path()
             .file_name()
             .unwrap_or_default()
             .to_string_lossy()
-            .to_string();
+            .into_owned();
+        let expected_wing = normalize_wing_name(&raw_basename);
         assert_eq!(config.wing, expected_wing);
         assert_eq!(config.rooms.len(), 1);
         assert_eq!(config.rooms[0].name, "general");
@@ -1161,6 +1458,175 @@ mod tests {
         );
     }
 
+    // --- mine_resume_command ---
+
+    fn resume_opts() -> MineParams {
+        // Default-shaped MineParams for the resume-command tests so each test
+        // toggles exactly the fields under test.
+        MineParams {
+            wing: None,
+            agent: "mempalace".to_string(),
+            limit: 0,
+            dry_run: false,
+            respect_gitignore: true,
+            include_ignored_paths: vec![],
+            pre_scanned_files: None,
+        }
+    }
+
+    #[test]
+    fn mine_resume_command_emits_only_path_when_all_defaults() {
+        // With defaults the resume hint must reduce to the bare command and
+        // path so the printed line stays close to what the user typed.
+        let project = std::path::Path::new("/tmp/proj");
+        let command = mine_resume_command(project, &resume_opts());
+        assert_eq!(command, "mempalace mine '/tmp/proj'");
+    }
+
+    #[test]
+    fn mine_resume_command_includes_wing_override() {
+        // A user-supplied --wing must round-trip verbatim (single-quoted) so
+        // re-running the printed command lands in the same wing.
+        let project = std::path::Path::new("/tmp/proj");
+        let mut opts = resume_opts();
+        opts.wing = Some("my-proj".to_string());
+        let command = mine_resume_command(project, &opts);
+        assert!(
+            command.contains("--wing 'my-proj'"),
+            "wing override must be preserved verbatim, got {command:?}"
+        );
+    }
+
+    #[test]
+    fn mine_resume_command_includes_non_default_flags() {
+        // dry-run, limit, agent, no-gitignore, and include-ignored must all
+        // round-trip when set to non-default values.
+        let project = std::path::Path::new("/tmp/proj");
+        let mut opts = resume_opts();
+        opts.agent = "diary-agent".to_string();
+        opts.limit = 100;
+        opts.dry_run = true;
+        opts.respect_gitignore = false;
+        opts.include_ignored_paths = vec![PathBuf::from("/tmp/proj/dist/bundle.js")];
+        let command = mine_resume_command(project, &opts);
+        assert!(
+            command.contains("--agent 'diary-agent'"),
+            "agent override must be preserved, got {command:?}"
+        );
+        assert!(
+            command.contains("--limit 100"),
+            "limit must be preserved, got {command:?}"
+        );
+        assert!(
+            command.contains("--dry-run"),
+            "dry-run must be preserved, got {command:?}"
+        );
+        assert!(
+            command.contains("--no-gitignore"),
+            "no-gitignore must be preserved, got {command:?}"
+        );
+        assert!(
+            command.contains("--include-ignored '/tmp/proj/dist/bundle.js'"),
+            "include-ignored path must be preserved, got {command:?}"
+        );
+    }
+
+    #[test]
+    fn mine_resume_command_skips_default_agent_and_limit() {
+        // Pair: when agent stays at its default and limit==0 the resume hint
+        // must NOT emit those flags so the output stays minimal.
+        let project = std::path::Path::new("/tmp/proj");
+        let opts = resume_opts();
+        let command = mine_resume_command(project, &opts);
+        assert!(
+            !command.contains("--agent"),
+            "default agent must not be emitted, got {command:?}"
+        );
+        assert!(
+            !command.contains("--limit"),
+            "limit==0 must not be emitted, got {command:?}"
+        );
+        assert!(
+            !command.contains("--no-gitignore"),
+            "default gitignore behaviour must not be emitted, got {command:?}"
+        );
+    }
+
+    // --- mine_canonicalise_pre_scanned ---
+
+    #[test]
+    fn mine_canonicalise_pre_scanned_passes_through_canonical_paths() {
+        // Happy path: every file already lives under canonical project_dir.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = dir.path().canonicalize().expect("canonicalize");
+        let file = project.join("a.rs");
+        std::fs::write(&file, "fn a() {}").expect("write");
+        let inputs = vec![file.clone()];
+        let result = mine_canonicalise_pre_scanned(&inputs, &project);
+        assert_eq!(result, vec![file], "canonical paths must pass through");
+    }
+
+    #[test]
+    fn mine_canonicalise_pre_scanned_drops_paths_outside_project() {
+        // Negative space: a path under a sibling directory must be dropped so
+        // detect_hall does not see foreign files.
+        let dir_a = tempfile::tempdir().expect("tempdir a");
+        let dir_b = tempfile::tempdir().expect("tempdir b");
+        let project = dir_a.path().canonicalize().expect("canonicalize a");
+        let foreign = dir_b
+            .path()
+            .canonicalize()
+            .expect("canonicalize b")
+            .join("stranger.rs");
+        std::fs::write(&foreign, "fn stranger() {}").expect("write");
+        let inputs = vec![foreign];
+        let result = mine_canonicalise_pre_scanned(&inputs, &project);
+        assert!(
+            result.is_empty(),
+            "files outside project_dir must be dropped"
+        );
+    }
+
+    #[test]
+    fn mine_canonicalise_pre_scanned_canonicalises_relative_input() {
+        // A symlinked or relative path must be canonicalised so it lands under
+        // canonical project_dir. This is the bug class the fix targets: a
+        // caller scanning with `./project` produces relative paths that
+        // wouldn't otherwise match the canonicalised project_dir prefix.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = dir.path().canonicalize().expect("canonicalize");
+        let file_canonical = project.join("file.rs");
+        std::fs::write(&file_canonical, "fn x() {}").expect("write");
+        // Synthesize a non-canonical input: project_dir/./file.rs.
+        let non_canonical = project.join(".").join("file.rs");
+        let inputs = vec![non_canonical];
+        let result = mine_canonicalise_pre_scanned(&inputs, &project);
+        assert_eq!(
+            result.len(),
+            1,
+            "non-canonical-but-equivalent path must be retained"
+        );
+        // Pair assertion: the retained path either starts with project_dir
+        // verbatim (cheap path matched) or canonicalises to do so.
+        assert!(
+            result[0].starts_with(&project),
+            "retained path must live under project_dir"
+        );
+    }
+
+    #[test]
+    fn mine_canonicalise_pre_scanned_drops_missing_files() {
+        // Files that vanish between scan and mine canonicalise-fail; they
+        // must be dropped silently so the mine loop does not blow up on a
+        // path that no longer exists.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = dir.path().canonicalize().expect("canonicalize");
+        let phantom = std::path::PathBuf::from("/nonexistent/phantom.rs");
+        let inputs = vec![phantom];
+        let result = mine_canonicalise_pre_scanned(&inputs, &project);
+        assert!(result.is_empty(), "non-existent paths must be dropped");
+    }
+
     // --- mine() wing normalization ---
 
     const CONFIG_YAML: &str = "wing: config-wing\nrooms:\n  - name: general\n    description: ''\n";
@@ -1173,6 +1639,7 @@ mod tests {
             dry_run: false,
             respect_gitignore: false,
             include_ignored_paths: vec![],
+            pre_scanned_files: None,
         }
     }
 
@@ -1205,7 +1672,9 @@ mod tests {
     #[tokio::test]
     async fn mine_wing_whitespace_only_falls_back_to_config() {
         // A whitespace-only --wing must be treated as no override, so the
-        // config file's wing ("config-wing") is used instead.
+        // config file's wing ("config-wing") is used instead — and then
+        // canonicalised to the normalised slug "config_wing" so it matches
+        // the basename / topics-by-wing convention.
         let dir = tempfile::tempdir().expect("tempdir should be created");
         std::fs::write(dir.path().join("mempalace.yaml"), CONFIG_YAML)
             .expect("write config should succeed");
@@ -1226,15 +1695,15 @@ mod tests {
         assert_eq!(rows.len(), 1, "must have exactly one distinct wing");
         let stored_wing: String = rows[0].get(0).expect("wing column must be readable");
         assert_eq!(
-            stored_wing, "config-wing",
-            "whitespace-only wing must fall back to config"
+            stored_wing, "config_wing",
+            "whitespace-only wing must fall back to config and canonicalise"
         );
     }
 
     #[tokio::test]
     async fn mine_wing_empty_falls_back_to_config() {
         // An empty --wing must be treated as no override, so the config file's
-        // wing ("config-wing") is used instead.
+        // wing ("config-wing") is used and canonicalised to "config_wing".
         let dir = tempfile::tempdir().expect("tempdir should be created");
         std::fs::write(dir.path().join("mempalace.yaml"), CONFIG_YAML)
             .expect("write config should succeed");
@@ -1255,8 +1724,37 @@ mod tests {
         assert_eq!(rows.len(), 1, "must have exactly one distinct wing");
         let stored_wing: String = rows[0].get(0).expect("wing column must be readable");
         assert_eq!(
-            stored_wing, "config-wing",
-            "empty wing must fall back to config"
+            stored_wing, "config_wing",
+            "empty wing must fall back to config and canonicalise"
+        );
+    }
+
+    #[tokio::test]
+    async fn mine_wing_override_canonicalises_hyphen_to_underscore() {
+        // Regression: a CLI override like `--wing my-proj` must be canonicalised
+        // through `normalize_wing_name` so drawers land in the same wing as the
+        // basename fallback / `topics_by_wing` registry. Without this, topic
+        // tunnels never find a partner because the registry key never matches.
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        std::fs::write(
+            dir.path().join("notes.txt"),
+            "rust programming language provides memory safety without a garbage collector",
+        )
+        .expect("write notes.txt should succeed");
+
+        let (_db, connection) = crate::test_helpers::test_db().await;
+        mine(&connection, dir.path(), &mine_opts(Some("my-proj")))
+            .await
+            .expect("mine must succeed with hyphenated wing");
+
+        let rows = crate::db::query_all(&connection, "SELECT DISTINCT wing FROM drawers", ())
+            .await
+            .expect("query must succeed");
+        assert_eq!(rows.len(), 1, "must have exactly one distinct wing");
+        let stored_wing: String = rows[0].get(0).expect("wing column must be readable");
+        assert_eq!(
+            stored_wing, "my_proj",
+            "hyphenated CLI override must canonicalise"
         );
     }
 
@@ -1510,6 +2008,7 @@ mod tests {
             dry_run: false,
             respect_gitignore: false,
             include_ignored_paths: vec![],
+            pre_scanned_files: None,
         };
 
         mine(&connection, dir.path(), &opts)
@@ -1554,6 +2053,7 @@ mod tests {
             dry_run: false,
             respect_gitignore: false,
             include_ignored_paths: vec![],
+            pre_scanned_files: None,
         };
 
         mine(&connection, dir.path(), &opts)
@@ -1616,6 +2116,7 @@ mod tests {
             dry_run: false,
             respect_gitignore: false,
             include_ignored_paths: vec![],
+            pre_scanned_files: None,
         };
 
         // Must not panic even when entity_count > 0 triggers the extra println.
@@ -1816,6 +2317,7 @@ mod tests {
             dry_run: false,
             respect_gitignore: false,
             include_ignored_paths: vec![],
+            pre_scanned_files: None,
         };
 
         let result = mine(&connection, &file_path, &opts).await;
@@ -1848,6 +2350,7 @@ mod tests {
             dry_run: true,
             respect_gitignore: false,
             include_ignored_paths: vec![],
+            pre_scanned_files: None,
         };
 
         mine(&connection, dir.path(), &opts)

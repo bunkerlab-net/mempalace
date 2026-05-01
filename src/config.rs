@@ -176,6 +176,24 @@ pub(crate) fn expand_tilde(path: &Path) -> PathBuf {
     result
 }
 
+/// Normalize a directory name into a wing slug.
+///
+/// Lowercases the name and replaces spaces and hyphens with underscores.
+/// This is the single canonical rule used by every wing-slug producer
+/// (`miner`, `convo_miner`, `room_detect`, `palace_graph`, `cli::init`) — matches
+/// `mempalace/config.py::normalize_wing_name` verbatim.
+pub fn normalize_wing_name(name: &str) -> String {
+    assert!(
+        !name.is_empty(),
+        "normalize_wing_name: name must not be empty"
+    );
+    let result = name.to_lowercase().replace([' ', '-'], "_");
+    assert!(!result.is_empty());
+    assert!(!result.contains(' '));
+    assert!(!result.contains('-'));
+    result
+}
+
 /// Path to the global config file.
 pub fn config_path() -> PathBuf {
     config_dir().join("config.json")
@@ -297,6 +315,21 @@ impl MempalaceConfig {
             "palace_path must not be empty"
         );
         self.palace_path.clone()
+    }
+
+    /// Minimum shared-topic count required before two wings get a topic tunnel.
+    ///
+    /// Resolution order: `MEMPALACE_TOPIC_TUNNEL_MIN_COUNT` env var → `1` (default).
+    /// Values below 1 are clamped to 1. Returns a `usize` so callers can
+    /// pass it directly to `compute_topic_tunnels` without casting.
+    pub fn topic_tunnel_min_count() -> usize {
+        if let Ok(value) = std::env::var("MEMPALACE_TOPIC_TUNNEL_MIN_COUNT")
+            && let Ok(parsed) = value.trim().parse::<usize>()
+        {
+            return parsed.max(1);
+        }
+        // Default: a single shared topic creates a tunnel.
+        1
     }
 }
 
@@ -1440,6 +1473,45 @@ rooms:
         assert!(!config.entity_languages.is_empty());
     }
 
+    // -- normalize_wing_name --------------------------------------------------
+
+    #[test]
+    fn normalize_wing_name_lowercases() {
+        // Uppercase letters must be folded to lowercase.
+        assert_eq!(normalize_wing_name("MyProject"), "myproject");
+        assert_eq!(normalize_wing_name("SCREAMING"), "screaming");
+    }
+
+    #[test]
+    fn normalize_wing_name_replaces_hyphens_with_underscores() {
+        // Hyphens must become underscores — the canonical rule from Python.
+        assert_eq!(normalize_wing_name("mempalace-rs"), "mempalace_rs");
+        assert_eq!(normalize_wing_name("my-cool-project"), "my_cool_project");
+    }
+
+    #[test]
+    fn normalize_wing_name_replaces_spaces_with_underscores() {
+        // Spaces must become underscores.
+        assert_eq!(normalize_wing_name("my project"), "my_project");
+        assert_eq!(normalize_wing_name("hello world"), "hello_world");
+    }
+
+    #[test]
+    fn normalize_wing_name_mixed_input() {
+        // Mixed case, hyphens, and spaces all normalized in one pass.
+        let result = normalize_wing_name("My-Cool Project");
+        assert_eq!(result, "my_cool_project");
+        assert!(!result.contains('-'));
+        assert!(!result.contains(' '));
+    }
+
+    #[test]
+    fn normalize_wing_name_already_normalized_is_idempotent() {
+        // An already-slugged name must be returned unchanged.
+        let slug = "my_project";
+        assert_eq!(normalize_wing_name(slug), slug);
+    }
+
     #[test]
     fn migrate_skipped_when_mempal_dir_set() {
         // When MEMPAL_DIR (alias) is set, migration must be skipped — same behaviour as MEMPALACE_DIR.
@@ -1465,6 +1537,79 @@ rooms:
                 assert!(legacy.join("config.json").exists());
             },
         );
+    }
+
+    // -- topic_tunnel_min_count ------------------------------------------------
+
+    #[test]
+    fn topic_tunnel_min_count_unset_returns_one() {
+        // Without the env var the default minimum is one shared topic per pair.
+        temp_env::with_var("MEMPALACE_TOPIC_TUNNEL_MIN_COUNT", None::<&str>, || {
+            assert_eq!(
+                MempalaceConfig::topic_tunnel_min_count(),
+                1,
+                "unset env var must yield default of 1"
+            );
+        });
+    }
+
+    #[test]
+    fn topic_tunnel_min_count_valid_integer_round_trips() {
+        // A clean positive integer must round-trip into a usize.
+        temp_env::with_var("MEMPALACE_TOPIC_TUNNEL_MIN_COUNT", Some("3"), || {
+            let result = MempalaceConfig::topic_tunnel_min_count();
+            assert_eq!(result, 3, "\"3\" must parse to 3");
+            // Pair assertion: above the clamp floor.
+            assert!(result >= 1, "result must always be at least 1");
+        });
+    }
+
+    #[test]
+    fn topic_tunnel_min_count_zero_clamps_to_one() {
+        // Zero is below the meaningful floor of 1 — the function must clamp up.
+        temp_env::with_var("MEMPALACE_TOPIC_TUNNEL_MIN_COUNT", Some("0"), || {
+            assert_eq!(
+                MempalaceConfig::topic_tunnel_min_count(),
+                1,
+                "0 must clamp to 1 (a tunnel needs at least one shared topic)"
+            );
+        });
+    }
+
+    #[test]
+    fn topic_tunnel_min_count_invalid_string_falls_back_to_default() {
+        // Garbage input must fall through to the default rather than panic.
+        temp_env::with_var("MEMPALACE_TOPIC_TUNNEL_MIN_COUNT", Some("abc"), || {
+            assert_eq!(
+                MempalaceConfig::topic_tunnel_min_count(),
+                1,
+                "non-numeric env var must fall back to default 1"
+            );
+        });
+    }
+
+    #[test]
+    fn topic_tunnel_min_count_whitespace_falls_back_to_default() {
+        // Whitespace-only is not a number; treat as unset and use the default.
+        temp_env::with_var("MEMPALACE_TOPIC_TUNNEL_MIN_COUNT", Some("   "), || {
+            assert_eq!(
+                MempalaceConfig::topic_tunnel_min_count(),
+                1,
+                "whitespace-only env var must fall back to default 1"
+            );
+        });
+    }
+
+    #[test]
+    fn topic_tunnel_min_count_negative_falls_back_to_default() {
+        // Negative values cannot parse as `usize` — fall back to default rather than wrap.
+        temp_env::with_var("MEMPALACE_TOPIC_TUNNEL_MIN_COUNT", Some("-2"), || {
+            assert_eq!(
+                MempalaceConfig::topic_tunnel_min_count(),
+                1,
+                "negative env var must fall back to default 1"
+            );
+        });
     }
 
     #[test]
