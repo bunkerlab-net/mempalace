@@ -383,6 +383,13 @@ mod tests {
         fn name(&self) -> &'static str {
             "mock"
         }
+        #[allow(clippy::unnecessary_literal_bound)] // return type fixed by trait signature
+        fn endpoint(&self) -> &str {
+            ""
+        }
+        fn api_key_source(&self) -> Option<crate::llm::client::ApiKeySource> {
+            None
+        }
     }
 
     // ── regenerate_closets_parse_response ─────────────────────────────
@@ -469,6 +476,13 @@ mod tests {
         fn name(&self) -> &'static str {
             "mock-ok"
         }
+        #[allow(clippy::unnecessary_literal_bound)] // return type fixed by trait signature
+        fn endpoint(&self) -> &str {
+            ""
+        }
+        fn api_key_source(&self) -> Option<crate::llm::client::ApiKeySource> {
+            None
+        }
     }
 
     // Mock provider that returns an empty string — triggers the empty-response error path.
@@ -489,6 +503,13 @@ mod tests {
         }
         fn name(&self) -> &'static str {
             "mock-empty"
+        }
+        #[allow(clippy::unnecessary_literal_bound)] // return type fixed by trait signature
+        fn endpoint(&self) -> &str {
+            ""
+        }
+        fn api_key_source(&self) -> Option<crate::llm::client::ApiKeySource> {
+            None
         }
     }
 
@@ -738,6 +759,13 @@ mod tests {
         }
         fn name(&self) -> &'static str {
             "mock-empty-output"
+        }
+        #[allow(clippy::unnecessary_literal_bound)] // return type fixed by trait signature
+        fn endpoint(&self) -> &str {
+            ""
+        }
+        fn api_key_source(&self) -> Option<crate::llm::client::ApiKeySource> {
+            None
         }
     }
 

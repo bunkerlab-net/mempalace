@@ -154,6 +154,13 @@ mod tests {
         fn name(&self) -> &'static str {
             "mock-ok"
         }
+        #[allow(clippy::unnecessary_literal_bound)] // return type fixed by trait signature
+        fn endpoint(&self) -> &str {
+            ""
+        }
+        fn api_key_source(&self) -> Option<crate::llm::client::ApiKeySource> {
+            None
+        }
     }
 
     #[tokio::test]
@@ -175,6 +182,7 @@ mod tests {
             model: "llama3:8b".to_string(),
             endpoint: Some("http://localhost:11434/v1".to_string()),
             api_key: None,
+            accept_external_llm: false,
         };
         // Provider is not reachable in tests — run will log "LLM unavailable" and return Ok.
         let result = run(&connection, None, 0, true, &opts).await;

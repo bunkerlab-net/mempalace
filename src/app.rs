@@ -51,6 +51,7 @@ pub async fn run(cli: Cli) -> error::Result<()> {
             llm_model,
             llm_endpoint,
             llm_api_key,
+            accept_external_llm,
         } => {
             let llm_opts = cli::init::LlmOpts {
                 enabled: llm,
@@ -58,6 +59,7 @@ pub async fn run(cli: Cli) -> error::Result<()> {
                 model: llm_model,
                 endpoint: llm_endpoint,
                 api_key: llm_api_key,
+                accept_external_llm,
             };
             cli::init::run(&directory, yes, no_gitignore, &lang, &llm_opts)?;
         }
@@ -188,6 +190,8 @@ pub async fn run(cli: Cli) -> error::Result<()> {
                 model: llm_model,
                 endpoint: llm_endpoint,
                 api_key: llm_api_key,
+                // closet-llm is a direct command invocation — no consent gate needed.
+                accept_external_llm: false,
             };
             run_closet_llm(palace_override, wing, sample, dry_run, llm_opts).await?;
         }

@@ -73,6 +73,11 @@ pub enum Command {
         /// LLM API key (for anthropic or authenticated openai-compat endpoints)
         #[arg(long)]
         llm_api_key: Option<String>,
+
+        /// Bypass the consent prompt when an external LLM is configured via an
+        /// environment-variable API key (use in CI / non-interactive runs)
+        #[arg(long)]
+        accept_external_llm: bool,
     },
 
     /// Mine files into the palace

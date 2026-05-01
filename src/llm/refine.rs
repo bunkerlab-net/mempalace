@@ -799,6 +799,13 @@ mod tests {
         fn name(&self) -> &'static str {
             "mock"
         }
+        #[allow(clippy::unnecessary_literal_bound)] // return type fixed by trait signature
+        fn endpoint(&self) -> &str {
+            ""
+        }
+        fn api_key_source(&self) -> Option<crate::llm::client::ApiKeySource> {
+            None
+        }
     }
 
     struct FailProvider;
@@ -819,6 +826,13 @@ mod tests {
         }
         fn name(&self) -> &'static str {
             "fail"
+        }
+        #[allow(clippy::unnecessary_literal_bound)] // return type fixed by trait signature
+        fn endpoint(&self) -> &str {
+            ""
+        }
+        fn api_key_source(&self) -> Option<crate::llm::client::ApiKeySource> {
+            None
         }
     }
 

@@ -13,6 +13,7 @@ use std::path::Path;
 
 use crate::config::{ProjectConfig, RoomConfig};
 use crate::error::Result;
+use crate::llm::client::ApiKeySource;
 use crate::llm::{LlmProvider, collect_corpus_text, get_provider, refine_entities};
 use crate::palace::entities::DetectedEntity;
 use crate::palace::entity_confirm::confirm_entities;
@@ -43,6 +44,10 @@ pub struct LlmOpts {
     pub endpoint: Option<String>,
     /// API key (required for `anthropic`, optional for authenticated endpoints).
     pub api_key: Option<String>,
+    /// When `true`, bypass the interactive consent prompt that fires when an
+    /// external LLM provider is configured via an environment-variable API key.
+    /// Use in CI or non-interactive runs where you have already opted in.
+    pub accept_external_llm: bool,
 }
 
 impl Default for LlmOpts {
@@ -54,6 +59,7 @@ impl Default for LlmOpts {
             model: "gemma3:4b".to_string(),
             endpoint: None,
             api_key: None,
+            accept_external_llm: false,
         }
     }
 }
@@ -239,8 +245,8 @@ fn run_refine_entities(
 
 /// Build an [`LlmProvider`] from `opts` and probe its availability.
 ///
-/// Returns `None` when the provider is disabled or unreachable, logging the
-/// reason to stderr. Returns `Err` only for misconfigured provider names.
+/// Returns `None` when the provider is disabled, unreachable, or declined by
+/// the privacy consent gate. Returns `Err` only for misconfigured provider names.
 /// Called by [`run_refine_entities`].
 fn run_setup_llm(opts: &LlmOpts) -> Result<Option<Box<dyn LlmProvider>>> {
     if !opts.enabled {
@@ -263,9 +269,50 @@ fn run_setup_llm(opts: &LlmOpts) -> Result<Option<Box<dyn LlmProvider>>> {
         return Ok(None);
     }
 
+    if !run_setup_llm_consent_check(provider.as_ref(), opts)? {
+        return Ok(None);
+    }
+
     assert!(!provider.name().is_empty());
     eprintln!("  LLM: {} ({}) ready", opts.provider, opts.model);
     Ok(Some(provider))
+}
+
+/// Print the privacy warning and optionally prompt for consent when an external
+/// LLM is configured via an env-fallback API key.
+///
+/// Returns `false` if the user declines (or EOF), meaning the provider should
+/// be dropped. Returns `true` when consent is given or the gate does not apply.
+/// Called by [`run_setup_llm`] after confirming the provider is available.
+fn run_setup_llm_consent_check(provider: &dyn LlmProvider, opts: &LlmOpts) -> Result<bool> {
+    if !provider.is_external_service() {
+        return Ok(true);
+    }
+    eprintln!(
+        "  \u{26a0} {} is an EXTERNAL API. Your folder content will be sent to \
+         the provider during init. Pass --no-llm to keep init fully local.",
+        opts.provider
+    );
+    // Explicit --llm-api-key or --accept-external-llm means the user already opted in.
+    if provider.api_key_source() != Some(ApiKeySource::Env) || opts.accept_external_llm {
+        return Ok(true);
+    }
+    // Env-fallback key + external endpoint: require interactive confirmation.
+    print!(
+        "  Your API key was loaded from the environment (not --llm-api-key). \
+         Continue with external LLM? [y/N] "
+    );
+    std::io::stdout().flush()?;
+    let mut input = String::new();
+    let bytes_read = std::io::stdin().read_line(&mut input).unwrap_or(0);
+    if bytes_read == 0 || input.trim().to_lowercase() != "y" {
+        eprintln!(
+            "  Declined — falling back to heuristics-only. \
+             Pass --llm-api-key explicitly or --accept-external-llm to skip this prompt."
+        );
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 /// Print the interactive proceed prompt and return whether the user accepted.
@@ -653,6 +700,7 @@ mod tests {
             model: "some-model".to_string(),
             endpoint: None,
             api_key: None,
+            accept_external_llm: false,
         };
         let result = run_setup_llm(&opts);
         assert!(result.is_err(), "unknown provider must return Err");
@@ -668,12 +716,73 @@ mod tests {
                 model: "claude-haiku-4-5-20251001".to_string(),
                 endpoint: None,
                 api_key: None,
+                accept_external_llm: false,
             };
             let result = run_setup_llm(&opts).expect("unavailable provider must not return Err");
             assert!(
                 result.is_none(),
                 "missing API key must cause unavailable → None"
             );
+        });
+    }
+
+    // -- run_setup_llm_consent_check --
+
+    #[test]
+    fn consent_check_local_provider_always_passes() {
+        // A local provider (e.g. Ollama default endpoint) must never trigger the gate.
+        let provider = crate::llm::client::OllamaProvider::new("gemma3:4b".to_string(), None, 60);
+        let opts = LlmOpts {
+            accept_external_llm: false,
+            ..LlmOpts::default()
+        };
+        let result = run_setup_llm_consent_check(&provider, &opts)
+            .expect("local provider consent check must not fail");
+        assert!(result, "local provider must pass the consent check");
+    }
+
+    #[test]
+    fn consent_check_external_flag_key_passes_without_prompt() {
+        // Explicit --llm-api-key (Flag source) must skip the interactive consent prompt.
+        temp_env::with_var("ANTHROPIC_API_KEY", None::<&str>, || {
+            let provider = crate::llm::client::AnthropicProvider::new(
+                "claude-haiku-4-5-20251001".to_string(),
+                None,
+                Some("sk-ant-explicit".to_string()),
+                60,
+            );
+            assert!(provider.is_external_service(), "anthropic is external");
+            assert_eq!(provider.api_key_source(), Some(ApiKeySource::Flag));
+            let opts = LlmOpts {
+                accept_external_llm: false,
+                ..LlmOpts::default()
+            };
+            let result = run_setup_llm_consent_check(&provider, &opts)
+                .expect("flag-key external provider must not fail");
+            assert!(result, "flag API key bypasses interactive consent");
+        });
+    }
+
+    #[test]
+    fn consent_check_external_accept_flag_bypasses_prompt() {
+        // --accept-external-llm must bypass the prompt even for env-fallback keys.
+        temp_env::with_var("ANTHROPIC_API_KEY", Some("sk-ant-env"), || {
+            let provider = crate::llm::client::AnthropicProvider::new(
+                "claude-haiku-4-5-20251001".to_string(),
+                None,
+                None,
+                60,
+            );
+            assert!(provider.is_external_service(), "anthropic is external");
+            assert_eq!(provider.api_key_source(), Some(ApiKeySource::Env));
+            let opts = LlmOpts {
+                // accept_external_llm bypasses the prompt.
+                accept_external_llm: true,
+                ..LlmOpts::default()
+            };
+            let result =
+                run_setup_llm_consent_check(&provider, &opts).expect("accept flag must not fail");
+            assert!(result, "--accept-external-llm must bypass the consent gate");
         });
     }
 

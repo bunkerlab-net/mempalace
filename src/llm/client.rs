@@ -44,6 +44,19 @@ pub struct LlmResponse {
     pub text: String,
 }
 
+/// Provenance of a provider's API key.
+///
+/// Used by `mempalace init` to decide whether to prompt for consent when the
+/// provider's endpoint is external: a key loaded from the environment without
+/// an explicit `--llm-api-key` flag may be a stray credential, so we ask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApiKeySource {
+    /// Key was supplied via the explicit `--llm-api-key` CLI flag.
+    Flag,
+    /// Key was resolved from an environment variable as a fallback.
+    Env,
+}
+
 /// Common interface for all LLM providers.
 pub trait LlmProvider: Send + Sync {
     /// Send a system + user prompt and return the model's text response.
@@ -60,6 +73,27 @@ pub trait LlmProvider: Send + Sync {
 
     /// Short identifier string (e.g. `"ollama"`, `"openai-compat"`, `"anthropic"`).
     fn name(&self) -> &'static str;
+
+    /// The configured endpoint URL for this provider.
+    ///
+    /// Used by the default `is_external_service` implementation.
+    fn endpoint(&self) -> &str;
+
+    /// How the provider's API key was obtained, or `None` when no key is in play.
+    ///
+    /// Used by `mempalace init` consent gate: `Some(Env)` + external endpoint
+    /// triggers the interactive `[y/N]` prompt unless `--accept-external-llm` is set.
+    fn api_key_source(&self) -> Option<ApiKeySource>;
+
+    /// Return `true` when this provider's endpoint will send user content off
+    /// the local machine or private network.
+    ///
+    /// URL-based heuristic shared by all three in-tree providers. `cmd_init`
+    /// uses the result to print a privacy warning before the first classify
+    /// call (issue #24).
+    fn is_external_service(&self) -> bool {
+        !endpoint_is_local(self.endpoint())
+    }
 }
 
 // ===================== OLLAMA =====================
@@ -93,6 +127,15 @@ impl OllamaProvider {
 impl LlmProvider for OllamaProvider {
     fn name(&self) -> &'static str {
         "ollama"
+    }
+
+    fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    // Ollama never uses an API key.
+    fn api_key_source(&self) -> Option<ApiKeySource> {
+        None
     }
 
     fn check_available(&self) -> (bool, String) {
@@ -173,13 +216,15 @@ pub struct OpenAICompatProvider {
     model: String,
     endpoint: String,
     api_key: Option<String>,
+    api_key_source: Option<ApiKeySource>,
     timeout_secs: u64,
 }
 
 impl OpenAICompatProvider {
     /// Build an `OpenAICompatProvider`, resolving the API key from the environment if absent.
     ///
-    /// Called by [`get_provider`] when `name == "openai-compat"`.
+    /// Tracks key provenance: explicit `api_key` → `Flag`, env fallback → `Env`,
+    /// no key → `None`. Called by [`get_provider`] when `name == "openai-compat"`.
     pub fn new(
         model: String,
         endpoint: Option<String>,
@@ -188,14 +233,23 @@ impl OpenAICompatProvider {
     ) -> Self {
         assert!(!model.is_empty());
         assert!(timeout_secs > 0);
-        let resolved_key = api_key
-            .filter(|k| !k.is_empty())
-            .or_else(|| std::env::var("OPENAI_API_KEY").ok());
+        let (resolved_key, source) = if let Some(key) = api_key.filter(|k| !k.is_empty()) {
+            (Some(key), Some(ApiKeySource::Flag))
+        } else {
+            let env_key = std::env::var("OPENAI_API_KEY").ok();
+            let source = if env_key.is_some() {
+                Some(ApiKeySource::Env)
+            } else {
+                None
+            };
+            (env_key, source)
+        };
         let resolved_endpoint = endpoint.unwrap_or_default();
         Self {
             model,
             endpoint: resolved_endpoint,
             api_key: resolved_key,
+            api_key_source: source,
             timeout_secs,
         }
     }
@@ -229,6 +283,14 @@ impl OpenAICompatProvider {
 impl LlmProvider for OpenAICompatProvider {
     fn name(&self) -> &'static str {
         "openai-compat"
+    }
+
+    fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    fn api_key_source(&self) -> Option<ApiKeySource> {
+        self.api_key_source
     }
 
     fn check_available(&self) -> (bool, String) {
@@ -310,13 +372,15 @@ pub struct AnthropicProvider {
     model: String,
     endpoint: String,
     api_key: Option<String>,
+    api_key_source: Option<ApiKeySource>,
     timeout_secs: u64,
 }
 
 impl AnthropicProvider {
     /// Build an `AnthropicProvider`, resolving the API key from the environment if absent.
     ///
-    /// Called by [`get_provider`] when `name == "anthropic"`.
+    /// Tracks key provenance: explicit `api_key` → `Flag`, env fallback → `Env`,
+    /// no key → `None`. Called by [`get_provider`] when `name == "anthropic"`.
     pub fn new(
         model: String,
         endpoint: Option<String>,
@@ -325,9 +389,17 @@ impl AnthropicProvider {
     ) -> Self {
         assert!(!model.is_empty());
         assert!(timeout_secs > 0);
-        let resolved_key = api_key
-            .filter(|k| !k.is_empty())
-            .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok());
+        let (resolved_key, source) = if let Some(key) = api_key.filter(|k| !k.is_empty()) {
+            (Some(key), Some(ApiKeySource::Flag))
+        } else {
+            let env_key = std::env::var("ANTHROPIC_API_KEY").ok();
+            let source = if env_key.is_some() {
+                Some(ApiKeySource::Env)
+            } else {
+                None
+            };
+            (env_key, source)
+        };
         let resolved_endpoint = endpoint
             .filter(|e| !e.is_empty())
             .unwrap_or_else(|| ANTHROPIC_DEFAULT_ENDPOINT.to_string());
@@ -336,6 +408,7 @@ impl AnthropicProvider {
             model,
             endpoint: resolved_endpoint,
             api_key: resolved_key,
+            api_key_source: source,
             timeout_secs,
         }
     }
@@ -344,6 +417,14 @@ impl AnthropicProvider {
 impl LlmProvider for AnthropicProvider {
     fn name(&self) -> &'static str {
         "anthropic"
+    }
+
+    fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    fn api_key_source(&self) -> Option<ApiKeySource> {
+        self.api_key_source
     }
 
     fn check_available(&self) -> (bool, String) {
@@ -563,6 +644,94 @@ fn http_get_with_headers(url: &str, headers: &[(&str, &str)], timeout_secs: u64)
     debug_assert!(!text.is_empty(), "HTTP GET response body must not be empty");
     let value: Value = serde_json::from_str(&text)?;
     Ok(value)
+}
+
+// ===================== LOCAL-ENDPOINT DETECTION =====================
+
+/// Return `true` when `url`'s hostname is on the user's machine or private network.
+///
+/// Local includes: `localhost`, `127.0.0.1`, `::1`, `.local` hostnames (mDNS),
+/// RFC 1918 (`10/8`, `172.16–31/12`, `192.168/16`), Tailscale CGNAT
+/// (`100.64.0.0/10` — octet 100, second octet 64–127), and IPv6 ULA (`fc../fd..`).
+///
+/// Empty or unparseable URLs return `true` (defensive — no endpoint means no
+/// external request can happen yet). Called by the default
+/// `LlmProvider::is_external_service` implementation.
+// Host is already lowercased by extract_endpoint_hostname, so the .local
+// comparison is effectively case-insensitive despite the clippy warning.
+#[allow(clippy::case_sensitive_file_extension_comparisons)]
+pub fn endpoint_is_local(url: &str) -> bool {
+    if url.is_empty() {
+        return true;
+    }
+    let host = extract_endpoint_hostname(url);
+    if host.is_empty() {
+        return true;
+    }
+    if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+        return true;
+    }
+    if host.ends_with(".local") {
+        return true;
+    }
+    // RFC 1918: 10.0.0.0/8
+    if host.starts_with("10.") {
+        return true;
+    }
+    // RFC 1918: 192.168.0.0/16
+    if host.starts_with("192.168.") {
+        return true;
+    }
+    // RFC 1918: 172.16.0.0/12 — second octet 16..=31
+    if let Some(rest) = host.strip_prefix("172.") {
+        let second: u8 = rest
+            .split('.')
+            .next()
+            .and_then(|octet_str| octet_str.parse().ok())
+            .unwrap_or(0);
+        if (16..=31).contains(&second) {
+            return true;
+        }
+    }
+    // Tailscale CGNAT: 100.64.0.0/10 — first octet 100, second octet 64..=127.
+    // 100.x.x.x outside this range remains regular allocated public space (external).
+    if let Some(rest) = host.strip_prefix("100.") {
+        let second: u8 = rest
+            .split('.')
+            .next()
+            .and_then(|octet_str| octet_str.parse().ok())
+            .unwrap_or(0);
+        if (64..=127).contains(&second) {
+            return true;
+        }
+    }
+    // IPv6 unique-local: fc00::/7 — addresses starting with fc or fd.
+    if host.starts_with("fc") || host.starts_with("fd") {
+        return true;
+    }
+    false
+}
+
+/// Extract the lowercase hostname from a URL string.
+///
+/// Strips scheme, port, and path. Handles IPv6 bracketed addresses (`[::1]`).
+/// Returns an empty string when the URL is malformed. Called by [`endpoint_is_local`].
+fn extract_endpoint_hostname(url: &str) -> String {
+    assert!(!url.is_empty());
+    // Strip scheme: "https://host:port/path" → "host:port/path"
+    let after_scheme = url.find("://").map_or(url, |position| &url[position + 3..]);
+
+    let host = if after_scheme.starts_with('[') {
+        // IPv6 bracketed: "[::1]:port/path" → "::1"
+        after_scheme
+            .strip_prefix('[')
+            .and_then(|bracketed| bracketed.split(']').next())
+            .unwrap_or("")
+    } else {
+        // Strip port and path: "host:port/path" or "host/path" → "host"
+        after_scheme.split(&[':', '/'][..]).next().unwrap_or("")
+    };
+    host.to_lowercase()
 }
 
 // ===================== TESTS =====================
@@ -1100,5 +1269,236 @@ mod tests {
             .classify("system prompt", "user prompt", true)
             .expect("json_mode must succeed with mock server");
         assert!(!result.text.is_empty());
+    }
+
+    // -- endpoint_is_local --
+
+    #[test]
+    fn endpoint_is_local_empty_url_is_local() {
+        // Empty URL means no external request possible — treat as local.
+        assert!(endpoint_is_local(""), "empty url must be local");
+    }
+
+    #[test]
+    fn endpoint_is_local_localhost_variants() {
+        // All three loopback forms must be local.
+        assert!(
+            endpoint_is_local("http://localhost:11434"),
+            "localhost must be local"
+        );
+        assert!(
+            endpoint_is_local("http://127.0.0.1:8080"),
+            "127.0.0.1 must be local"
+        );
+        assert!(endpoint_is_local("http://[::1]:8080"), "::1 must be local");
+    }
+
+    #[test]
+    fn endpoint_is_local_mdns_suffix() {
+        // Hostnames ending in .local (mDNS/Bonjour) are on the local network.
+        assert!(
+            endpoint_is_local("http://my-server.local:11434"),
+            ".local hostname must be local"
+        );
+        // Pair assertion: a non-.local public hostname must not be local.
+        assert!(
+            !endpoint_is_local("http://my-server.example.com:11434"),
+            ".example.com hostname must be external"
+        );
+    }
+
+    #[test]
+    fn endpoint_is_local_rfc1918_ranges() {
+        // RFC 1918 private ranges must all be local.
+        assert!(endpoint_is_local("http://10.0.0.1"), "10/8 must be local");
+        assert!(
+            endpoint_is_local("http://10.255.255.255"),
+            "10/8 top must be local"
+        );
+        assert!(
+            endpoint_is_local("http://192.168.1.1"),
+            "192.168/16 must be local"
+        );
+        assert!(
+            endpoint_is_local("http://172.16.0.1"),
+            "172.16/12 start must be local"
+        );
+        assert!(
+            endpoint_is_local("http://172.31.255.255"),
+            "172.16/12 end must be local"
+        );
+        // Outside 172.16-31 range — external.
+        assert!(
+            !endpoint_is_local("http://172.15.0.1"),
+            "172.15 is not RFC1918"
+        );
+        assert!(
+            !endpoint_is_local("http://172.32.0.1"),
+            "172.32 is not RFC1918"
+        );
+    }
+
+    #[test]
+    fn endpoint_is_local_tailscale_cgnat() {
+        // Tailscale CGNAT: 100.64.0.0/10 — second octet 64..=127 is local.
+        assert!(
+            endpoint_is_local("http://100.64.0.1"),
+            "100.64.x is CGNAT local"
+        );
+        assert!(
+            endpoint_is_local("http://100.127.255.255"),
+            "100.127.x is CGNAT local"
+        );
+        // Boundary: 100.63.x and 100.128.x are outside the CGNAT range — external.
+        assert!(
+            !endpoint_is_local("http://100.63.255.255"),
+            "100.63.x is not CGNAT"
+        );
+        assert!(
+            !endpoint_is_local("http://100.128.0.0"),
+            "100.128.x is not CGNAT"
+        );
+    }
+
+    #[test]
+    fn endpoint_is_local_ipv6_ula() {
+        // IPv6 ULA (fc00::/7) — fc and fd prefixes are local.
+        assert!(
+            endpoint_is_local("http://[fd12:3456:789a::1]"),
+            "fd.. IPv6 ULA must be local"
+        );
+        assert!(
+            endpoint_is_local("http://[fc00::1]"),
+            "fc00 IPv6 ULA must be local"
+        );
+    }
+
+    #[test]
+    fn endpoint_is_local_public_endpoints_are_external() {
+        // Public SaaS endpoints must not be treated as local.
+        assert!(
+            !endpoint_is_local("https://api.anthropic.com"),
+            "Anthropic API must be external"
+        );
+        assert!(
+            !endpoint_is_local("https://api.openai.com"),
+            "OpenAI API must be external"
+        );
+    }
+
+    // -- ApiKeySource provenance tracking --
+
+    #[test]
+    fn openai_compat_api_key_source_flag_when_explicit() {
+        // Explicit api_key must set source to Flag.
+        temp_env::with_var("OPENAI_API_KEY", None::<&str>, || {
+            let provider = OpenAICompatProvider::new(
+                "gpt-4o".to_string(),
+                None,
+                Some("sk-explicit".to_string()),
+                60,
+            );
+            assert_eq!(provider.api_key_source(), Some(ApiKeySource::Flag));
+            assert!(provider.api_key.is_some());
+        });
+    }
+
+    #[test]
+    fn openai_compat_api_key_source_env_when_env_fallback() {
+        // When no explicit key is passed but the env var is set, source must be Env.
+        temp_env::with_var("OPENAI_API_KEY", Some("sk-from-env"), || {
+            let provider = OpenAICompatProvider::new("gpt-4o".to_string(), None, None, 60);
+            assert_eq!(provider.api_key_source(), Some(ApiKeySource::Env));
+            assert!(provider.api_key.is_some());
+        });
+    }
+
+    #[test]
+    fn openai_compat_api_key_source_none_when_no_key() {
+        // When neither explicit key nor env var, source must be None.
+        temp_env::with_var("OPENAI_API_KEY", None::<&str>, || {
+            let provider = OpenAICompatProvider::new("gpt-4o".to_string(), None, None, 60);
+            assert_eq!(provider.api_key_source(), None);
+            assert!(provider.api_key.is_none());
+        });
+    }
+
+    #[test]
+    fn anthropic_api_key_source_flag_when_explicit() {
+        // Explicit api_key must set source to Flag.
+        temp_env::with_var("ANTHROPIC_API_KEY", None::<&str>, || {
+            let provider = AnthropicProvider::new(
+                "claude-haiku-4-5-20251001".to_string(),
+                None,
+                Some("sk-ant-explicit".to_string()),
+                60,
+            );
+            assert_eq!(provider.api_key_source(), Some(ApiKeySource::Flag));
+        });
+    }
+
+    #[test]
+    fn anthropic_api_key_source_env_when_env_fallback() {
+        // When no explicit key is passed but the env var is set, source must be Env.
+        temp_env::with_var("ANTHROPIC_API_KEY", Some("sk-ant-from-env"), || {
+            let provider =
+                AnthropicProvider::new("claude-haiku-4-5-20251001".to_string(), None, None, 60);
+            assert_eq!(provider.api_key_source(), Some(ApiKeySource::Env));
+        });
+    }
+
+    // -- is_external_service --
+
+    #[test]
+    fn ollama_is_not_external_with_default_endpoint() {
+        // OllamaProvider uses localhost by default — must not be external.
+        let provider = OllamaProvider::new("gemma3:4b".to_string(), None, 60);
+        assert!(
+            !provider.is_external_service(),
+            "Ollama default endpoint is localhost"
+        );
+    }
+
+    #[test]
+    fn anthropic_is_external_with_default_endpoint() {
+        // AnthropicProvider's default endpoint is api.anthropic.com — external.
+        temp_env::with_var("ANTHROPIC_API_KEY", None::<&str>, || {
+            let provider =
+                AnthropicProvider::new("claude-haiku-4-5-20251001".to_string(), None, None, 60);
+            assert!(
+                provider.is_external_service(),
+                "Anthropic default endpoint is external"
+            );
+        });
+    }
+
+    #[test]
+    fn openai_compat_is_not_external_with_local_endpoint() {
+        // An OpenAI-compat provider pointed at localhost must not be external.
+        let provider = OpenAICompatProvider::new(
+            "gpt-4o".to_string(),
+            Some("http://localhost:8080".to_string()),
+            None,
+            60,
+        );
+        assert!(
+            !provider.is_external_service(),
+            "localhost endpoint is not external"
+        );
+    }
+
+    #[test]
+    fn openai_compat_is_external_with_public_endpoint() {
+        // An OpenAI-compat provider pointed at a public URL must be external.
+        let provider = OpenAICompatProvider::new(
+            "gpt-4o".to_string(),
+            Some("https://api.openai.com".to_string()),
+            None,
+            60,
+        );
+        assert!(
+            provider.is_external_service(),
+            "public endpoint is external"
+        );
     }
 }
