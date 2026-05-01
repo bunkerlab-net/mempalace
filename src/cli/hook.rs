@@ -836,6 +836,14 @@ fn hook_spawn_mine_bg(state_dir: &Path, mine_dir: &Path, mode: &str) {
 /// Transcript convos are ingested separately via `hook_ingest_transcript` in
 /// `hook_precompact`. Keeping them out here avoids timeout stacking against the
 /// harness ceiling.
+///
+/// Coordinates with the project mine pid file [`PID_FILE_PROJECT`]: if a
+/// background project mine (started by [`hook_maybe_auto_ingest`]) is already
+/// running, this helper logs and skips rather than racing for the same palace
+/// lock. The blocking `.status()` call itself is the in-flight signal for this
+/// path, so no pid file is written. The child's exit status is captured and
+/// non-zero exits are logged (without surfacing as a hook error — a child
+/// failure must never abort compaction).
 fn hook_spawn_mine_sync(state_dir: &Path) {
     let targets = hook_get_mine_targets();
     if targets.is_empty() {
@@ -845,6 +853,16 @@ fn hook_spawn_mine_sync(state_dir: &Path) {
         return;
     };
     let _ = std::fs::create_dir_all(state_dir);
+    // Skip if a background project mine is already in flight. Precompact runs
+    // once per compaction so racing the in-flight mine for the palace lock
+    // would either block or fail; skipping is the explicit safe choice.
+    if hook_mine_already_running(state_dir, PID_FILE_PROJECT) {
+        hook_log(
+            state_dir,
+            "Skipping sync project mine: project mine already running",
+        );
+        return;
+    }
     for target in &targets {
         let MineTarget::Project(mine_dir) = target;
         assert!(
@@ -857,11 +875,32 @@ fn hook_spawn_mine_sync(state_dir: &Path) {
         let Ok(log_copy) = log_file.try_clone() else {
             continue;
         };
-        let _ = std::process::Command::new(&exe)
+        let status_result = std::process::Command::new(&exe)
             .args(["mine", &mine_dir.to_string_lossy(), "--mode", "projects"])
             .stdout(std::process::Stdio::from(log_file))
             .stderr(std::process::Stdio::from(log_copy))
             .status();
+        match status_result {
+            Ok(status) if status.success() => {}
+            Ok(status) => {
+                hook_log(
+                    state_dir,
+                    &format!(
+                        "Sync project mine for {} exited non-zero: {status}",
+                        mine_dir.display()
+                    ),
+                );
+            }
+            Err(error) => {
+                hook_log(
+                    state_dir,
+                    &format!(
+                        "Sync project mine for {} failed to spawn: {error}",
+                        mine_dir.display()
+                    ),
+                );
+            }
+        }
     }
 }
 

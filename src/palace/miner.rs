@@ -694,6 +694,51 @@ fn mine_apply_include_ignored(
     scanned
 }
 
+/// Rebase pre-scanned file paths onto the canonicalised `project_dir`.
+///
+/// Callers (`init::run` → `app::run_mine_after_init`) scan with their own
+/// idea of the project root — which may differ from [`mine`]'s canonical
+/// `project_dir` if the caller passed a relative or symlinked path.
+/// `detect_hall` later relies on `strip_prefix(project_dir)` to locate the
+/// hall name, so any path that does not share the canonical prefix would
+/// silently lose its hall tag.
+///
+/// Strategy: try the cheap path first (already starts with `project_dir`),
+/// fall back to canonicalising each candidate, and drop entries that still
+/// don't land under `project_dir` after canonicalisation. Files that have
+/// been deleted between scan and mine canonicalise-fail and are dropped.
+/// Called by [`mine`] when `MineParams::pre_scanned_files` is `Some`.
+fn mine_canonicalise_pre_scanned(files: &[PathBuf], project_dir: &Path) -> Vec<PathBuf> {
+    assert!(
+        project_dir.is_absolute(),
+        "mine_canonicalise_pre_scanned: project_dir must be canonical (absolute)"
+    );
+    // Bound: file lists from `scan_project_with_opts` are already capped at
+    // the OS's directory traversal limits; this assertion documents the
+    // expectation rather than enforcing a hard bound.
+    assert!(
+        files.len() <= 10_000_000,
+        "mine_canonicalise_pre_scanned: file count must be bounded"
+    );
+
+    let mut result: Vec<PathBuf> = Vec::with_capacity(files.len());
+    for path in files {
+        if path.starts_with(project_dir) {
+            result.push(path.clone());
+            continue;
+        }
+        let Ok(canonical) = path.canonicalize() else {
+            continue;
+        };
+        if canonical.starts_with(project_dir) {
+            result.push(canonical);
+        }
+    }
+    // Postcondition: result cannot grow beyond the input list.
+    debug_assert!(result.len() <= files.len());
+    result
+}
+
 /// Compute topic tunnels for `wing` after mining completes.
 ///
 /// Reads `topics_by_wing` from the global registry and calls
@@ -809,11 +854,16 @@ pub async fn mine(connection: &Connection, project_dir: &Path, opts: &MineParams
         });
     }
 
-    // Use pre-scanned files when provided (e.g. passed from init) to avoid a second walk.
-    let scanned = opts.pre_scanned_files.as_ref().map_or_else(
-        || scan_project_with_opts(&project_dir, opts.respect_gitignore),
-        std::clone::Clone::clone,
-    );
+    // Use pre-scanned files when provided (e.g. passed from init) to avoid a
+    // second walk. Pre-scanned paths are rebased onto `project_dir` so
+    // `detect_hall`'s `strip_prefix(project_dir)` lookup matches even when
+    // the caller scanned with a non-canonical directory (relative path,
+    // symlinked root). Without this the ingest would silently drop hall
+    // metadata for every file because `strip_prefix` would return `None`.
+    let scanned = match opts.pre_scanned_files.as_ref() {
+        Some(files) => mine_canonicalise_pre_scanned(files, &project_dir),
+        None => scan_project_with_opts(&project_dir, opts.respect_gitignore),
+    };
     let all_files = mine_apply_include_ignored(scanned, &opts.include_ignored_paths);
     let files: Vec<_> = if opts.limit == 0 {
         all_files
@@ -1479,6 +1529,81 @@ mod tests {
             !command.contains("--no-gitignore"),
             "default gitignore behaviour must not be emitted, got {command:?}"
         );
+    }
+
+    // --- mine_canonicalise_pre_scanned ---
+
+    #[test]
+    fn mine_canonicalise_pre_scanned_passes_through_canonical_paths() {
+        // Happy path: every file already lives under canonical project_dir.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = dir.path().canonicalize().expect("canonicalize");
+        let file = project.join("a.rs");
+        std::fs::write(&file, "fn a() {}").expect("write");
+        let inputs = vec![file.clone()];
+        let result = mine_canonicalise_pre_scanned(&inputs, &project);
+        assert_eq!(result, vec![file], "canonical paths must pass through");
+    }
+
+    #[test]
+    fn mine_canonicalise_pre_scanned_drops_paths_outside_project() {
+        // Negative space: a path under a sibling directory must be dropped so
+        // detect_hall does not see foreign files.
+        let dir_a = tempfile::tempdir().expect("tempdir a");
+        let dir_b = tempfile::tempdir().expect("tempdir b");
+        let project = dir_a.path().canonicalize().expect("canonicalize a");
+        let foreign = dir_b
+            .path()
+            .canonicalize()
+            .expect("canonicalize b")
+            .join("stranger.rs");
+        std::fs::write(&foreign, "fn stranger() {}").expect("write");
+        let inputs = vec![foreign];
+        let result = mine_canonicalise_pre_scanned(&inputs, &project);
+        assert!(
+            result.is_empty(),
+            "files outside project_dir must be dropped"
+        );
+    }
+
+    #[test]
+    fn mine_canonicalise_pre_scanned_canonicalises_relative_input() {
+        // A symlinked or relative path must be canonicalised so it lands under
+        // canonical project_dir. This is the bug class the fix targets: a
+        // caller scanning with `./project` produces relative paths that
+        // wouldn't otherwise match the canonicalised project_dir prefix.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = dir.path().canonicalize().expect("canonicalize");
+        let file_canonical = project.join("file.rs");
+        std::fs::write(&file_canonical, "fn x() {}").expect("write");
+        // Synthesize a non-canonical input: project_dir/./file.rs.
+        let non_canonical = project.join(".").join("file.rs");
+        let inputs = vec![non_canonical];
+        let result = mine_canonicalise_pre_scanned(&inputs, &project);
+        assert_eq!(
+            result.len(),
+            1,
+            "non-canonical-but-equivalent path must be retained"
+        );
+        // Pair assertion: the retained path either starts with project_dir
+        // verbatim (cheap path matched) or canonicalises to do so.
+        assert!(
+            result[0].starts_with(&project),
+            "retained path must live under project_dir"
+        );
+    }
+
+    #[test]
+    fn mine_canonicalise_pre_scanned_drops_missing_files() {
+        // Files that vanish between scan and mine canonicalise-fail; they
+        // must be dropped silently so the mine loop does not blow up on a
+        // path that no longer exists.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = dir.path().canonicalize().expect("canonicalize");
+        let phantom = std::path::PathBuf::from("/nonexistent/phantom.rs");
+        let inputs = vec![phantom];
+        let result = mine_canonicalise_pre_scanned(&inputs, &project);
+        assert!(result.is_empty(), "non-existent paths must be dropped");
     }
 
     // --- mine() wing normalization ---

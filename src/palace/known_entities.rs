@@ -102,6 +102,14 @@ pub fn add_to_known_entities<S: std::hash::BuildHasher>(
 ///
 /// Returns an empty map when the registry is absent, unreadable, or lacks a
 /// valid `topics_by_wing` object. Wing-topic lists must be string arrays.
+///
+/// Wing keys are canonicalised via [`normalize_wing_name`] on read so legacy
+/// registries that stored raw spellings (e.g. `My-Proj` from before the
+/// write-side normalisation landed) line up with the read path used by
+/// `miner::mine_run_topic_tunnels` and `graph::topic_tunnels_for_wing`. When
+/// two raw keys collapse to the same slug, their topic lists are merged with
+/// case-insensitive de-duplication and first-seen casing wins, so neither
+/// variant silently overwrites the other.
 pub fn get_topics_by_wing() -> std::collections::BTreeMap<String, Vec<String>> {
     let path = registry_path();
     let existing = add_to_known_entities_load(&path);
@@ -110,20 +118,39 @@ pub fn get_topics_by_wing() -> std::collections::BTreeMap<String, Vec<String>> {
         return std::collections::BTreeMap::new();
     };
 
-    let mut result = std::collections::BTreeMap::new();
+    let mut result: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    // Track per-wing case-insensitive seen sets so collisions (raw key variants
+    // that normalise to the same slug) merge instead of overwrite.
+    let mut seen_lower_by_wing: std::collections::BTreeMap<String, HashSet<String>> =
+        std::collections::BTreeMap::new();
     for (wing, topics_val) in topics_map {
-        if let Some(arr) = topics_val.as_array() {
-            let names: Vec<String> = arr
-                .iter()
-                .filter_map(Value::as_str)
-                .filter(|name| !name.trim().is_empty())
-                .map(str::to_string)
-                .collect();
-            if !names.is_empty() {
-                result.insert(wing.clone(), names);
+        let Some(arr) = topics_val.as_array() else {
+            continue;
+        };
+        let wing_key = normalize_wing_name(wing.trim());
+        if wing_key.is_empty() {
+            continue;
+        }
+        let bucket = result.entry(wing_key.clone()).or_default();
+        let seen = seen_lower_by_wing.entry(wing_key).or_default();
+        for value in arr {
+            let Some(name) = value.as_str() else { continue };
+            let trimmed = name.trim();
+            if trimmed.is_empty() {
+                continue;
             }
+            let lower = trimmed.to_lowercase();
+            if seen.contains(&lower) {
+                continue;
+            }
+            seen.insert(lower);
+            bucket.push(trimmed.to_string());
         }
     }
+    // Drop wings whose only entries were empty/whitespace topics so callers
+    // never see placeholder buckets.
+    result.retain(|_, names| !names.is_empty());
 
     assert!(
         result.len() <= 10_000,
@@ -797,6 +824,63 @@ mod tests {
             assert!(
                 result.is_empty(),
                 "must be empty when no topics_by_wing in registry"
+            );
+        });
+    }
+
+    #[test]
+    fn get_topics_by_wing_normalises_legacy_raw_wing_keys() {
+        // Regression: registries written before the write-side normalisation
+        // landed may store raw wing keys ("My-Proj"). The read path must
+        // canonicalise them so the miner's `contains_key(normalised)` check
+        // still finds them.
+        with_temp_registry(|path| {
+            std::fs::write(&path, r#"{"topics_by_wing":{"My-Proj":["Rust","Async"]}}"#)
+                .expect("write legacy registry");
+            let result = get_topics_by_wing();
+            assert!(
+                result.contains_key("my_proj"),
+                "raw key must be normalised on read"
+            );
+            assert!(
+                !result.contains_key("My-Proj"),
+                "raw spelling must not be returned"
+            );
+            let topics = &result["my_proj"];
+            assert_eq!(topics.len(), 2);
+            assert!(topics.contains(&"Rust".to_string()));
+            assert!(topics.contains(&"Async".to_string()));
+        });
+    }
+
+    #[test]
+    fn get_topics_by_wing_merges_keys_that_normalise_to_same_slug() {
+        // When two raw keys collapse to one canonical slug, their topic lists
+        // must merge (with case-insensitive de-dup) rather than one
+        // overwriting the other. Pair assertion: neither variant's topic is
+        // dropped, and the duplicate is collapsed.
+        with_temp_registry(|path| {
+            std::fs::write(
+                &path,
+                r#"{"topics_by_wing":{"My-Proj":["Rust","Async"],"my_proj":["rust","WebAssembly"]}}"#,
+            )
+            .expect("write colliding registry");
+            let result = get_topics_by_wing();
+            assert_eq!(result.len(), 1, "both keys must collapse to one bucket");
+            let topics = &result["my_proj"];
+            // Pair assertion: every distinct topic shows up exactly once.
+            assert_eq!(
+                topics.len(),
+                3,
+                "case-insensitive dedup must collapse Rust/rust to one entry"
+            );
+            // First-seen casing wins for the collision (Rust before rust).
+            assert!(topics.contains(&"Rust".to_string()));
+            assert!(topics.contains(&"Async".to_string()));
+            assert!(topics.contains(&"WebAssembly".to_string()));
+            assert!(
+                !topics.contains(&"rust".to_string()),
+                "second-seen casing must be dropped"
             );
         });
     }

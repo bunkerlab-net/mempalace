@@ -828,10 +828,14 @@ fn run_print_summary(
         println!("          {}", room.description);
     }
 
-    if !detected.projects.is_empty() || !detected.people.is_empty() {
+    if !detected.projects.is_empty() || !detected.people.is_empty() || !detected.topics.is_empty() {
         println!("\n  Detected entities:");
         run_print_entities("Projects", &detected.projects);
         run_print_entities("People", &detected.people);
+        // Topics print before "Uncertain" so the summary leads with the
+        // confirmed-pass-through bucket and trails with the items the user
+        // may want to review.
+        run_print_entities("Topics", &detected.topics);
         if !detected.uncertain.is_empty() {
             run_print_entities("Uncertain", &detected.uncertain);
         }
@@ -1178,6 +1182,32 @@ mod tests {
         let rooms: Vec<crate::config::RoomConfig> = vec![];
         // Must not panic with any non-empty DetectedDict.
         run_print_summary("my_project", 42, 1_500_000, &rooms, &detected);
+    }
+
+    #[test]
+    fn run_print_summary_includes_topics_when_only_topics_detected() {
+        // Regression: a DetectedDict with only `topics` populated must still
+        // trigger the "Detected entities:" block. Without this, topic-only
+        // pipelines (a corpus with no people or projects but with topic
+        // labels) would show no detection summary at all and the user would
+        // have no chance to confirm the topics before mining.
+        use crate::palace::entities::DetectedEntity;
+        use crate::palace::project_scanner::DetectedDict;
+        let detected = DetectedDict {
+            people: vec![],
+            projects: vec![],
+            uncertain: vec![],
+            topics: vec![DetectedEntity {
+                name: "Rust".to_string(),
+                entity_type: "topic".to_string(),
+                confidence: 0.85,
+                frequency: 7,
+                signals: vec!["lexicon".to_string()],
+            }],
+        };
+        let rooms: Vec<crate::config::RoomConfig> = vec![];
+        // Must not panic and must traverse the topics-print branch.
+        run_print_summary("topics_wing", 5, 0, &rooms, &detected);
     }
 
     #[test]
