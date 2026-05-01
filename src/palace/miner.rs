@@ -28,6 +28,12 @@ pub struct MineParams {
     /// entries are skipped — only regular files are added. Ignored when
     /// `respect_gitignore` is `false` since all paths are already included.
     pub include_ignored_paths: Vec<std::path::PathBuf>,
+    /// Pre-scanned file list from a prior `scan_project_with_opts` call.
+    ///
+    /// When `Some`, the scan step inside `mine()` is skipped entirely so the
+    /// directory walk is not repeated. `init::run` passes this to avoid
+    /// double-walking after computing the file-count estimate.
+    pub pre_scanned_files: Option<Vec<std::path::PathBuf>>,
 }
 
 /// Files larger than this are skipped — prevents OOM on huge files.
@@ -454,7 +460,24 @@ async fn mine_process_file_one(
     Ok(Some((drawers_added, room, hall, entity_count)))
 }
 
-/// Process all files in the mine loop. Returns `(drawers_total, files_skipped, files_unreadable_or_too_short, room_counts)`.
+/// Wrap a path in single quotes for safe shell re-use in a resume hint.
+///
+/// Single quotes in the path itself are escaped via `'"'"'`. Called by
+/// `mine_process_files` when Ctrl-C is detected to print a safe resume command.
+fn mine_shell_quote(path_str: &str) -> String {
+    assert!(
+        !path_str.is_empty(),
+        "mine_shell_quote: path must not be empty"
+    );
+    let escaped = path_str.replace('\'', "'\"'\"'");
+    format!("'{escaped}'")
+}
+
+/// Process all files in the mine loop.
+///
+/// Returns `(drawers_total, files_skipped, files_unreadable_or_too_short, room_counts)`.
+/// Checks `ctrl_c_flag` before each file; on interrupt prints a resume hint and
+/// exits with code 130.
 async fn mine_process_files(
     connection: &Connection,
     files: &[PathBuf],
@@ -462,13 +485,33 @@ async fn mine_process_files(
     rooms: &[crate::config::RoomConfig],
     project_dir: &Path,
     opts: &MineParams,
+    ctrl_c_flag: &std::sync::atomic::AtomicBool,
 ) -> Result<(usize, usize, usize, HashMap<String, usize>)> {
+    assert!(
+        !wing.is_empty(),
+        "mine_process_files: wing must not be empty"
+    );
     let mut drawers_total: usize = 0;
     let mut files_skipped: usize = 0;
     let mut files_unreadable_or_too_short: usize = 0;
     let mut room_counts: HashMap<String, usize> = HashMap::new();
+    let mut last_file: Option<&Path> = None;
 
     for (i, filepath) in files.iter().enumerate() {
+        if ctrl_c_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            let files_processed = i - files_skipped - files_unreadable_or_too_short;
+            let last = last_file.map_or("-".to_string(), |p| p.display().to_string());
+            eprintln!(
+                "\nInterrupted after {files_processed} file(s), {drawers_total} drawer(s). \
+                 Last: {last}"
+            );
+            eprintln!(
+                "Resume with: mempalace mine {}",
+                mine_shell_quote(&project_dir.display().to_string())
+            );
+            std::process::exit(130);
+        }
+
         let source_file = filepath.to_string_lossy().to_string();
 
         // Always check for duplicates so dry runs report accurate skip counts.
@@ -484,6 +527,7 @@ async fn mine_process_files(
             }
             Some((drawers_added, room, hall, entity_count)) => {
                 drawers_total += drawers_added;
+                last_file = Some(filepath.as_path());
                 *room_counts.entry(room.clone()).or_insert(0) += 1;
                 let file_name = filepath.file_name().unwrap_or_default().to_string_lossy();
                 let hall_label = hall.as_deref().unwrap_or("-");
@@ -644,7 +688,12 @@ pub async fn mine(connection: &Connection, project_dir: &Path, opts: &MineParams
             keywords: vec![],
         });
     }
-    let scanned = scan_project_with_opts(&project_dir, opts.respect_gitignore);
+
+    // Use pre-scanned files when provided (e.g. passed from init) to avoid a second walk.
+    let scanned = opts.pre_scanned_files.as_ref().map_or_else(
+        || scan_project_with_opts(&project_dir, opts.respect_gitignore),
+        std::clone::Clone::clone,
+    );
     let all_files = mine_apply_include_ignored(scanned, &opts.include_ignored_paths);
     let files: Vec<_> = if opts.limit == 0 {
         all_files
@@ -654,8 +703,25 @@ pub async fn mine(connection: &Connection, project_dir: &Path, opts: &MineParams
 
     mine_print_header(wing, &rooms, files.len(), opts.dry_run);
 
+    // Set an atomic flag when Ctrl-C fires; mine_process_files checks it per file.
+    let ctrl_c_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag_clone = ctrl_c_flag.clone();
+    let _ctrl_c_task = tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.ok();
+        flag_clone.store(true, std::sync::atomic::Ordering::Relaxed);
+    });
+
     let (drawers_total, files_skipped, files_unreadable_or_too_short, room_counts) =
-        mine_process_files(connection, &files, wing, &rooms, &project_dir, opts).await?;
+        mine_process_files(
+            connection,
+            &files,
+            wing,
+            &rooms,
+            &project_dir,
+            opts,
+            &ctrl_c_flag,
+        )
+        .await?;
 
     mine_print_summary(
         opts.dry_run,
@@ -1175,6 +1241,7 @@ mod tests {
             dry_run: false,
             respect_gitignore: false,
             include_ignored_paths: vec![],
+            pre_scanned_files: None,
         }
     }
 
@@ -1512,6 +1579,7 @@ mod tests {
             dry_run: false,
             respect_gitignore: false,
             include_ignored_paths: vec![],
+            pre_scanned_files: None,
         };
 
         mine(&connection, dir.path(), &opts)
@@ -1556,6 +1624,7 @@ mod tests {
             dry_run: false,
             respect_gitignore: false,
             include_ignored_paths: vec![],
+            pre_scanned_files: None,
         };
 
         mine(&connection, dir.path(), &opts)
@@ -1618,6 +1687,7 @@ mod tests {
             dry_run: false,
             respect_gitignore: false,
             include_ignored_paths: vec![],
+            pre_scanned_files: None,
         };
 
         // Must not panic even when entity_count > 0 triggers the extra println.
@@ -1818,6 +1888,7 @@ mod tests {
             dry_run: false,
             respect_gitignore: false,
             include_ignored_paths: vec![],
+            pre_scanned_files: None,
         };
 
         let result = mine(&connection, &file_path, &opts).await;
@@ -1850,6 +1921,7 @@ mod tests {
             dry_run: true,
             respect_gitignore: false,
             include_ignored_paths: vec![],
+            pre_scanned_files: None,
         };
 
         mine(&connection, dir.path(), &opts)

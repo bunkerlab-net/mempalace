@@ -78,6 +78,11 @@ pub enum Command {
         /// environment-variable API key (use in CI / non-interactive runs)
         #[arg(long)]
         accept_external_llm: bool,
+
+        /// Automatically start mining after init without prompting
+        /// (separate from --yes which only auto-accepts the init summary)
+        #[arg(long)]
+        auto_mine: bool,
     },
 
     /// Mine files into the palace

@@ -1180,6 +1180,7 @@ mod tests {
             dry_run: false,
             respect_gitignore: true,
             include_ignored_paths: vec![],
+            pre_scanned_files: None,
         };
 
         mine_convos_write_chunks(
@@ -1232,6 +1233,7 @@ mod tests {
             dry_run: false,
             respect_gitignore: true,
             include_ignored_paths: vec![],
+            pre_scanned_files: None,
         };
 
         mine_convos(&connection, temp_directory.path(), "full", &opts)
@@ -1276,6 +1278,7 @@ mod tests {
             dry_run: true,
             respect_gitignore: true,
             include_ignored_paths: vec![],
+            pre_scanned_files: None,
         };
 
         mine_convos(&connection, temp_directory.path(), "full", &opts)
@@ -1316,6 +1319,7 @@ mod tests {
             dry_run: false,
             respect_gitignore: true,
             include_ignored_paths: vec![],
+            pre_scanned_files: None,
         };
 
         // First run: file gets mined.
@@ -1368,6 +1372,7 @@ mod tests {
             dry_run: false,
             respect_gitignore: true,
             include_ignored_paths: vec![],
+            pre_scanned_files: None,
         };
 
         mine_convos(&connection, temp_directory.path(), "full", &opts)
@@ -1407,6 +1412,7 @@ mod tests {
             dry_run: false,
             respect_gitignore: true,
             include_ignored_paths: vec![],
+            pre_scanned_files: None,
         };
 
         mine_convos(&connection, temp_directory.path(), "full", &opts)
@@ -1459,6 +1465,7 @@ mod tests {
             dry_run: false,
             respect_gitignore: true,
             include_ignored_paths: vec![],
+            pre_scanned_files: None,
         };
 
         mine_convos(&connection, temp_directory.path(), "full", &opts)
@@ -1484,6 +1491,7 @@ mod tests {
             dry_run: false,
             respect_gitignore: true,
             include_ignored_paths: vec![],
+            pre_scanned_files: None,
         };
         mine_convos(&connection2, temp_directory.path(), "full", &opts_unlimited)
             .await
@@ -1523,6 +1531,7 @@ mod tests {
             dry_run: false,
             respect_gitignore: true,
             include_ignored_paths: vec![],
+            pre_scanned_files: None,
         };
 
         let result = mine_convos(&connection, &file_path, "full", &opts).await;
@@ -1664,6 +1673,7 @@ mod tests {
             dry_run: false,
             respect_gitignore: true,
             include_ignored_paths: vec![],
+            pre_scanned_files: None,
         };
         let result = mine_convos_resolve_wing(temp_directory.path(), &opts)
             .expect("resolve_wing must succeed with explicit wing");
@@ -1705,6 +1715,7 @@ mod tests {
             dry_run: false,
             respect_gitignore: true,
             include_ignored_paths: vec![],
+            pre_scanned_files: None,
         };
 
         mine_convos(&connection, temp_dir.path(), "full", &opts)
@@ -1737,6 +1748,7 @@ mod tests {
             dry_run: false,
             respect_gitignore: true,
             include_ignored_paths: vec![],
+            pre_scanned_files: None,
         };
         let result = mine_convos_resolve_wing(temp_directory.path(), &opts)
             .expect("resolve_wing must succeed with derived wing");
@@ -1769,6 +1781,7 @@ mod tests {
             dry_run: false,
             respect_gitignore: true,
             include_ignored_paths: vec![],
+            pre_scanned_files: None,
         };
         let result = mine_convos_resolve_wing(
             std::path::Path::new("/nonexistent/path/that/cannot/canonicalize"),
@@ -1890,6 +1903,7 @@ mod tests {
             dry_run: false,
             respect_gitignore: true,
             include_ignored_paths: vec![],
+            pre_scanned_files: None,
         };
         // "/" canonicalizes successfully but has no file_name component, so
         // unwrap_or_default() returns "" and the empty-check fires.
@@ -1987,6 +2001,7 @@ mod tests {
             dry_run: false,
             respect_gitignore: true,
             include_ignored_paths: vec![],
+            pre_scanned_files: None,
         };
 
         // mine_convos must succeed — unreadable files are counted but do not abort.

@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::config::{ProjectConfig, RoomConfig};
 use crate::error::Result;
@@ -75,13 +75,19 @@ impl Default for LlmOpts {
 /// and `entities.json` are appended to the directory's `.gitignore` when
 /// the directory is inside a git worktree and the files aren't already
 /// listed.
+///
+/// Returns `Some(files)` when the user agrees to mine immediately; the caller
+/// (app.rs) opens the palace and passes those files to `mine()` to avoid a
+/// second directory walk. Returns `None` when the user declines or when
+/// `auto_mine` is `false` and stdin is EOF (non-interactive).
 pub fn run(
     directory: &Path,
     yes: bool,
+    auto_mine: bool,
     no_gitignore: bool,
     lang: &[String],
     llm_opts: &LlmOpts,
-) -> Result<()> {
+) -> Result<Option<Vec<PathBuf>>> {
     let directory = directory.canonicalize().map_err(|error| {
         crate::error::Error::Other(format!(
             "directory not found: {}: {error}",
@@ -103,14 +109,23 @@ pub fn run(
     // Phase 2: detect rooms from folder structure.
     let rooms = detect_rooms_from_folders(&directory);
     let wing_name = run_derive_wing_name(&projects, &directory);
-    let file_count = crate::palace::miner::scan_project_with_opts(&directory, !no_gitignore).len();
+
+    // Pre-scan once; reuse for the file-count display and the optional mine step.
+    let scanned_files = crate::palace::miner::scan_project_with_opts(&directory, !no_gitignore);
+    let total_bytes = run_compute_total_bytes(&scanned_files);
 
     // Present summary and ask whether to proceed before any writes so a "no"
     // answer leaves no side effects (entity files, config) on disk.
-    run_print_summary(&wing_name, file_count, &rooms, &detected);
+    run_print_summary(
+        &wing_name,
+        scanned_files.len(),
+        total_bytes,
+        &rooms,
+        &detected,
+    );
 
     if !run_prompt_proceed(yes)? {
-        return Ok(());
+        return Ok(None);
     }
 
     // Write mempalace.yaml before entities.json so a failure in run_write_config
@@ -122,7 +137,12 @@ pub fn run(
         run_persist_lang(lang);
     }
     run_gitignore_protect(&directory);
-    Ok(())
+
+    // Ask whether to mine immediately; --auto-mine skips the prompt.
+    if !run_prompt_mine(auto_mine)? {
+        return Ok(None);
+    }
+    Ok(Some(scanned_files))
 }
 
 // ===================== PRIVATE HELPERS =====================
@@ -337,6 +357,56 @@ fn run_prompt_proceed(yes: bool) -> Result<bool> {
         println!("  Aborted.");
     }
     Ok(proceed)
+}
+
+/// Sum the byte sizes of every file in `files`, skipping those whose metadata
+/// cannot be read.
+///
+/// Called by [`run`] to compute the size label shown in the init summary. The
+/// result is used only for display — errors are silently treated as 0 bytes so
+/// a missing file does not abort init.
+fn run_compute_total_bytes(files: &[PathBuf]) -> u64 {
+    assert!(
+        files.len() < 10_000_000,
+        "run_compute_total_bytes: file count must be bounded"
+    );
+    let total: u64 = files
+        .iter()
+        .map(|path| std::fs::metadata(path).map_or(0, |m| m.len()))
+        .sum();
+    assert!(
+        total < u64::MAX,
+        "run_compute_total_bytes: total must be less than u64::MAX"
+    );
+    total
+}
+
+/// Print the mine prompt and return whether to proceed.
+///
+/// With `auto_mine=true` returns `true` immediately without reading stdin.
+/// On EOF (non-interactive stdin) returns `false` (decline). Defaults to yes
+/// when the user presses Enter without typing anything. Called by [`run`]
+/// after config is written.
+fn run_prompt_mine(auto_mine: bool) -> Result<bool> {
+    if auto_mine {
+        return Ok(true);
+    }
+    print!("\n  Mine this project now? [Y/n] ");
+    std::io::stdout().flush()?;
+    let mut input = String::new();
+    let bytes_read = std::io::stdin().read_line(&mut input)?;
+    if bytes_read == 0 {
+        // EOF on stdin means non-interactive context — treat as decline.
+        return Ok(false);
+    }
+    let trimmed = input.trim().to_lowercase();
+    let should_mine = trimmed != "n" && trimmed != "no";
+    // Pair assertion: empty or Enter input means yes (default).
+    debug_assert!(
+        should_mine || trimmed.starts_with('n'),
+        "run_prompt_mine: decline must start with 'n'"
+    );
+    Ok(should_mine)
 }
 
 /// Write `mempalace.yaml` to `directory` and print the next-step instructions.
@@ -556,16 +626,25 @@ fn run_gitignore_protect(directory: &Path) {
 fn run_print_summary(
     wing_name: &str,
     file_count: usize,
+    total_bytes: u64,
     rooms: &[crate::config::RoomConfig],
     detected: &DetectedDict,
 ) {
     assert!(!wing_name.is_empty());
 
+    // Format bytes as "<1 MB" when under 1 MiB, or the integer MiB count otherwise.
+    #[allow(clippy::integer_division)]
+    let size_label = if total_bytes < 1_048_576 {
+        "<1 MB".to_string()
+    } else {
+        format!("{} MB", total_bytes / 1_048_576)
+    };
+
     println!("\n=======================================================");
     println!("  MemPalace Init");
     println!("=======================================================");
     println!("\n  WING: {wing_name}");
-    println!("  ({file_count} files found, rooms detected from folder structure)\n");
+    println!("  (~{file_count} files, ~{size_label} — rooms detected from folder structure)\n");
 
     for room in rooms {
         println!("    ROOM: {}", room.name);
@@ -629,10 +708,18 @@ mod tests {
     #[test]
     fn init_run_creates_mempalace_yaml_in_directory() {
         // init::run with yes=true must write a mempalace.yaml to the target directory.
+        // auto_mine=false — stdin is EOF in tests so mine prompt returns false (None).
         let temp_directory =
             tempfile::tempdir().expect("failed to create temporary directory for init test");
-        run(temp_directory.path(), true, false, &[], &LlmOpts::default())
-            .expect("init::run should succeed for a valid directory with yes=true");
+        run(
+            temp_directory.path(),
+            true,
+            false,
+            false,
+            &[],
+            &LlmOpts::default(),
+        )
+        .expect("init::run should succeed for a valid directory with yes=true");
 
         let config_path = temp_directory.path().join("mempalace.yaml");
         assert!(config_path.exists(), "mempalace.yaml must be created");
@@ -650,7 +737,7 @@ mod tests {
     fn init_run_nonexistent_directory_returns_error() {
         // Passing a path that does not exist must return Err.
         let path = std::path::Path::new("/nonexistent/path/that/does/not/exist");
-        let result = run(path, true, false, &[], &LlmOpts::default());
+        let result = run(path, true, false, false, &[], &LlmOpts::default());
         assert!(result.is_err(), "nonexistent directory must return Err");
         assert!(
             result
@@ -668,8 +755,15 @@ mod tests {
         std::fs::write(temp_directory.path().join("test.rs"), "fn main() {}")
             .expect("failed to write test source file");
 
-        run(temp_directory.path(), true, true, &[], &LlmOpts::default())
-            .expect("init::run should succeed with no_gitignore=true");
+        run(
+            temp_directory.path(),
+            true,
+            false,
+            true,
+            &[],
+            &LlmOpts::default(),
+        )
+        .expect("init::run should succeed with no_gitignore=true");
 
         let config_path = temp_directory.path().join("mempalace.yaml");
         assert!(
@@ -903,7 +997,7 @@ mod tests {
         // Rooms list — empty is fine for the print test.
         let rooms: Vec<crate::config::RoomConfig> = vec![];
         // Must not panic with any non-empty DetectedDict.
-        run_print_summary("my_project", 42, &rooms, &detected);
+        run_print_summary("my_project", 42, 1_500_000, &rooms, &detected);
     }
 
     #[test]
@@ -1212,6 +1306,122 @@ mod tests {
     }
 
     // --- run_gitignore_protect: separator added when .gitignore does not end with newline ---
+
+    // -- auto_mine and run_prompt_mine --
+
+    #[test]
+    fn run_prompt_mine_with_auto_mine_true_returns_true() {
+        // auto_mine=true must return Ok(true) without reading stdin.
+        let result = run_prompt_mine(true).expect("auto_mine must not fail");
+        assert!(result, "auto_mine=true must proceed to mine");
+        // Pair assertion: no stdin was consumed (EOF would give Ok(false), not true).
+        assert!(result, "result must stay true — no stdin fallthrough");
+    }
+
+    #[test]
+    fn init_run_with_auto_mine_returns_some_files() {
+        // auto_mine=true must return Some(files) after a successful init.
+        let temp_directory =
+            tempfile::tempdir().expect("failed to create temporary directory for auto_mine test");
+        let result = run(
+            temp_directory.path(),
+            true,
+            true,
+            false,
+            &[],
+            &LlmOpts::default(),
+        )
+        .expect("init::run with auto_mine=true must succeed");
+        // When auto_mine is set the caller gets the pre-scanned file list.
+        assert!(
+            result.is_some(),
+            "auto_mine=true must return Some(files) so the caller can mine"
+        );
+        // Pair assertion: config must have been written (init completed before mine hand-off).
+        assert!(
+            temp_directory.path().join("mempalace.yaml").exists(),
+            "mempalace.yaml must exist even when auto_mine=true"
+        );
+    }
+
+    #[test]
+    fn init_run_yes_without_auto_mine_returns_none_on_eof() {
+        // Regression guard: --yes alone must NOT skip the mine prompt.
+        // In tests stdin is EOF so run_prompt_mine returns false → None.
+        let temp_directory = tempfile::tempdir()
+            .expect("failed to create temporary directory for yes-no-auto-mine test");
+        let result = run(
+            temp_directory.path(),
+            true,
+            false,
+            false,
+            &[],
+            &LlmOpts::default(),
+        )
+        .expect("init::run with yes=true auto_mine=false must succeed");
+        // Stdin is EOF in tests → mine prompt declines → None.
+        assert!(
+            result.is_none(),
+            "--yes alone must not auto-mine; user declined (EOF)"
+        );
+        // Pair assertion: config is still written even when mine is declined.
+        assert!(
+            temp_directory.path().join("mempalace.yaml").exists(),
+            "mempalace.yaml must be written even when mine is declined"
+        );
+    }
+
+    // -- run_compute_total_bytes --
+
+    #[test]
+    fn run_compute_total_bytes_sums_file_sizes() {
+        // run_compute_total_bytes must return the total byte count of all files.
+        let dir = tempfile::tempdir().expect("tempdir must succeed");
+        let file_a = dir.path().join("a.txt");
+        let file_b = dir.path().join("b.txt");
+        std::fs::write(&file_a, "hello").expect("write a.txt must succeed");
+        std::fs::write(&file_b, "world!").expect("write b.txt must succeed");
+        let total = run_compute_total_bytes(&[file_a, file_b]);
+        assert_eq!(total, 11, "5 + 6 bytes must equal 11");
+        // Pair assertion: single file round-trips correctly.
+        let file_c = dir.path().join("c.txt");
+        std::fs::write(&file_c, "abc").expect("write c.txt must succeed");
+        let single = run_compute_total_bytes(&[file_c]);
+        assert_eq!(single, 3, "single 3-byte file must total 3");
+    }
+
+    #[test]
+    fn run_compute_total_bytes_skips_missing_files() {
+        // A path that does not exist must contribute 0 bytes, not an error.
+        let phantom = std::path::PathBuf::from("/nonexistent/file.txt");
+        let total = run_compute_total_bytes(&[phantom]);
+        assert_eq!(total, 0, "missing file must contribute 0 bytes");
+    }
+
+    // -- run_print_summary with size labels --
+
+    #[test]
+    fn run_print_summary_with_large_size_does_not_panic() {
+        // Exercises the ">= 1 MB" branch in the size label computation.
+        use crate::palace::entities::DetectedEntity;
+        use crate::palace::project_scanner::DetectedDict;
+        let detected = DetectedDict {
+            people: vec![DetectedEntity {
+                name: "Alice".to_string(),
+                entity_type: "person".to_string(),
+                confidence: 0.9,
+                frequency: 1,
+                signals: vec![],
+            }],
+            projects: vec![],
+            uncertain: vec![],
+        };
+        let rooms: Vec<crate::config::RoomConfig> = vec![];
+        // 5 MB total — exercises the integer-division MB branch.
+        run_print_summary("test_wing", 10, 5 * 1_048_576, &rooms, &detected);
+        // Pair assertion: sub-MB branch also succeeds.
+        run_print_summary("test_wing", 0, 0, &rooms, &detected);
+    }
 
     #[test]
     fn gitignore_protect_adds_separator_when_existing_lacks_trailing_newline() {

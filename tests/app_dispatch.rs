@@ -31,6 +31,7 @@ async fn app_run_init_creates_config_with_yes_flag() {
             llm_endpoint: None,
             llm_api_key: None,
             accept_external_llm: false,
+            auto_mine: false,
         },
     };
 

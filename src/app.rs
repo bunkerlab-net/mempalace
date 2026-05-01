@@ -52,6 +52,7 @@ pub async fn run(cli: Cli) -> error::Result<()> {
             llm_endpoint,
             llm_api_key,
             accept_external_llm,
+            auto_mine,
         } => {
             let llm_opts = cli::init::LlmOpts {
                 enabled: llm,
@@ -61,7 +62,13 @@ pub async fn run(cli: Cli) -> error::Result<()> {
                 api_key: llm_api_key,
                 accept_external_llm,
             };
-            cli::init::run(&directory, yes, no_gitignore, &lang, &llm_opts)?;
+            // init::run returns Some(files) when the user agrees to mine immediately.
+            if let Some(pre_scanned_files) =
+                cli::init::run(&directory, yes, auto_mine, no_gitignore, &lang, &llm_opts)?
+            {
+                run_mine_after_init(palace_override, &directory, no_gitignore, pre_scanned_files)
+                    .await?;
+            }
         }
 
         Command::Mine {
@@ -211,6 +218,44 @@ pub async fn run(cli: Cli) -> error::Result<()> {
     }
 
     Ok(())
+}
+
+/// Mine the just-initialised project directory using pre-scanned files.
+///
+/// Called by the `init` arm when the user confirms mining. Opens the palace,
+/// acquires the mine lock, and delegates to `palace::miner::mine` with the
+/// file list that `init::run` already computed so the directory walk is not
+/// repeated.
+async fn run_mine_after_init(
+    palace_override: Option<&std::path::Path>,
+    directory: &std::path::Path,
+    no_gitignore: bool,
+    pre_scanned_files: Vec<std::path::PathBuf>,
+) -> error::Result<()> {
+    assert!(
+        !pre_scanned_files.is_empty() || directory.is_dir(),
+        "run_mine_after_init: directory must exist"
+    );
+    let opts = palace::miner::MineParams {
+        wing: None,
+        agent: "mempalace".to_string(),
+        limit: 0,
+        dry_run: false,
+        respect_gitignore: !no_gitignore,
+        include_ignored_paths: vec![],
+        pre_scanned_files: Some(pre_scanned_files),
+    };
+    let (_db, connection, palace_path) = open_palace(palace_override).await?;
+    let lock_dir = palace_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let _mine_guard = palace::miner::acquire_mine_lock(lock_dir)?;
+    assert!(
+        lock_dir.is_dir(),
+        "run_mine_after_init: lock_dir must be a directory"
+    );
+    palace::miner::mine(&connection, directory, &opts).await
 }
 
 /// Handle the `search` sub-command — opens the palace and runs the search.
@@ -456,6 +501,7 @@ async fn run_mine(
         dry_run,
         respect_gitignore: !no_gitignore,
         include_ignored_paths: include_ignored,
+        pre_scanned_files: None,
     };
     match mode.as_str() {
         "projects" => {
