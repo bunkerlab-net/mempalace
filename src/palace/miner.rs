@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use turso::Connection;
 
-use crate::config::{ProjectConfig, RoomConfig};
+use crate::config::{ProjectConfig, RoomConfig, normalize_wing_name};
 use crate::error::Result;
 use crate::palace::chunker::chunk_text;
 use crate::palace::drawer;
@@ -540,19 +540,19 @@ fn mine_load_config(project_dir: &Path, override_wing: Option<&str>) -> Result<P
         }
         trimmed
     } else {
-        let inferred = project_dir
+        let raw = project_dir
             .file_name()
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned();
-        if inferred.is_empty() {
+        if raw.is_empty() {
             return Err(crate::error::Error::Other(format!(
                 "cannot infer wing name: {} has no basename; \
                  add mempalace.yaml with an explicit wing name",
                 project_dir.display()
             )));
         }
-        inferred
+        normalize_wing_name(&raw)
     };
     eprintln!(
         "  No mempalace.yaml/.yml found in {} \
@@ -1062,15 +1062,17 @@ mod tests {
 
     #[test]
     fn mine_load_config_synthesises_defaults_when_no_config() {
-        // No config files present — defaults use the directory basename as wing.
+        // No config files present — defaults use the normalized directory basename as wing.
+        // Normalization lowercases and replaces spaces/hyphens with underscores.
         let dir = tempfile::tempdir().expect("tempdir should be created");
         let config = mine_load_config(dir.path(), None).expect("should synthesise defaults");
-        let expected_wing = dir
+        let raw_basename = dir
             .path()
             .file_name()
             .unwrap_or_default()
             .to_string_lossy()
-            .to_string();
+            .into_owned();
+        let expected_wing = normalize_wing_name(&raw_basename);
         assert_eq!(config.wing, expected_wing);
         assert_eq!(config.rooms.len(), 1);
         assert_eq!(config.rooms[0].name, "general");

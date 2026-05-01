@@ -5,6 +5,7 @@ use serde::Serialize;
 use sha2::Digest as _;
 use turso::Connection;
 
+use crate::config::normalize_wing_name;
 use crate::db::query_all;
 use crate::error::Result;
 
@@ -61,6 +62,20 @@ pub struct GraphStats {
     pub rooms_per_wing: HashMap<String, usize>,
     /// Top rooms by number of wings spanned.
     pub top_tunnels: Vec<RoomNode>,
+}
+
+/// Normalize a wing slug: trim whitespace, then apply the canonical slug rule.
+///
+/// Callers that filter by wing name must normalize before querying so that
+/// "mempalace-rs" and "`mempalace_rs`" resolve to the same wing. Wraps
+/// `config::normalize_wing_name` after trimming.
+fn normalize_wing(wing: &str) -> String {
+    let trimmed = wing.trim();
+    assert!(
+        !trimmed.is_empty(),
+        "normalize_wing: wing must not be empty after trim"
+    );
+    normalize_wing_name(trimmed)
 }
 
 /// Build the palace graph from drawer metadata.
@@ -246,6 +261,9 @@ fn traverse_expand_frontier(
 ///
 /// Returns `(tunnels, truncated)` where `truncated` is `true` when the full
 /// result set exceeded `GRAPH_RESULT_CAP` and was capped.
+// `wing_a_norm`/`wing_b_norm` are intentionally parallel: `a` and `b` are
+// the canonical endpoint labels for a tunnel; suppressing similar_names here.
+#[allow(clippy::similar_names)]
 pub async fn find_tunnels(
     connection: &Connection,
     wing_a: Option<&str>,
@@ -253,19 +271,23 @@ pub async fn find_tunnels(
 ) -> Result<(Vec<RoomNode>, bool)> {
     let (nodes, _) = build_graph(connection).await?;
 
+    // Normalize filters so "mempalace-rs" and "mempalace_rs" resolve identically.
+    let wing_a_norm = wing_a.map(normalize_wing);
+    let wing_b_norm = wing_b.map(normalize_wing);
+
     let mut tunnels: Vec<RoomNode> = nodes
         .into_values()
         .filter(|node| {
             if node.wings.len() < 2 {
                 return false;
             }
-            if let Some(wa) = wing_a
-                && !node.wings.contains(&wa.to_string())
+            if let Some(ref wa) = wing_a_norm
+                && !node.wings.contains(wa)
             {
                 return false;
             }
-            if let Some(wb) = wing_b
-                && !node.wings.contains(&wb.to_string())
+            if let Some(ref wb) = wing_b_norm
+                && !node.wings.contains(wb)
             {
                 return false;
             }
@@ -455,15 +477,31 @@ pub async fn create_tunnel(
         "target_room must not be empty"
     );
 
+    // Normalize wing slugs so "my-project" and "my_project" resolve identically.
+    let source_wing_norm = normalize_wing(params.source_wing);
+    let target_wing_norm = normalize_wing(params.target_wing);
+    assert!(!source_wing_norm.is_empty());
+    assert!(!target_wing_norm.is_empty());
+
+    let norm_params = CreateTunnelParams {
+        source_wing: &source_wing_norm,
+        target_wing: &target_wing_norm,
+        source_room: params.source_room,
+        target_room: params.target_room,
+        label: params.label,
+        source_drawer_id: params.source_drawer_id,
+        target_drawer_id: params.target_drawer_id,
+    };
+
     let tunnel_id = canonical_tunnel_id(
-        params.source_wing,
-        params.source_room,
-        params.target_wing,
-        params.target_room,
+        norm_params.source_wing,
+        norm_params.source_room,
+        norm_params.target_wing,
+        norm_params.target_room,
     );
     let now = Utc::now().to_rfc3339();
 
-    create_tunnel_upsert(connection, &tunnel_id, params, &now).await?;
+    create_tunnel_upsert(connection, &tunnel_id, &norm_params, &now).await?;
     create_tunnel_read_back(connection, &tunnel_id).await
 }
 
@@ -557,18 +595,20 @@ pub async fn list_tunnels(
     connection: &Connection,
     wing: Option<&str>,
 ) -> Result<Vec<ExplicitTunnel>> {
-    if let Some(w) = wing {
+    // Normalize the filter slug so hyphenated and underscored names match stored values.
+    let wing_norm = wing.map(normalize_wing);
+    if let Some(ref w) = wing_norm {
         assert!(!w.is_empty(), "wing filter must not be an empty string");
     }
 
     // Two separate queries rather than one with a `?1 IS NULL OR ...` guard,
     // so SQLite can use the wing column index when a filter is present instead
     // of falling back to a full table scan.
-    let rows = if let Some(w) = wing {
+    let rows = if let Some(ref w) = wing_norm {
         query_all(
             connection,
             "SELECT id, source_wing, source_room, target_wing, target_room, source_drawer_id, target_drawer_id, label, created_at, updated_at FROM explicit_tunnels WHERE source_wing = ?1 OR target_wing = ?1 ORDER BY created_at DESC",
-            [w],
+            [w.as_str()],
         )
         .await?
     } else {
@@ -630,10 +670,14 @@ pub async fn follow_tunnels(
     assert!(!wing.is_empty(), "wing must not be empty");
     assert!(!room.is_empty(), "room must not be empty");
 
+    // Normalize so "my-project" and "my_project" resolve to the same wing.
+    let wing = normalize_wing(wing);
+    assert!(!wing.is_empty());
+
     let rows = query_all(
         connection,
         "SELECT id, source_wing, source_room, target_wing, target_room, source_drawer_id, target_drawer_id, label FROM explicit_tunnels WHERE (source_wing = ?1 AND source_room = ?2) OR (target_wing = ?1 AND target_room = ?2)",
-        [wing, room],
+        [wing.as_str(), room],
     )
     .await?;
 
@@ -877,13 +921,15 @@ mod tests {
         .await
         .expect("create CD");
 
+        // Wing names are normalized to lowercase on insert, so "wA" → "wa".
+        // The filter is also normalized so querying with "wA" finds the stored "wa" row.
         let tunnels = list_tunnels(&connection, Some("wA"))
             .await
             .expect("list by wA");
         assert_eq!(tunnels.len(), 1, "filter by wA should return 1 tunnel");
         assert!(
-            tunnels[0].source_wing == "wA" || tunnels[0].target_wing == "wA",
-            "returned tunnel must involve wA"
+            tunnels[0].source_wing == "wa" || tunnels[0].target_wing == "wa",
+            "returned tunnel must involve normalized wA (stored as 'wa')"
         );
     }
 

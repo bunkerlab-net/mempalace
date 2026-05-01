@@ -176,6 +176,24 @@ pub(crate) fn expand_tilde(path: &Path) -> PathBuf {
     result
 }
 
+/// Normalize a directory name into a wing slug.
+///
+/// Lowercases the name and replaces spaces and hyphens with underscores.
+/// This is the single canonical rule used by every wing-slug producer
+/// (`miner`, `convo_miner`, `room_detect`, `palace_graph`, `cli::init`) — matches
+/// `mempalace/config.py::normalize_wing_name` verbatim.
+pub fn normalize_wing_name(name: &str) -> String {
+    assert!(
+        !name.is_empty(),
+        "normalize_wing_name: name must not be empty"
+    );
+    let result = name.to_lowercase().replace([' ', '-'], "_");
+    assert!(!result.is_empty());
+    assert!(!result.contains(' '));
+    assert!(!result.contains('-'));
+    result
+}
+
 /// Path to the global config file.
 pub fn config_path() -> PathBuf {
     config_dir().join("config.json")
@@ -1438,6 +1456,45 @@ rooms:
         let config: MempalaceConfig = serde_json::from_str(json).expect("parse json");
         assert_eq!(config.entity_languages, vec!["en".to_string()]);
         assert!(!config.entity_languages.is_empty());
+    }
+
+    // -- normalize_wing_name --------------------------------------------------
+
+    #[test]
+    fn normalize_wing_name_lowercases() {
+        // Uppercase letters must be folded to lowercase.
+        assert_eq!(normalize_wing_name("MyProject"), "myproject");
+        assert_eq!(normalize_wing_name("SCREAMING"), "screaming");
+    }
+
+    #[test]
+    fn normalize_wing_name_replaces_hyphens_with_underscores() {
+        // Hyphens must become underscores — the canonical rule from Python.
+        assert_eq!(normalize_wing_name("mempalace-rs"), "mempalace_rs");
+        assert_eq!(normalize_wing_name("my-cool-project"), "my_cool_project");
+    }
+
+    #[test]
+    fn normalize_wing_name_replaces_spaces_with_underscores() {
+        // Spaces must become underscores.
+        assert_eq!(normalize_wing_name("my project"), "my_project");
+        assert_eq!(normalize_wing_name("hello world"), "hello_world");
+    }
+
+    #[test]
+    fn normalize_wing_name_mixed_input() {
+        // Mixed case, hyphens, and spaces all normalized in one pass.
+        let result = normalize_wing_name("My-Cool Project");
+        assert_eq!(result, "my_cool_project");
+        assert!(!result.contains('-'));
+        assert!(!result.contains(' '));
+    }
+
+    #[test]
+    fn normalize_wing_name_already_normalized_is_idempotent() {
+        // An already-slugged name must be returned unchanged.
+        let slug = "my_project";
+        assert_eq!(normalize_wing_name(slug), slug);
     }
 
     #[test]
