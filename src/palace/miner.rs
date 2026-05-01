@@ -962,6 +962,40 @@ mod tests {
     }
 
     #[test]
+    fn acquire_mine_lock_different_lock_dirs_do_not_contend() {
+        // Locks in different directories must not block each other — two distinct
+        // palaces can be mined concurrently.
+        let dir_a = tempfile::tempdir().expect("tempdir A must succeed");
+        let dir_b = tempfile::tempdir().expect("tempdir B must succeed");
+
+        let guard_a = acquire_mine_lock(dir_a.path()).expect("first palace lock must succeed");
+        let guard_b = acquire_mine_lock(dir_b.path()).expect("second palace lock must not contend");
+
+        // Positive space: both lockfiles must exist simultaneously.
+        assert!(
+            dir_a.path().join("mine.lock").exists(),
+            "mine.lock must exist in dir_a while guard_a is held"
+        );
+        assert!(
+            dir_b.path().join("mine.lock").exists(),
+            "mine.lock must exist in dir_b while guard_b is held"
+        );
+
+        drop(guard_a);
+        drop(guard_b);
+
+        // Negative space: both lockfiles must be removed after guards are dropped.
+        assert!(
+            !dir_a.path().join("mine.lock").exists(),
+            "mine.lock must be removed from dir_a after drop"
+        );
+        assert!(
+            !dir_b.path().join("mine.lock").exists(),
+            "mine.lock must be removed from dir_b after drop"
+        );
+    }
+
+    #[test]
     fn scan_project_finds_text_files() {
         let dir = tempfile::tempdir().expect("tempdir should be created");
 
