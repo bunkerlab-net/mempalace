@@ -644,14 +644,11 @@ fn run_confirm_and_save(
         eprintln!("  Warning: could not update entity registry: {error}");
     }
 
-    // Skip the per-project `entities.json` write when nothing was confirmed.
-    // The registry update above already cleared any stale topics, so there
-    // is no value in writing an empty entities.json file.
-    if confirmed.people.is_empty() && confirmed.projects.is_empty() && confirmed.topics.is_empty() {
-        return Ok(());
-    }
-
-    // Write entities.json into the project directory.
+    // Always overwrite the per-project `entities.json` so the on-disk audit
+    // file mirrors the registry. Skipping the write on a re-init that
+    // confirmed nothing would leave stale entities from the previous run on
+    // disk while the registry's `topics_by_wing[wing]` was just cleared,
+    // producing a confusing divergence between the two surfaces.
     let entities_json = serde_json::json!({
         "people": confirmed.people,
         "projects": confirmed.projects,
@@ -817,6 +814,8 @@ fn run_print_summary(
     assert!(!wing_name.is_empty());
 
     // Format bytes as "<1 MB" when under 1 MiB, or the integer MiB count otherwise.
+    // Integer division on `total_bytes` is intentional: the summary reports whole
+    // MiB units and the fractional remainder is dropped on purpose for display.
     #[allow(clippy::integer_division)]
     let size_label = if total_bytes < 1_048_576 {
         "<1 MB".to_string()
@@ -1288,11 +1287,24 @@ mod tests {
     }
 
     #[test]
-    fn run_confirm_and_save_skips_write_when_nothing_confirmed() {
-        // With no entities above the confidence threshold, entities.json must not be written.
+    fn run_confirm_and_save_writes_empty_entities_json_when_nothing_confirmed() {
+        // entities.json must always exist after init — even when no entities
+        // were confirmed — so the on-disk audit file mirrors the cleared
+        // registry. Skipping the write would leave stale entries from a
+        // previous run while topics_by_wing[wing] was already cleared,
+        // producing a confusing divergence between the two surfaces.
         use crate::palace::entities::DetectedEntity;
         use crate::palace::project_scanner::DetectedDict;
-        let temp_dir = tempfile::tempdir().expect("must create temp dir for skip-write test");
+        let temp_dir = tempfile::tempdir().expect("must create temp dir for empty-write test");
+        let registry_dir = tempfile::tempdir().expect("registry dir");
+        // Seed a stale entities.json so we can confirm it gets overwritten.
+        let entities_path = temp_dir.path().join("entities.json");
+        std::fs::write(
+            &entities_path,
+            r#"{"people":["StaleAlice"],"projects":["StaleProj"],"topics":["StaleTopic"]}"#,
+        )
+        .expect("seed stale entities.json");
+
         let detected = DetectedDict {
             // Below threshold — will not be auto-accepted.
             people: vec![DetectedEntity {
@@ -1306,12 +1318,25 @@ mod tests {
             uncertain: vec![],
             topics: vec![],
         };
-        run_confirm_and_save(&detected, true, temp_dir.path(), "test_wing")
-            .expect("run_confirm_and_save must succeed even with no confirmations");
-        let entities_path = temp_dir.path().join("entities.json");
+        temp_env::with_var("MEMPALACE_DIR", Some(registry_dir.path()), || {
+            run_confirm_and_save(&detected, true, temp_dir.path(), "test_wing")
+                .expect("run_confirm_and_save must succeed even with no confirmations");
+        });
         assert!(
-            !entities_path.exists(),
-            "entities.json must NOT be written when nothing is confirmed"
+            entities_path.exists(),
+            "entities.json must exist after init — always overwritten"
+        );
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&entities_path).expect("read"))
+                .expect("parse");
+        // Pair assertion: each category is present and empty (stale data overwritten).
+        for key in ["people", "projects", "topics"] {
+            let arr = value[key].as_array().expect("array");
+            assert!(arr.is_empty(), "{key} must be empty after re-init clears");
+        }
+        assert!(
+            !value.to_string().contains("StaleAlice"),
+            "stale entries must be overwritten, not retained"
         );
     }
 
