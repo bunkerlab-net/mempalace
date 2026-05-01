@@ -152,8 +152,11 @@ pub async fn run(cli: Cli) -> error::Result<()> {
             run_dedup(palace_override, wing, threshold, dry_run, stats).await?;
         }
 
-        Command::Repair { skip_confirm } => {
-            run_repair(palace_override, skip_confirm).await?;
+        Command::Repair {
+            skip_confirm,
+            confirm_truncation_ok,
+        } => {
+            run_repair(palace_override, skip_confirm, confirm_truncation_ok).await?;
         }
 
         Command::Mcp { setup } => {
@@ -331,10 +334,12 @@ async fn run_dedup(
 /// Handle the `repair` sub-command — prompts for confirmation then rebuilds the index.
 ///
 /// `skip_confirm` maps to the `-y` / `--yes` CLI flag; when false the user must
-/// type "y" before the repair proceeds.
+/// type "y" before the repair proceeds. `confirm_truncation_ok` maps to
+/// `--confirm-truncation-ok` and bypasses the truncation safety check.
 async fn run_repair(
     palace_override: Option<&std::path::Path>,
     skip_confirm: bool,
+    confirm_truncation_ok: bool,
 ) -> error::Result<()> {
     if !skip_confirm {
         use std::io::Write;
@@ -351,7 +356,7 @@ async fn run_repair(
         !palace_path.as_os_str().is_empty(),
         "run_repair: palace_path must not be empty"
     );
-    cli::repair::run(&connection, &palace_path).await
+    cli::repair::run(&connection, &palace_path, confirm_truncation_ok).await
 }
 
 /// Read one line from `reader` and return `true` iff the user typed "y" (case-insensitive).

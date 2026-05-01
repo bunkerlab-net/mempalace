@@ -496,7 +496,10 @@ async fn app_run_repair_with_palace() {
 
     let cli_instance = Cli {
         palace: None,
-        command: Command::Repair { skip_confirm: true },
+        command: Command::Repair {
+            skip_confirm: true,
+            confirm_truncation_ok: false,
+        },
     };
 
     temp_env::async_with_vars(

@@ -238,6 +238,13 @@ pub enum Command {
         /// Skip the confirmation prompt (non-interactive / CI mode)
         #[arg(long, short = 'y')]
         skip_confirm: bool,
+        /// Override the truncation safety guard after independently verifying the palace size.
+        ///
+        /// Required when extraction returns exactly 10,000 drawers and the database
+        /// count cross-check either matches or cannot be read. Use only after confirming
+        /// the palace genuinely contains that count.
+        #[arg(long)]
+        confirm_truncation_ok: bool,
     },
 
     /// Run as MCP server (JSON-RPC over stdio)
