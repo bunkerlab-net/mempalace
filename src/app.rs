@@ -924,4 +924,169 @@ mod tests {
         );
         assert!(palace_path.exists());
     }
+
+    // ── run_repair_confirm oversized input ────────────────────────────────
+
+    #[test]
+    fn run_repair_confirm_oversized_input_returns_false() {
+        // Input longer than 1024 bytes must be treated as invalid and return false
+        // rather than panicking — users may paste clipboard contents into the prompt.
+        let oversized = vec![b'y'; 1025];
+        let cursor = std::io::Cursor::new(oversized);
+        assert!(
+            !run_repair_confirm(cursor),
+            "oversized input must not confirm the repair"
+        );
+    }
+
+    // ── Command::Split dispatch ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn run_command_split_dry_run_on_empty_dir_returns_ok() {
+        // Command::Split on an empty directory with dry_run must succeed without
+        // writing any files; it does not open a palace so no palace override is needed.
+        let temp_directory = tempfile::tempdir()
+            .expect("failed to create temporary directory for Command::Split test");
+        let cli = Cli {
+            palace: None,
+            command: Command::Split {
+                directory: temp_directory.path().to_path_buf(),
+                output_dir: None,
+                dry_run: true,
+                sessions_min: 2, // minimum valid value; 1 is rejected by cli::split::run
+                no_gitignore: false,
+            },
+        };
+        let result = run(cli).await;
+        assert!(
+            result.is_ok(),
+            "Command::Split dry-run on an empty directory must return Ok"
+        );
+    }
+
+    // ── Command::ClosetLlm dispatch ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn run_command_closet_llm_no_llm_returns_ok() {
+        // When LLM is disabled Command::ClosetLlm must return Ok without touching
+        // the palace — so no palace DB is required.
+        let temp_directory = tempfile::tempdir()
+            .expect("failed to create temporary directory for Command::ClosetLlm test");
+        let palace_path = temp_directory.path().join("palace.db");
+        let cli = Cli {
+            palace: Some(palace_path.clone()),
+            command: Command::ClosetLlm {
+                wing: None,
+                sample: 0,
+                dry_run: true,
+                llm: false, // disabled — no LLM calls made
+                llm_provider: "ollama".to_string(),
+                llm_model: "llama3".to_string(),
+                llm_endpoint: None,
+                llm_api_key: None,
+            },
+        };
+        let result = run(cli).await;
+        assert!(
+            result.is_ok(),
+            "Command::ClosetLlm with LLM disabled must return Ok"
+        );
+    }
+
+    // ── Command::Repair skip_confirm path ────────────────────────────────
+
+    #[tokio::test]
+    async fn run_command_repair_skip_confirm_returns_ok() {
+        // When skip_confirm=true, repair proceeds directly without a stdin prompt.
+        let temp_directory = tempfile::tempdir()
+            .expect("failed to create temporary directory for Command::Repair skip_confirm test");
+        let palace_path = temp_directory.path().join("palace.db");
+        let cli = Cli {
+            palace: Some(palace_path.clone()),
+            command: Command::Repair {
+                skip_confirm: true,
+                confirm_truncation_ok: false,
+            },
+        };
+        let result = run(cli).await;
+        assert!(
+            result.is_ok(),
+            "Command::Repair with skip_confirm=true must return Ok on an empty palace"
+        );
+        // Pair assertion: the palace was opened and created at the override path.
+        assert!(
+            palace_path.exists(),
+            "palace.db must exist after repair opens the palace"
+        );
+    }
+
+    // ── Command::Mine projects and convos ────────────────────────────────
+
+    #[tokio::test]
+    async fn run_command_mine_projects_dry_run_returns_ok() {
+        // Command::Mine in projects mode with dry_run=true must open the palace
+        // and return Ok without writing any drawers.
+        let temp_directory = tempfile::tempdir()
+            .expect("failed to create temporary directory for Command::Mine projects test");
+        let palace_path = temp_directory.path().join("palace.db");
+        let mine_dir = temp_directory.path().join("source");
+        std::fs::create_dir_all(&mine_dir).expect("must create mine directory");
+        let cli = Cli {
+            palace: Some(palace_path.clone()),
+            command: Command::Mine {
+                directory: mine_dir,
+                mode: "projects".to_string(),
+                extract_mode: "full".to_string(),
+                wing: None,
+                agent: "test".to_string(),
+                limit: 0,
+                dry_run: true,
+                no_gitignore: false,
+                include_ignored: vec![],
+            },
+        };
+        let result = run(cli).await;
+        assert!(
+            result.is_ok(),
+            "Command::Mine projects dry-run must return Ok"
+        );
+        assert!(
+            palace_path.exists(),
+            "palace.db must be created by open_palace during mine"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_command_mine_convos_dry_run_returns_ok() {
+        // Command::Mine in convos mode with dry_run=true must open the palace
+        // and return Ok without writing any drawers.
+        let temp_directory = tempfile::tempdir()
+            .expect("failed to create temporary directory for Command::Mine convos test");
+        let palace_path = temp_directory.path().join("palace.db");
+        let mine_dir = temp_directory.path().join("convos");
+        std::fs::create_dir_all(&mine_dir).expect("must create convos directory");
+        let cli = Cli {
+            palace: Some(palace_path.clone()),
+            command: Command::Mine {
+                directory: mine_dir,
+                mode: "convos".to_string(),
+                extract_mode: "full".to_string(),
+                wing: None,
+                agent: "test".to_string(),
+                limit: 0,
+                dry_run: true,
+                no_gitignore: false,
+                include_ignored: vec![],
+            },
+        };
+        let result = run(cli).await;
+        assert!(
+            result.is_ok(),
+            "Command::Mine convos dry-run must return Ok"
+        );
+        assert!(
+            palace_path.exists(),
+            "palace.db must be created by open_palace during mine"
+        );
+    }
 }
