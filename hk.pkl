@@ -34,6 +34,8 @@ local linters = new Mapping<String, Step> {
   ["sort_package_json"] = Builtins.sort_package_json
   // No trailing whitespace allowed
   ["trailing_whitespace"] = Builtins.trailing_whitespace
+  // Zizmor
+  ["zizmor"] = Builtins.zizmor
 }
 
 hooks {

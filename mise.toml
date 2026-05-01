@@ -16,6 +16,7 @@ node = "24"
 pkl = "0.31"
 taplo = "0.10"
 usage = "latest"
+zizmor = "1"
 
 [hooks]
 enter = ["hk install --mise"]
