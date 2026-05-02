@@ -945,15 +945,24 @@ mod tests {
                         return;
                     }
                     if let Some(rest) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                        content_length = rest.trim().parse().unwrap_or(0);
+                        // Abort the connection if the header value cannot be parsed — proceeding
+                        // without a valid length would leave request bytes in the socket buffer.
+                        let Ok(length) = rest.trim().parse::<usize>() else {
+                            return;
+                        };
+                        content_length = length;
                     }
                     if line == "\r\n" {
                         break;
                     }
                 }
                 // Drain the request body so no bytes remain in the receive buffer.
+                // Absent Content-Length (e.g. GET with no body) leaves content_length at 0 and
+                // the drain is a no-op.
                 let mut body_buf = vec![0u8; content_length];
-                let _ = reader.read_exact(&mut body_buf);
+                if !body_buf.is_empty() && reader.read_exact(&mut body_buf).is_err() {
+                    return;
+                }
                 let mut stream = reader.into_inner();
                 let _ = stream.write_all(response.as_bytes());
             }
