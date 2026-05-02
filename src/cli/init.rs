@@ -906,17 +906,24 @@ mod tests {
     fn init_run_creates_mempalace_yaml_in_directory() {
         // init::run with yes=true must write a mempalace.yaml to the target directory.
         // auto_mine=false — stdin is EOF in tests so mine prompt returns false (None).
+        // MEMPALACE_DIR is redirected because run calls run_confirm_and_save, which calls
+        // add_to_known_entities, which writes known_entities.json to config_dir()
+        // (defaults to ~/.local/share/mempalace without the override).
         let temp_directory =
             tempfile::tempdir().expect("failed to create temporary directory for init test");
-        run(
-            temp_directory.path(),
-            true,
-            false,
-            false,
-            &[],
-            &LlmOpts::default(),
-        )
-        .expect("init::run should succeed for a valid directory with yes=true");
+        let registry_dir =
+            tempfile::tempdir().expect("failed to create registry dir for init test");
+        temp_env::with_var("MEMPALACE_DIR", Some(registry_dir.path()), || {
+            run(
+                temp_directory.path(),
+                true,
+                false,
+                false,
+                &[],
+                &LlmOpts::default(),
+            )
+            .expect("init::run should succeed for a valid directory with yes=true");
+        });
 
         let config_path = temp_directory.path().join("mempalace.yaml");
         assert!(config_path.exists(), "mempalace.yaml must be created");
@@ -947,20 +954,27 @@ mod tests {
     #[test]
     fn init_run_no_gitignore_flag_counts_files() {
         // no_gitignore=true must still produce a valid config (just without .gitignore filtering).
+        // MEMPALACE_DIR is redirected because run calls run_confirm_and_save, which calls
+        // add_to_known_entities, which writes known_entities.json to config_dir()
+        // (defaults to ~/.local/share/mempalace without the override).
         let temp_directory = tempfile::tempdir()
             .expect("failed to create temporary directory for no-gitignore init test");
+        let registry_dir =
+            tempfile::tempdir().expect("failed to create registry dir for no-gitignore init test");
         std::fs::write(temp_directory.path().join("test.rs"), "fn main() {}")
             .expect("failed to write test source file");
 
-        run(
-            temp_directory.path(),
-            true,
-            false,
-            true,
-            &[],
-            &LlmOpts::default(),
-        )
-        .expect("init::run should succeed with no_gitignore=true");
+        temp_env::with_var("MEMPALACE_DIR", Some(registry_dir.path()), || {
+            run(
+                temp_directory.path(),
+                true,
+                false,
+                true,
+                &[],
+                &LlmOpts::default(),
+            )
+            .expect("init::run should succeed with no_gitignore=true");
+        });
 
         let config_path = temp_directory.path().join("mempalace.yaml");
         assert!(
@@ -1777,17 +1791,28 @@ mod tests {
     #[test]
     fn init_run_with_auto_mine_returns_some_files() {
         // auto_mine=true must return Some(files) after a successful init.
+        // MEMPALACE_DIR is redirected because run calls run_confirm_and_save, which
+        // calls add_to_known_entities, which writes known_entities.json to config_dir()
+        // (defaults to ~/.local/share/mempalace without the override).
         let temp_directory =
             tempfile::tempdir().expect("failed to create temporary directory for auto_mine test");
-        let result = run(
-            temp_directory.path(),
-            true,
-            true,
-            false,
-            &[],
-            &LlmOpts::default(),
-        )
-        .expect("init::run with auto_mine=true must succeed");
+        let registry_dir =
+            tempfile::tempdir().expect("failed to create registry dir for auto_mine test");
+        let mut result = None;
+        temp_env::with_var("MEMPALACE_DIR", Some(registry_dir.path()), || {
+            result = Some(
+                run(
+                    temp_directory.path(),
+                    true,
+                    true,
+                    false,
+                    &[],
+                    &LlmOpts::default(),
+                )
+                .expect("init::run with auto_mine=true must succeed"),
+            );
+        });
+        let result = result.expect("run must have been called inside the closure");
         // When auto_mine is set the caller gets the pre-scanned file list.
         assert!(
             result.is_some(),
@@ -1804,17 +1829,28 @@ mod tests {
     fn init_run_yes_without_auto_mine_returns_none_on_eof() {
         // Regression guard: --yes alone must NOT skip the mine prompt.
         // In tests stdin is EOF so run_prompt_mine returns false → None.
+        // MEMPALACE_DIR is redirected because run calls run_confirm_and_save, which
+        // calls add_to_known_entities, which writes known_entities.json to config_dir()
+        // (defaults to ~/.local/share/mempalace without the override).
         let temp_directory = tempfile::tempdir()
             .expect("failed to create temporary directory for yes-no-auto-mine test");
-        let result = run(
-            temp_directory.path(),
-            true,
-            false,
-            false,
-            &[],
-            &LlmOpts::default(),
-        )
-        .expect("init::run with yes=true auto_mine=false must succeed");
+        let registry_dir =
+            tempfile::tempdir().expect("failed to create registry dir for yes-no-auto-mine test");
+        let mut result = None;
+        temp_env::with_var("MEMPALACE_DIR", Some(registry_dir.path()), || {
+            result = Some(
+                run(
+                    temp_directory.path(),
+                    true,
+                    false,
+                    false,
+                    &[],
+                    &LlmOpts::default(),
+                )
+                .expect("init::run with yes=true auto_mine=false must succeed"),
+            );
+        });
+        let result = result.expect("run must have been called inside the closure");
         // Stdin is EOF in tests → mine prompt declines → None.
         assert!(
             result.is_none(),
@@ -2043,17 +2079,24 @@ mod tests {
         // After init succeeds (yes=true bypasses the proceed prompt), the corpus
         // origin audit trail must land in the project directory. This is the
         // post-confirmation pair to the test above.
+        // MEMPALACE_DIR is redirected because run calls run_confirm_and_save, which
+        // calls add_to_known_entities, which writes known_entities.json to config_dir()
+        // (defaults to ~/.local/share/mempalace without the override).
         let temp_directory = tempfile::tempdir()
             .expect("failed to create temporary directory for corpus-origin write test");
-        run(
-            temp_directory.path(),
-            true,
-            false,
-            false,
-            &[],
-            &LlmOpts::default(),
-        )
-        .expect("init::run should succeed for a valid directory");
+        let registry_dir =
+            tempfile::tempdir().expect("failed to create registry dir for corpus-origin test");
+        temp_env::with_var("MEMPALACE_DIR", Some(registry_dir.path()), || {
+            run(
+                temp_directory.path(),
+                true,
+                false,
+                false,
+                &[],
+                &LlmOpts::default(),
+            )
+            .expect("init::run should succeed for a valid directory");
+        });
         assert!(
             temp_directory.path().join("corpus_origin.json").exists(),
             "corpus_origin.json must be written after the proceed gate"

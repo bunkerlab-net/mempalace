@@ -15,8 +15,12 @@ use mempalace::cli::{Cli, Command};
 #[tokio::test]
 async fn app_run_init_creates_config_with_yes_flag() {
     // Command::Init with yes=true must write mempalace.yaml without blocking on stdin.
+    // MEMPALACE_DIR is redirected because init dispatches to cli::init::run, which calls
+    // run_confirm_and_save → add_to_known_entities → writes known_entities.json to
+    // config_dir() (defaults to ~/.local/share/mempalace without the override).
     let temp_directory =
         tempfile::tempdir().expect("failed to create temporary directory for init test");
+    let registry_dir = tempfile::tempdir().expect("failed to create registry dir for init test");
 
     let cli_instance = Cli {
         palace: None,
@@ -35,9 +39,18 @@ async fn app_run_init_creates_config_with_yes_flag() {
         },
     };
 
-    mempalace::app::run(cli_instance)
-        .await
-        .expect("app::run with Command::Init should succeed");
+    temp_env::async_with_vars(
+        [(
+            "MEMPALACE_DIR",
+            Some(registry_dir.path().to_str().expect("valid UTF-8")),
+        )],
+        async {
+            mempalace::app::run(cli_instance)
+                .await
+                .expect("app::run with Command::Init should succeed");
+        },
+    )
+    .await;
 
     // mempalace.yaml must have been written.
     let config_path = temp_directory.path().join("mempalace.yaml");
