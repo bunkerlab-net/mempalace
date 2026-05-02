@@ -1798,21 +1798,17 @@ mod tests {
             tempfile::tempdir().expect("failed to create temporary directory for auto_mine test");
         let registry_dir =
             tempfile::tempdir().expect("failed to create registry dir for auto_mine test");
-        let mut result = None;
-        temp_env::with_var("MEMPALACE_DIR", Some(registry_dir.path()), || {
-            result = Some(
-                run(
-                    temp_directory.path(),
-                    true,
-                    true,
-                    false,
-                    &[],
-                    &LlmOpts::default(),
-                )
-                .expect("init::run with auto_mine=true must succeed"),
-            );
+        let result = temp_env::with_var("MEMPALACE_DIR", Some(registry_dir.path()), || {
+            run(
+                temp_directory.path(),
+                true,
+                true,
+                false,
+                &[],
+                &LlmOpts::default(),
+            )
+            .expect("init::run with auto_mine=true must succeed")
         });
-        let result = result.expect("run must have been called inside the closure");
         // When auto_mine is set the caller gets the pre-scanned file list.
         assert!(
             result.is_some(),
@@ -1836,21 +1832,17 @@ mod tests {
             .expect("failed to create temporary directory for yes-no-auto-mine test");
         let registry_dir =
             tempfile::tempdir().expect("failed to create registry dir for yes-no-auto-mine test");
-        let mut result = None;
-        temp_env::with_var("MEMPALACE_DIR", Some(registry_dir.path()), || {
-            result = Some(
-                run(
-                    temp_directory.path(),
-                    true,
-                    false,
-                    false,
-                    &[],
-                    &LlmOpts::default(),
-                )
-                .expect("init::run with yes=true auto_mine=false must succeed"),
-            );
+        let result = temp_env::with_var("MEMPALACE_DIR", Some(registry_dir.path()), || {
+            run(
+                temp_directory.path(),
+                true,
+                false,
+                false,
+                &[],
+                &LlmOpts::default(),
+            )
+            .expect("init::run with yes=true auto_mine=false must succeed")
         });
-        let result = result.expect("run must have been called inside the closure");
         // Stdin is EOF in tests → mine prompt declines → None.
         assert!(
             result.is_none(),
