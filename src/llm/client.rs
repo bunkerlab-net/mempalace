@@ -981,6 +981,78 @@ mod tests {
         port
     }
 
+    // -- serve_once defensive-path coverage --
+
+    #[test]
+    fn serve_once_returns_early_on_eof_before_headers() {
+        // Verify the EOF guard (read_line returns 0) causes a clean early exit with no
+        // response written. Shutting down the write half sends FIN immediately, triggering
+        // the EOF condition; read_to_end blocks until the server closes its half.
+        use std::io::Read;
+        use std::net::TcpStream;
+        let port = serve_once("{}");
+        assert!(port > 0, "serve_once must bind a non-zero port");
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("must connect");
+        stream
+            .shutdown(std::net::Shutdown::Write)
+            .expect("must shut down write half");
+        let mut response = Vec::new();
+        let _ = stream.read_to_end(&mut response);
+        assert!(
+            response.is_empty(),
+            "no response must be written on early exit"
+        );
+    }
+
+    #[test]
+    fn serve_once_returns_early_on_malformed_content_length() {
+        // Verify that a Content-Length value that fails usize parsing causes a clean early
+        // exit with no response written. The header is syntactically valid but numerically
+        // unparseable, exercising the `let Ok(length) = ... else { return; }` guard.
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        let port = serve_once("{}");
+        assert!(port > 0, "serve_once must bind a non-zero port");
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("must connect");
+        stream
+            .write_all(b"POST / HTTP/1.1\r\nContent-Length: not-a-number\r\n\r\n")
+            .expect("must send malformed headers");
+        stream
+            .shutdown(std::net::Shutdown::Write)
+            .expect("must shut down write half");
+        let mut response = Vec::new();
+        let _ = stream.read_to_end(&mut response);
+        assert!(
+            response.is_empty(),
+            "no response must be written on early exit"
+        );
+    }
+
+    #[test]
+    fn serve_once_returns_early_on_truncated_body() {
+        // Verify that closing the connection before the declared body is fully sent causes a
+        // clean early exit with no response written. The server calls read_exact for 100
+        // bytes; shutting down the write half after the headers delivers EOF before that
+        // count is satisfied, exercising the read_exact error guard.
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        let port = serve_once("{}");
+        assert!(port > 0, "serve_once must bind a non-zero port");
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("must connect");
+        stream
+            .write_all(b"POST / HTTP/1.1\r\nContent-Length: 100\r\n\r\n")
+            .expect("must send headers without body");
+        stream
+            .shutdown(std::net::Shutdown::Write)
+            .expect("must shut down write half");
+        let mut response = Vec::new();
+        let _ = stream.read_to_end(&mut response);
+        assert!(
+            response.is_empty(),
+            "no response must be written on early exit"
+        );
+    }
+
     // -- anthropic_extract_text (private, tested here) --
 
     #[test]
