@@ -920,30 +920,51 @@ mod tests {
     /// Returns the port so callers can build an endpoint URL. The spawned thread exits
     /// after serving one request. Used to test provider code without a real LLM server.
     fn serve_once(body: &str) -> u16 {
-        use std::io::{Read, Write};
-        use std::net::{Shutdown, TcpListener};
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("must bind to random port");
         let port = listener.local_addr().expect("must get local addr").port();
-        // `Connection: close` tells ureq to not attempt keep-alive — without
-        // it, an instrumented build (e.g. `cargo llvm-cov`) sometimes raced
-        // ureq's reuse logic against the server's socket close and surfaced
-        // EINVAL from the read side.
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
             body.len(),
             body,
         );
         std::thread::spawn(move || {
-            if let Ok((mut stream, _)) = listener.accept() {
-                // Drain the request so ureq does not get a broken pipe on write.
-                // Vec allocation avoids the large_stack_arrays lint from a fixed array.
-                let mut buf = vec![0u8; 65536];
-                let _ = stream.read(&mut buf);
+            if let Ok((stream, _)) = listener.accept() {
+                let mut reader = BufReader::new(stream);
+                // Drain request headers line by line, tracking Content-Length.
+                // A single read() could return a partial request under load (multiple TCP
+                // segments), leaving bytes in the receive buffer. When the socket closes
+                // with unread data, macOS sends a RST, which ureq surfaces as EINVAL
+                // (os error 22). Fully consuming the request prevents this.
+                let mut content_length: usize = 0;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                        return;
+                    }
+                    if let Some(rest) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        // Abort the connection if the header value cannot be parsed — proceeding
+                        // without a valid length would leave request bytes in the socket buffer.
+                        let Ok(length) = rest.trim().parse::<usize>() else {
+                            return;
+                        };
+                        content_length = length;
+                    }
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                // Drain the request body so no bytes remain in the receive buffer.
+                // Absent Content-Length (e.g. GET with no body) leaves content_length at 0 and
+                // the drain is a no-op.
+                let mut body_buf = vec![0u8; content_length];
+                if !body_buf.is_empty() && reader.read_exact(&mut body_buf).is_err() {
+                    return;
+                }
+                let mut stream = reader.into_inner();
                 let _ = stream.write_all(response.as_bytes());
-                // Shutdown the write side so ureq sees a clean EOF rather than
-                // waiting for the OS to close the socket when the thread exits.
-                let _ = stream.shutdown(Shutdown::Write);
             }
         });
         port
@@ -958,6 +979,78 @@ mod tests {
         let port = listener.local_addr().expect("must get local addr").port();
         drop(listener);
         port
+    }
+
+    // -- serve_once defensive-path coverage --
+
+    #[test]
+    fn serve_once_returns_early_on_eof_before_headers() {
+        // Verify the EOF guard (read_line returns 0) causes a clean early exit with no
+        // response written. Shutting down the write half sends FIN immediately, triggering
+        // the EOF condition; read_to_end blocks until the server closes its half.
+        use std::io::Read;
+        use std::net::TcpStream;
+        let port = serve_once("{}");
+        assert!(port > 0, "serve_once must bind a non-zero port");
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("must connect");
+        stream
+            .shutdown(std::net::Shutdown::Write)
+            .expect("must shut down write half");
+        let mut response = Vec::new();
+        let _ = stream.read_to_end(&mut response);
+        assert!(
+            response.is_empty(),
+            "no response must be written on early exit"
+        );
+    }
+
+    #[test]
+    fn serve_once_returns_early_on_malformed_content_length() {
+        // Verify that a Content-Length value that fails usize parsing causes a clean early
+        // exit with no response written. The header is syntactically valid but numerically
+        // unparseable, exercising the `let Ok(length) = ... else { return; }` guard.
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        let port = serve_once("{}");
+        assert!(port > 0, "serve_once must bind a non-zero port");
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("must connect");
+        stream
+            .write_all(b"POST / HTTP/1.1\r\nContent-Length: not-a-number\r\n\r\n")
+            .expect("must send malformed headers");
+        stream
+            .shutdown(std::net::Shutdown::Write)
+            .expect("must shut down write half");
+        let mut response = Vec::new();
+        let _ = stream.read_to_end(&mut response);
+        assert!(
+            response.is_empty(),
+            "no response must be written on early exit"
+        );
+    }
+
+    #[test]
+    fn serve_once_returns_early_on_truncated_body() {
+        // Verify that closing the connection before the declared body is fully sent causes a
+        // clean early exit with no response written. The server calls read_exact for 100
+        // bytes; shutting down the write half after the headers delivers EOF before that
+        // count is satisfied, exercising the read_exact error guard.
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        let port = serve_once("{}");
+        assert!(port > 0, "serve_once must bind a non-zero port");
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("must connect");
+        stream
+            .write_all(b"POST / HTTP/1.1\r\nContent-Length: 100\r\n\r\n")
+            .expect("must send headers without body");
+        stream
+            .shutdown(std::net::Shutdown::Write)
+            .expect("must shut down write half");
+        let mut response = Vec::new();
+        let _ = stream.read_to_end(&mut response);
+        assert!(
+            response.is_empty(),
+            "no response must be written on early exit"
+        );
     }
 
     // -- anthropic_extract_text (private, tested here) --
