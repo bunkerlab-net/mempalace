@@ -657,7 +657,7 @@ deleting it. Temporal fields accept two shapes:
 
 - `YYYY-MM-DD` — ISO date (legacy, still supported)
 - `YYYY-MM-DDTHH:MM:SSZ` — canonical UTC datetime (`+00:00` is accepted and
-  normalized to `Z` before storage)
+  normalised to `Z` before storage)
 
 Partial dates, naive datetimes, non-UTC offsets, fractional seconds, and
 SQLite-style space-separated datetimes are rejected at the MCP boundary.

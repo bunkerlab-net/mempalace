@@ -756,10 +756,29 @@ impl EntityRegistry {
         // registry. `disarm()` is called only after the rename succeeds.
         let mut tmp_guard = TempFileGuard::new(&tmp_path);
 
-        let mut tmp_file = std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&tmp_path)?;
+        // On Unix, set the mode at creation via O_CREAT so there's no window
+        // between `open` and a follow-up chmod where the file could be world-
+        // readable. On non-Unix platforms `OpenOptionsExt::mode` isn't
+        // available, so fall through to the default open and rely on the
+        // best-effort `set_permissions` below.
+        let mut tmp_file = {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt as _;
+                std::fs::OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .mode(0o600)
+                    .open(&tmp_path)?
+            }
+            #[cfg(not(unix))]
+            {
+                std::fs::OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .open(&tmp_path)?
+            }
+        };
         tmp_file.write_all(json.as_bytes())?;
         // Persist file bytes before the rename; without sync_all, a power loss
         // after the rename can leave the directory entry pointing at a file
@@ -770,13 +789,13 @@ impl EntityRegistry {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            // Deliberate `let _`: tightening the temp file's mode to 0o600 is
-            // defense-in-depth (the registry holds discovered entity names —
-            // not sensitive on its own, but still worth keeping owner-only).
-            // The default umask already restricts new files for typical users,
-            // and some filesystems (FAT, exFAT, network mounts) silently
-            // ignore `set_permissions`. Failing the whole save over an
-            // unsupported chmod would be the wrong default.
+            // Best-effort fallback: the `O_CREAT` mode above already set 0o600
+            // for the common case, but `OpenOptionsExt::mode` interacts with
+            // the process umask, and some filesystems (FAT, exFAT, network
+            // mounts) ignore Unix permissions entirely. Re-applying via
+            // `set_permissions` covers the umask-tightening case; failing the
+            // whole save when the underlying FS ignores chmod would be the
+            // wrong default, so the error is intentionally discarded.
             let _ = std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600));
         }
 
