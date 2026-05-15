@@ -118,6 +118,29 @@ Ports: <bullet list of what was ported>
 
 If there are no Rust changes to port, no additional commit is needed — Phase 0 is the only commit.
 
+### Phase 7 — CodeRabbit review (required before push)
+
+Before pushing any code, run the CodeRabbit CLI against the committed changes:
+
+```bash
+coderabbit review --agent --base master --type committed
+```
+
+Address every issue CodeRabbit raises:
+
+- Apply fixes as new commits on the same branch (do **not** amend prior commits).
+- Re-run the same `coderabbit review --agent --base master --type committed` command after each round of fixes.
+- Repeat until CodeRabbit reports no remaining issues.
+
+Do not proceed to Phase 8 until CodeRabbit is happy.
+
+### Phase 8 — Push and open a PR
+
+Only after CodeRabbit has signed off:
+
+1. Push the branch to the remote.
+2. Open a PR following the project's standard PR workflow.
+
 ## Key file mappings (Python → Rust)
 
 | Python file                        | Rust equivalent                                |
