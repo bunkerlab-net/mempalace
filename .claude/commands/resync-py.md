@@ -142,8 +142,10 @@ Address every issue CodeRabbit raises:
   Each round of fixes ships as its own commit so the review history is preserved
   in `git log` and CodeRabbit's iterative findings stay auditable. Amending would
   collapse that trail and rewrite hashes that prior CodeRabbit comments referenced.
-- Re-run the same `coderabbit review --agent --base master --type committed` command after each round of fixes.
-- Repeat until CodeRabbit reports no remaining issues.
+- Re-run `coderabbit review --agent --base master --type committed` after every fix
+  or dispute commit so the next review sees the resolution.
+- Phase 8 may proceed only when every finding from the latest review is resolved
+  (either fixed or documented as false positives with user/project-owner approval).
 
 If a finding looks like a false positive or you disagree with it:
 
@@ -155,8 +157,6 @@ If a finding looks like a false positive or you disagree with it:
   pushing, rather than silently dismissing the finding.
 - Re-run `coderabbit review --agent --base master --type committed` after
   documenting the dispute so the new commit is on record.
-
-Do not proceed to Phase 8 until CodeRabbit is happy.
 
 ### Phase 8 — Push and open a PR
 

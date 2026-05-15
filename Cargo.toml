@@ -33,10 +33,6 @@ clap = { version = "4", default-features = false, features = [
   "usage",
 ] }
 ignore = { version = "0.4", default-features = false }
-# `libc` exposes POSIX constants (e.g. `O_NOFOLLOW`, `ELOOP`) used by the
-# exporter's symlink-rejecting file open helper. The dep is harmless on
-# non-Unix targets — actual usage is guarded by `#[cfg(unix)]`.
-libc = { version = "0.2", default-features = false }
 regex = { version = "1", default-features = false, features = ["std", "perf"] }
 serde = { version = "1", default-features = false, features = [
   "derive",
@@ -63,6 +59,13 @@ ureq = { version = "3", default-features = false, features = [
   "json",
 ] }
 uuid = { version = "1", default-features = false, features = ["v4"] }
+
+[target.'cfg(unix)'.dependencies]
+# `libc` exposes POSIX constants (e.g. `O_NOFOLLOW`, `ELOOP`) used by the
+# exporter's symlink-rejecting file open helper. Scoped to `cfg(unix)` so
+# non-Unix builds neither pull it in nor need a `#[cfg(unix)]` shim around
+# its uses in `src/palace/exporter.rs`.
+libc = { version = "0.2", default-features = false }
 
 [dev-dependencies]
 temp-env = { version = "0.3", features = ["async_closure"] }

@@ -80,7 +80,7 @@ const SKIP_FILES_EXTRA: &[&str] = &[
 /// conservative: a 500-chunk file at chunker defaults is ~400 KB of source,
 /// which covers most legitimate hand-written content while bounding the
 /// worst-case batch.
-pub(crate) const MAX_CHUNKS_PER_FILE: usize = 500;
+const MAX_CHUNKS_PER_FILE: usize = 500;
 
 // Document the intended range at compile time so a future refactor that drops
 // the cap to a tiny value or raises it to a million fails the build.
@@ -1898,7 +1898,7 @@ mod tests {
     }
 
     #[test]
-    fn should_skip_oversized_keeps_files_at_the_limit() {
+    fn mine_should_skip_oversized_keeps_files_at_the_limit() {
         // A file producing exactly MAX_CHUNKS_PER_FILE chunks must be kept —
         // the cap is `>`, not `>=`. Mirrors the boundary condition that the
         // miner relies on so the "exactly 500 chunks" case ingests normally.
@@ -1907,7 +1907,7 @@ mod tests {
     }
 
     #[test]
-    fn should_skip_oversized_skips_files_above_the_limit() {
+    fn mine_should_skip_oversized_skips_files_above_the_limit() {
         // One chunk past the cap must trigger the skip path. The function emits
         // a stderr warning; we don't assert on stderr here because libtest
         // doesn't capture it in a stable way across runners — we trust the
@@ -1917,7 +1917,7 @@ mod tests {
     }
 
     #[test]
-    fn should_skip_oversized_keeps_small_files() {
+    fn mine_should_skip_oversized_keeps_small_files() {
         // Pair assertion: small inputs must never trip the cap.
         let path = std::path::Path::new("/tmp/small.txt");
         assert!(!mine_should_skip_oversized(path, 1));

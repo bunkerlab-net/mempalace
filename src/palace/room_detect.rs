@@ -264,12 +264,9 @@ pub fn detect_room(
             // Stream room.name + room.keywords as &str without allocating a
             // per-iteration Vec; `name_matches` lowercases internally so we
             // don't need to materialize lowercase strings up front.
-            let candidates =
+            let mut candidates =
                 std::iter::once(room.name.as_str()).chain(room.keywords.iter().map(String::as_str));
-            if candidates
-                .into_iter()
-                .any(|candidate| name_matches(part, candidate))
-            {
+            if candidates.any(|candidate| name_matches(part, candidate)) {
                 return room.name.clone();
             }
         }
