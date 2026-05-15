@@ -275,7 +275,7 @@ async fn regenerate_closets_process_drawer(
 
     let user_prompt = format!(
         "Source: {}\nWing: {} | Room: {}\n\nCONTENT:\n{truncated}",
-        &drawer.source_file, &drawer.wing, &drawer.room,
+        drawer.source_file, drawer.wing, drawer.room,
     );
 
     // Build a UTF-8-safe preview by chars, not bytes: drawer IDs are ASCII

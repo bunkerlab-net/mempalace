@@ -178,7 +178,7 @@ fn sanitize_name(value: &str, field_name: &str) -> Result<String, Value> {
 
     // Postconditions: result is non-empty, trimmed, and has no path-traversal chars.
     debug_assert!(!result.is_empty());
-    debug_assert!(result == result.trim());
+    debug_assert_eq!(result, result.trim());
     debug_assert!(!result.contains(".."));
     debug_assert!(!result.contains('/'));
     debug_assert!(!result.contains('\\'));
@@ -226,7 +226,7 @@ fn sanitize_kg_value(value: &str, field_name: &str) -> Result<String, Value> {
 
     // Postconditions: result is non-empty, trimmed, and has no path-traversal chars.
     debug_assert!(!result.is_empty());
-    debug_assert!(result == result.trim());
+    debug_assert_eq!(result, result.trim());
     debug_assert!(!result.contains(".."));
     debug_assert!(!result.contains('/'));
     debug_assert!(!result.contains('\\'));
@@ -268,7 +268,7 @@ fn sanitize_label(value: &str) -> Result<String, Value> {
 
     // Postconditions: result is non-empty, trimmed, and safe.
     debug_assert!(!result.is_empty());
-    debug_assert!(result == result.trim());
+    debug_assert_eq!(result, result.trim());
     debug_assert!(!result.contains('\0'));
     debug_assert!(result.chars().count() <= LABEL_LEN_MAX);
 

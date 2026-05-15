@@ -397,7 +397,10 @@ fn run_refine_entities(
         result.dropped, result.reclassified
     );
 
-    assert!(result.batches_completed + result.errors == result.batches_total);
+    assert_eq!(
+        result.batches_completed + result.errors,
+        result.batches_total
+    );
     Ok(result.merged)
 }
 

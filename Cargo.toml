@@ -53,7 +53,7 @@ toml = { version = "1.1", default-features = false, features = [
   "parse",
   "serde",
 ] }
-turso = { version = "0.5.3", default-features = false }
+turso = { version = "0.6.0", default-features = false }
 ureq = { version = "3", default-features = false, features = [
   "rustls",
   "json",

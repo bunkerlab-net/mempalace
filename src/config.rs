@@ -387,7 +387,7 @@ fn maybe_migrate() -> Result<()> {
         return Ok(());
     }
 
-    assert!(source != destination);
+    assert_ne!(source, destination);
     assert!(source.exists());
 
     maybe_migrate_inner(&source, &destination)

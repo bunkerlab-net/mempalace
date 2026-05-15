@@ -176,7 +176,7 @@ pub fn refine_entities(
         }
     }
 
-    assert!(batches_completed + errors == batches_total);
+    assert_eq!(batches_completed + errors, batches_total);
 
     let (merged, reclassified, dropped) = apply_classifications(detected, &all_decisions);
     RefineResult {
@@ -242,7 +242,7 @@ fn refine_entities_collect_candidates(detected: &DetectedDict) -> Vec<(&str, &st
         candidates.push((&entity.name, &entity.entity_type));
     }
 
-    assert!(candidates.len() == total);
+    assert_eq!(candidates.len(), total);
     candidates
 }
 
