@@ -474,6 +474,12 @@ async fn mine_process_file_one(
     // Defensive cap: a file producing more than MAX_CHUNKS_PER_FILE chunks is almost
     // always a generated artifact that escaped the SKIP_FILES_EXTRA list. Bail with a
     // visible warning rather than writing thousands of low-signal drawers.
+    //
+    // Returning `Ok(None)` here folds an oversized skip into the same "skipped"
+    // bucket the caller uses for unreadable/empty files. The operator-facing
+    // signal is still distinct because `mine_should_skip_oversized` emits a
+    // dedicated `[skip] <name> produced N chunks (> cap)` line on stderr —
+    // the summary count is coarse, the stderr trail is precise.
     if mine_should_skip_oversized(filepath, chunks.len()) {
         return Ok(None);
     }

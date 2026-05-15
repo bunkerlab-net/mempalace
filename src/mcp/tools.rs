@@ -1595,6 +1595,15 @@ async fn tool_diary_write(connection: &Connection, args: &Value) -> Value {
 /// requesting agent (`added_by`), so agents cannot read each other's entries
 /// even when they share a wing name. When `wing` is absent the query returns
 /// all diary entries written by the agent across all wings.
+///
+/// **Migration note (pre-#1243 data):** `tool_diary_write` previously stored
+/// `added_by` verbatim from `sanitize_name`, which preserved case. Diary rows
+/// written before the case-insensitive fix won't match the lower-cased filter
+/// below. To migrate legacy data, run once against the palace:
+///
+/// ```sql
+/// UPDATE drawers SET added_by = LOWER(added_by) WHERE room = 'diary';
+/// ```
 async fn tool_diary_read(connection: &Connection, args: &Value) -> Value {
     let agent_name = str_arg(args, "agent_name");
     let last_n = int_arg(args, "last_n", 10).clamp(1, 100);

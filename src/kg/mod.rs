@@ -914,13 +914,17 @@ pub async fn invalidate(
     );
 
     // Resolve the date once so the returned value always matches what was written.
+    // Falling back to the raw caller-supplied string here would let a
+    // whitespace-only `ended` argument skip sanitization and reach the UPDATE.
+    // Default to today's ISO date when sanitization yields an empty value,
+    // matching the Python port's `ended or date.today().isoformat()` semantics.
     let raw_ended = ended.map_or_else(
         || chrono::Local::now().format("%Y-%m-%d").to_string(),
         str::to_string,
     );
     let persisted_ended = sanitize_iso_temporal(Some(&raw_ended), "ended")?
         .filter(|value| !value.is_empty())
-        .unwrap_or(raw_ended);
+        .unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d").to_string());
 
     // Pre-flight: reject if `ended` would invert any matching active triple's
     // valid_from. Without this check, an UPDATE with `ended < valid_from`

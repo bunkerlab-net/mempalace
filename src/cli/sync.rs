@@ -86,6 +86,13 @@ fn matcher_for_root<'a>(
 }
 
 /// Classify one drawer by inspecting its source-file metadata.
+///
+/// When `project_roots` is empty the caller is scoping the run via `--wing`
+/// alone (the `run` precondition rejects apply with neither scope). In that
+/// mode the OutOfScope/gitignore branches are skipped — without project roots
+/// we have no `.gitignore` to consult and no scope to apply — and classification
+/// collapses to "missing" or "kept" based purely on whether the source path
+/// still exists on disk.
 fn classify_drawer(
     source_file: &str,
     room: &str,
@@ -103,6 +110,15 @@ fn classify_drawer(
     let source_path = Path::new(source_file);
     if !source_path.is_absolute() {
         return DrawerBucket::NoSource;
+    }
+    if project_roots.is_empty() {
+        // Wing-only scoping: no roots → no scope check, no gitignore check.
+        // Only the on-disk presence of the source matters.
+        return if source_path.exists() {
+            DrawerBucket::Kept
+        } else {
+            DrawerBucket::Missing
+        };
     }
     let Some(project_root) = resolve_project_root(source_path, project_roots) else {
         return DrawerBucket::OutOfScope;
