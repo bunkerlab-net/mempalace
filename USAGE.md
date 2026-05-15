@@ -77,7 +77,7 @@ mempalace --palace ~/work.db mcp
 ### Plugin installation (Claude Code and Codex CLI)
 
 The `.claude-plugin/` and `.codex-plugin/` directories in the repository ship
-pre-configured hooks and a skill file.  The easiest way to configure the MCP
+pre-configured hooks and a skill file. The easiest way to configure the MCP
 server is to run the setup printer:
 
 ```bash
@@ -170,15 +170,15 @@ the consent gate in automation.
 
 LLM flags:
 
-| Flag                   | Default    | Description                                              |
-| ---------------------- | ---------- | -------------------------------------------------------- |
-| `--llm`                | off        | Enable LLM-assisted entity refinement                    |
-| `--llm-provider`       | `ollama`   | Provider: `ollama`, `openai-compat`, or `anthropic`      |
-| `--llm-model`          | `gemma3:4b`| Model identifier                                         |
-| `--llm-endpoint`       | —          | Custom API endpoint (required for `openai-compat`)       |
-| `--llm-api-key`        | —          | API key (required for `anthropic`, optional for others)  |
-| `--accept-external-llm`| off        | Skip the external-LLM consent gate in automation         |
-| `--auto-mine`          | off        | Skip the post-init mine prompt and mine immediately      |
+| Flag                    | Default     | Description                                             |
+| ----------------------- | ----------- | ------------------------------------------------------- |
+| `--llm`                 | off         | Enable LLM-assisted entity refinement                   |
+| `--llm-provider`        | `ollama`    | Provider: `ollama`, `openai-compat`, or `anthropic`     |
+| `--llm-model`           | `gemma3:4b` | Model identifier                                        |
+| `--llm-endpoint`        | —           | Custom API endpoint (required for `openai-compat`)      |
+| `--llm-api-key`         | —           | API key (required for `anthropic`, optional for others) |
+| `--accept-external-llm` | off         | Skip the external-LLM consent gate in automation        |
+| `--auto-mine`           | off         | Skip the post-init mine prompt and mine immediately     |
 
 `mempalace.yaml` controls the wing name and room taxonomy used during mining.
 Edit it before running `mine` if the auto-detected rooms need adjustment.
@@ -226,6 +226,17 @@ keywords: `technical`, `architecture`, `planning`, `decisions`, `problems`, `gen
 
 Files already in the palace (matched by path) are skipped automatically. Move or rename
 a file to re-mine it.
+
+**Auto-skipped filenames:** the miner skips lockfiles and config files that
+carry no narrative content — `.gitignore`, `entities.json`,
+`package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, and `Cargo.lock`.
+
+**Per-file chunk cap:** a single file that chunks into more than 500 pieces is
+almost always a generated artifact (CSV/JSON dumps, a lockfile the skip list
+doesn't recognize, etc.). The miner logs
+`! [skip] <name> produced N chunks (> 500); add to SKIP_FILES_EXTRA or
+.gitignore` to stderr and moves on. Cover the file with a `.gitignore` rule
+or open an issue if a legitimate hand-written file trips the cap.
 
 ---
 
@@ -293,7 +304,7 @@ mempalace search "riley" --wing wing_family
 mempalace search "api design" --room architecture --results 20
 ```
 
-`--results` defaults to `5`.  Results are ranked by total word-hit count across matched
+`--results` defaults to `5`. Results are ranked by total word-hit count across matched
 drawers. Output includes wing, room, source file, hit count, and verbatim drawer content.
 
 Search is keyword-only — no fuzzy or semantic matching. Use specific nouns for best results.
@@ -395,6 +406,13 @@ palace-export/
     <room>.md        ← one file per wing/room combination
 ```
 
+**Symlink safety:** the exporter refuses to write through a pre-placed
+symlink at the output directory, at any wing directory, or at the file
+targets themselves. On Unix the protection is enforced via `O_NOFOLLOW` so
+there's no TOCTOU window. Errors look like
+`refusing to export: output_dir is a symbolic link (...)`. Remove the
+symlink or choose a different `--output` path to proceed.
+
 ---
 
 ### `mempalace mcp`
@@ -446,6 +464,48 @@ Without `--force`, sections already filed are skipped via the per-file cursor.
 With `--force`, every section is re-filed: the existing drawer rows are dropped
 first so the refreshed content actually persists (otherwise the underlying
 INSERT-OR-IGNORE would silently keep the old content).
+
+The cursor compares the file's SHA-256 against the prior run's hash, so an
+in-place edit that preserves length and mtime (e.g. `"teh" → "the"`) still
+triggers a rebuild. Legacy cursors written before this fix fall back to
+size+mtime and backfill the hash on the next run.
+
+---
+
+### `mempalace sync`
+
+Prunes drawers whose source file is now gitignored, deleted, or moved out of
+the project. Mirrors the gitignore rules the miner uses on the way in, so the
+same patterns that block ingest also drive cleanup.
+
+```bash
+# Dry-run: report what would be removed
+mempalace sync --dir ~/my-project
+
+# Apply: actually delete pruned drawers + closets
+mempalace sync --dir ~/my-project --apply
+
+# Scope to one wing across multiple project roots
+mempalace sync --dir ~/repos/a --dir ~/repos/b --wing my_wing --apply
+
+# Wing-only scoping (no gitignore check; prunes only on-disk-missing drawers)
+mempalace sync --wing my_wing --apply
+```
+
+Defaults to dry-run. `--apply` is the destructive flag and demands either
+`--dir` or `--wing` so it cannot accidentally prune every wing in a
+multi-project palace. The report breaks results into:
+
+- **Kept** — source still exists and is not gitignored
+- **Gitignored** — matches a `.gitignore` rule (removed on apply)
+- **Missing** — source file no longer on disk (removed on apply)
+- **No source** — drawer has no `source_file` metadata (kept)
+- **Out of scope** — source lives outside every supplied root (kept)
+
+Registry rows (`room = _registry`, `ingest_mode = registry`, or
+`_reg_*` ids) are always preserved so the next mine pass doesn't redo work
+it already finished. Deletes run inside a single transaction and are batched
+via `IN (?,?,...)` chunks of 500.
 
 ---
 
@@ -569,20 +629,20 @@ full memory protocol and AAAK spec.
 
 ### Palace / Drawers
 
-| Tool                        | Parameters                                             | What it does                                        |
-| --------------------------- | ------------------------------------------------------ | --------------------------------------------------- |
-| `mempalace_status`          | —                                                      | Overview + memory protocol + AAAK spec              |
-| `mempalace_list_wings`      | —                                                      | Wing names with drawer counts                       |
-| `mempalace_list_rooms`      | `wing?`                                                | Room names with counts (all wings or one)           |
-| `mempalace_get_taxonomy`    | —                                                      | Full `wing → room → count` hierarchy                |
-| `mempalace_get_aaak_spec`   | —                                                      | AAAK dialect specification                          |
-| `mempalace_search`          | `query`, `limit?`, `wing?`, `room?`, `context?`        | Keyword search; sanitizes contaminated queries      |
-| `mempalace_check_duplicate` | `content`                                              | True if highly similar content already exists       |
-| `mempalace_add_drawer`      | `wing`, `room`, `content`, `source_file?`, `added_by?` | File a memory; blocks on duplicates                 |
-| `mempalace_delete_drawer`   | `drawer_id`                                            | Permanently delete a drawer and its index entries   |
-| `mempalace_get_drawer`      | `drawer_id`                                            | Fetch full content and metadata for a single drawer |
-| `mempalace_list_drawers`    | `wing?`, `room?`, `limit?` (max 100), `offset?`        | Paginated drawer listing with content previews      |
-| `mempalace_update_drawer`   | `drawer_id`, `content?`, `wing?`, `room?`              | Update an existing drawer's content and/or location |
+| Tool                        | Parameters                                             | What it does                                                    |
+| --------------------------- | ------------------------------------------------------ | --------------------------------------------------------------- |
+| `mempalace_status`          | —                                                      | Overview + memory protocol + AAAK spec                          |
+| `mempalace_list_wings`      | —                                                      | Wing names with drawer counts                                   |
+| `mempalace_list_rooms`      | `wing?`                                                | Room names with counts (all wings or one)                       |
+| `mempalace_get_taxonomy`    | —                                                      | Full `wing → room → count` hierarchy                            |
+| `mempalace_get_aaak_spec`   | —                                                      | AAAK dialect specification                                      |
+| `mempalace_search`          | `query`, `limit?`, `wing?`, `room?`, `context?`        | Keyword search; sanitizes contaminated queries                  |
+| `mempalace_check_duplicate` | `content`                                              | True if highly similar content already exists                   |
+| `mempalace_add_drawer`      | `wing`, `room`, `content`, `source_file?`, `added_by?` | File a memory; blocks on duplicates                             |
+| `mempalace_delete_drawer`   | `drawer_id`                                            | Permanently delete a drawer and its index entries               |
+| `mempalace_get_drawer`      | `drawer_id`                                            | Fetch full content and metadata; `source_file` is basename-only |
+| `mempalace_list_drawers`    | `wing?`, `room?`, `limit?` (max 100), `offset?`        | Paginated listing with previews and a `total` row count         |
+| `mempalace_update_drawer`   | `drawer_id`, `content?`, `wing?`, `room?`              | Update an existing drawer's content and/or location             |
 
 `mempalace_add_drawer` performs a duplicate check before inserting. If a highly similar
 drawer already exists it returns `{"success": false, "reason": "duplicate", "matches": [...]}`
@@ -590,17 +650,31 @@ without writing.
 
 ### Knowledge Graph
 
-Facts are temporal: every triple can have `valid_from` and `valid_to` dates. Querying
-with `as_of` returns only facts that were true at that moment. Invalidation preserves
-the old fact with a `valid_to` date rather than deleting it.
+Facts are temporal: every triple can have `valid_from` and `valid_to` instants.
+Querying with `as_of` returns only facts that were true at that moment.
+Invalidation preserves the old fact with a `valid_to` value rather than
+deleting it. Temporal fields accept two shapes:
 
-| Tool                      | Parameters                                                        | What it does                                      |
-| ------------------------- | ----------------------------------------------------------------- | ------------------------------------------------- |
-| `mempalace_kg_query`      | `entity`, `as_of?`, `direction?`                                  | Facts about an entity (optionally at a past date) |
-| `mempalace_kg_add`        | `subject`, `predicate`, `object`, `valid_from?`, `source_closet?` | Assert a fact                                     |
-| `mempalace_kg_invalidate` | `subject`, `predicate`, `object`, `ended?`                        | Mark a fact as no longer true                     |
-| `mempalace_kg_timeline`   | `entity?`                                                         | Chronological fact history                        |
-| `mempalace_kg_stats`      | —                                                                 | Entity/triple counts, relationship types          |
+- `YYYY-MM-DD` — ISO date (legacy, still supported)
+- `YYYY-MM-DDTHH:MM:SSZ` — canonical UTC datetime (`+00:00` is accepted and
+  normalized to `Z` before storage)
+
+Partial dates, naive datetimes, non-UTC offsets, fractional seconds, and
+SQLite-style space-separated datetimes are rejected at the MCP boundary.
+Inverted intervals (`valid_to` < `valid_from`, including same-day mixed
+date/datetime cases via end-of-day widening) are also refused.
+
+| Tool                      | Parameters                                                                                                                           | What it does                                       |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------- |
+| `mempalace_kg_query`      | `entity`, `as_of?`, `direction?`                                                                                                     | Facts about an entity (optionally at a past date)  |
+| `mempalace_kg_add`        | `subject`, `predicate`, `object`, `valid_from?`, `valid_to?`, `source_closet?`, `source_file?`, `source_drawer_id?`, `adapter_name?` | Assert a fact (RFC 002 provenance fields optional) |
+| `mempalace_kg_invalidate` | `subject`, `predicate`, `object`, `ended?`                                                                                           | Mark a fact as no longer true                      |
+| `mempalace_kg_timeline`   | `entity?`                                                                                                                            | Chronological fact history                         |
+| `mempalace_kg_stats`      | —                                                                                                                                    | Entity/triple counts, relationship types           |
+
+`mempalace_kg_add` now accepts both `valid_from` and `valid_to` in one call, so
+a historical fact that's already ended can be backfilled without a follow-up
+`mempalace_kg_invalidate`.
 
 ### Palace Graph
 
@@ -619,12 +693,12 @@ Use explicit tunnels when content in one project relates to another (e.g. an API
 in `project_api` connects to a schema in `project_database`). Tunnels are symmetric —
 A→B and B→A share the same ID.
 
-| Tool                       | Parameters                                                                                                     | What it does                                                    |
-| -------------------------- | -------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| `mempalace_create_tunnel`  | `source_wing`, `source_room`, `target_wing`, `target_room`, `label?`, `source_drawer_id?`, `target_drawer_id?` | Create a named cross-wing link; `kind` defaults to `explicit`   |
-| `mempalace_list_tunnels`   | `wing?`                                                                                                        | List tunnels with their `kind` field; filter by wing            |
-| `mempalace_delete_tunnel`  | `tunnel_id`                                                                                                    | Delete a tunnel by its ID                                       |
-| `mempalace_follow_tunnels` | `wing`, `room`                                                                                                 | See what a room connects to; includes `kind` on each link       |
+| Tool                       | Parameters                                                                                                     | What it does                                                  |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| `mempalace_create_tunnel`  | `source_wing`, `source_room`, `target_wing`, `target_room`, `label?`, `source_drawer_id?`, `target_drawer_id?` | Create a named cross-wing link; `kind` defaults to `explicit` |
+| `mempalace_list_tunnels`   | `wing?`                                                                                                        | List tunnels with their `kind` field; filter by wing          |
+| `mempalace_delete_tunnel`  | `tunnel_id`                                                                                                    | Delete a tunnel by its ID                                     |
+| `mempalace_follow_tunnels` | `wing`, `room`                                                                                                 | See what a room connects to; includes `kind` on each link     |
 
 ### Agent Diary
 
@@ -632,10 +706,19 @@ Diary entries live in `wing_{agent_name}/diary` by default. Supply `wing` explic
 write to or read from a specific wing. Omitting `wing` on `diary_read` returns entries
 across all wings for the agent. Use AAAK format for compact entries.
 
-| Tool                    | Parameters                               | What it does                                               |
-| ----------------------- | ---------------------------------------- | ---------------------------------------------------------- |
-| `mempalace_diary_write` | `agent_name`, `entry`, `topic?`, `wing?` | Write a diary entry; `wing` derived from agent if omitted  |
-| `mempalace_diary_read`  | `agent_name`, `last_n?`, `wing?`         | Read diary entries; cross-wing when `wing` is omitted      |
+Agent names are matched case-insensitively: `Claude`, `claude`, and `CLAUDE` all
+resolve to the same agent because the value is lower-cased after sanitization.
+Legacy rows written under mixed-case `added_by` values won't match the new
+filter; run this one-time SQL to migrate them:
+
+```sql
+UPDATE drawers SET added_by = LOWER(added_by) WHERE room = 'diary';
+```
+
+| Tool                    | Parameters                               | What it does                                              |
+| ----------------------- | ---------------------------------------- | --------------------------------------------------------- |
+| `mempalace_diary_write` | `agent_name`, `entry`, `topic?`, `wing?` | Write a diary entry; `wing` derived from agent if omitted |
+| `mempalace_diary_read`  | `agent_name`, `last_n?`, `wing?`         | Read diary entries; cross-wing when `wing` is omitted     |
 
 ---
 

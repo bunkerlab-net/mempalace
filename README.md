@@ -122,6 +122,7 @@ src/
     compress.rs        AAAK batch compression
     split.rs           Mega-file session splitter
     status.rs          Palace stats display
+    sync.rs            Gitignore-aware drawer prune (mempalace sync)
     repair.rs          Backup + rebuild inverted index
 
   llm/                 LLM provider abstraction (optional, used by init --llm)
