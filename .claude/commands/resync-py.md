@@ -126,6 +126,10 @@ Before pushing any code, run the CodeRabbit CLI against the committed changes:
 coderabbit review --agent --base master --type committed
 ```
 
+`--base master` matches this repo's default branch. In a repo whose default
+is `main` (or anything else), substitute that name — the CLI compares the
+working branch against `--base` to decide what to review.
+
 If the CLI itself fails to run (network outage, expired auth, CLI build
 issues), do not silently skip Phase 7:
 
@@ -160,7 +164,12 @@ If a finding looks like a false positive or you disagree with it:
 
 ### Phase 8 — Push and open a PR
 
-Only after CodeRabbit has signed off:
+Only after CodeRabbit has signed off — meaning the last
+`coderabbit review --agent --base <default-branch> --type committed`
+invocation exited 0 **and** its JSONL output ends with
+`{"type":"complete","status":"review_completed","findings":0}` (or the
+remaining findings are documented as approved false positives in a
+preceding commit):
 
 1. Push the branch to the remote.
 2. Open a PR following the project's standard PR workflow.

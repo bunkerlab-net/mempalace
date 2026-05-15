@@ -770,6 +770,13 @@ impl EntityRegistry {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
+            // Deliberate `let _`: tightening the temp file's mode to 0o600 is
+            // defense-in-depth (the registry holds discovered entity names —
+            // not sensitive on its own, but still worth keeping owner-only).
+            // The default umask already restricts new files for typical users,
+            // and some filesystems (FAT, exFAT, network mounts) silently
+            // ignore `set_permissions`. Failing the whole save over an
+            // unsupported chmod would be the wrong default.
             let _ = std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600));
         }
 
