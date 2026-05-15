@@ -129,8 +129,21 @@ coderabbit review --agent --base master --type committed
 Address every issue CodeRabbit raises:
 
 - Apply fixes as new commits on the same branch (do **not** amend prior commits).
+  Each round of fixes ships as its own commit so the review history is preserved
+  in `git log` and CodeRabbit's iterative findings stay auditable. Amending would
+  collapse that trail and rewrite hashes that prior CodeRabbit comments referenced.
 - Re-run the same `coderabbit review --agent --base master --type committed` command after each round of fixes.
 - Repeat until CodeRabbit reports no remaining issues.
+
+If a finding looks like a false positive or you disagree with it:
+
+- Document the deviation in the commit message of a follow-up commit (or the PR
+  body once Phase 8 opens the PR), quoting the relevant CodeRabbit finding text
+  and the reason it does not apply.
+- Escalate when uncertain: ask the user (Tech Priest) to confirm the dispute
+  before pushing, rather than silently dismissing the finding.
+- Re-run `coderabbit review --agent --base master --type committed` after
+  documenting the dispute so the new commit is on record.
 
 Do not proceed to Phase 8 until CodeRabbit is happy.
 

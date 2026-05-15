@@ -72,7 +72,6 @@ pub(crate) fn sql_temporal_start_expr(column: &str) -> String {
 /// Widens date-only stored values to end-of-day (`T23:59:59Z`) so legacy date-only
 /// `valid_to` values remain inclusive when queried with a same-day datetime.
 /// Mirrors `_sql_temporal_end_expr` in Python.
-/// Mirrors `_sql_temporal_end_expr` in Python.
 pub(crate) fn sql_temporal_end_expr(column: &str) -> String {
     format!(
         "CASE WHEN length({column}) = 10 \

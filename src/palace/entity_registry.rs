@@ -739,6 +739,13 @@ impl EntityRegistry {
         // Persist the directory entry too: on most filesystems the rename is
         // journalled separately from the file's data, and fsyncing the parent
         // commits the rename so a subsequent crash cannot resurrect the old name.
+        //
+        // Unix-only: `std::fs::File::open` against a directory succeeds on Unix
+        // and lets us call `sync_all` on the directory handle. On Windows the
+        // same call fails with `ERROR_ACCESS_DENIED`, so the rename-durability
+        // step degrades to a no-op there (the rename is still atomic; only the
+        // power-loss guarantee is weaker). The `if let Ok(...)` swallows that
+        // error rather than failing the save.
         if let Ok(dir_file) = std::fs::File::open(parent) {
             let _ = dir_file.sync_all();
         }
