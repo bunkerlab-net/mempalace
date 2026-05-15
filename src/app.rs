@@ -240,7 +240,11 @@ async fn run_sync(
         "run_sync: palace_path must not be empty"
     );
 
-    let expanded_dirs: Vec<std::path::PathBuf> = dirs.iter().map(|p| expand_tilde(p)).collect();
+    let expanded_dirs: Vec<std::path::PathBuf> = dirs
+        .iter()
+        .map(std::path::PathBuf::as_path)
+        .map(expand_tilde)
+        .collect();
     let report = cli::sync::run(&connection, &expanded_dirs, wing.as_deref(), apply).await?;
     cli::sync::print_report(&report, &palace_path, wing.as_deref(), &expanded_dirs);
     Ok(())
