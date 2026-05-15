@@ -1,6 +1,6 @@
 [package]
 name = "mempalace"
-version = "0.1.0"
+version = "3.3.5"
 edition = "2024"
 description = "Local-first memory palace for AI assistants — single static binary backed by embedded SQLite"
 license = "MIT"
