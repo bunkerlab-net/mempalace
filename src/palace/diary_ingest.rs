@@ -37,14 +37,23 @@ struct FileState {
     entry_count: usize,
     /// Byte length of the file on the last run.
     size: u64,
-    /// Last modification time in Unix-epoch milliseconds. Pairs with `size` so
-    /// a same-length edit (which would not change `size`) still invalidates the
-    /// cursor. Sub-second resolution catches same-second rewrites that
-    /// `as_secs()` would miss. `serde(default)` keeps cursor files written
-    /// before this field existed loadable; their `mtime == 0` will mismatch any
-    /// real file mtime and force one safe re-ingest after upgrade.
+    /// Last modification time in Unix-epoch milliseconds. Retained for backward
+    /// compatibility with cursors written before `content_hash` existed; `mtime`
+    /// alone false-negatives on same-second edits and on attackers/tools that
+    /// preserve mtime across rewrites. `serde(default)` keeps pre-upgrade
+    /// cursors loadable; an `mtime == 0` mismatches any real file and forces a
+    /// safe re-ingest.
     #[serde(default)]
     mtime: u64,
+    /// SHA-256 of the file contents on the last run, hex-encoded.
+    ///
+    /// Hash-based skip avoids the same-length-edit false negative that pure
+    /// `(size, mtime)` matching produces (e.g. `"teh" → "the"` rewrites whose
+    /// mtime was preserved). `serde(default)` keeps legacy cursors loadable;
+    /// when `None` the legacy `(size, mtime)` rule still applies and the new
+    /// hash is backfilled on the next run.
+    #[serde(default)]
+    content_hash: Option<String>,
 }
 
 /// Read the file's modification time as Unix-epoch milliseconds.
@@ -179,6 +188,12 @@ fn diary_ingest_is_diary_file(path: &Path) -> bool {
 }
 
 /// Ingest one diary file; return the number of new drawers created.
+///
+/// Long by design: orchestrates the full per-file pipeline (size check + purge,
+/// content-hash decision, section parsing, apply, orphan purge, cursor update).
+/// Each branch is a single short step — extracting helpers would just splay the
+/// control flow without simplifying it.
+#[allow(clippy::too_many_lines)]
 async fn diary_ingest_file(
     connection: &Connection,
     file_path: &Path,
@@ -219,15 +234,48 @@ async fn diary_ingest_file(
                 entry_count: 0,
                 size: file_size,
                 mtime: file_mtime,
+                content_hash: None,
             },
         );
         return Ok(0);
     }
 
-    let cursor_state = cursor.get(&key);
-    let prev_count = diary_ingest_resume_count(cursor_state, file_size, file_mtime, force);
-
     let text = std::fs::read_to_string(file_path)?;
+    let current_hash = diary_ingest_content_hash(&text);
+
+    // Decide whether the file is unchanged (short-circuit), content-changed
+    // (full rebuild), or appended (incremental from the prior cursor count).
+    let decision = diary_ingest_change_decision(
+        cursor.get(&key),
+        &current_hash,
+        file_size,
+        file_mtime,
+        force,
+    );
+
+    if matches!(decision, DiaryChangeDecision::Unchanged) {
+        // Backfill content_hash on legacy cursors so future runs use the strict
+        // check rather than the size+mtime fallback.
+        if let Some(existing) = cursor.get(&key)
+            && existing.content_hash.is_none()
+        {
+            let backfilled = FileState {
+                entry_count: existing.entry_count,
+                size: existing.size,
+                mtime: existing.mtime,
+                content_hash: Some(current_hash),
+            };
+            cursor.insert(key, backfilled);
+        }
+        return Ok(0);
+    }
+
+    let prev_count = match decision {
+        DiaryChangeDecision::FullRebuild => 0,
+        DiaryChangeDecision::Incremental(n) => n,
+        DiaryChangeDecision::Unchanged => unreachable!("handled above"),
+    };
+
     let sections = diary_ingest_parse_sections(&text);
 
     let created = diary_ingest_file_apply_sections(
@@ -265,9 +313,70 @@ async fn diary_ingest_file(
             entry_count: sections.len(),
             size: file_size,
             mtime: file_mtime,
+            content_hash: Some(current_hash),
         },
     );
     Ok(created)
+}
+
+/// Hex-encoded SHA-256 of the diary's full text. Used by the change-detection
+/// rule to catch same-size edits (e.g. `"teh" → "the"`) that `(size, mtime)`
+/// alone would silently miss when mtime is preserved across the rewrite.
+fn diary_ingest_content_hash(text: &str) -> String {
+    let digest = sha2::Sha256::digest(text.as_bytes());
+    digest
+        .iter()
+        .fold(String::with_capacity(64), |mut acc, byte| {
+            // Hex-encode each byte; capacity is pre-reserved above.
+            use std::fmt::Write as _;
+            let _ = write!(&mut acc, "{byte:02x}");
+            acc
+        })
+}
+
+/// Decision produced by [`diary_ingest_change_decision`].
+#[derive(Debug, PartialEq, Eq)]
+enum DiaryChangeDecision {
+    /// Content matches a prior hash (or matches legacy size+mtime). Skip the file.
+    Unchanged,
+    /// Hash differs from the prior recorded hash — re-ingest every section.
+    FullRebuild,
+    /// No prior hash and size+mtime mismatch — append new sections starting at this index.
+    Incremental(usize),
+}
+
+/// Compare the current diary file against its cursor entry and decide how much work to do.
+///
+/// Strict mode (preferred): if a `content_hash` was recorded, only an exact match
+/// short-circuits; any mismatch triggers a full rebuild because individual sections
+/// may have been edited in place. Legacy fallback (`content_hash` absent): defer to
+/// the `(size, mtime)` rule and resume from the prior `entry_count` — the next run
+/// will backfill the hash. `force=true` skips every check and forces a full rebuild.
+fn diary_ingest_change_decision(
+    cursor_state: Option<&FileState>,
+    current_hash: &str,
+    file_size: u64,
+    file_mtime: u64,
+    force: bool,
+) -> DiaryChangeDecision {
+    if force {
+        return DiaryChangeDecision::FullRebuild;
+    }
+    let Some(state) = cursor_state else {
+        return DiaryChangeDecision::Incremental(0);
+    };
+    if let Some(prev_hash) = state.content_hash.as_deref() {
+        if prev_hash == current_hash {
+            return DiaryChangeDecision::Unchanged;
+        }
+        return DiaryChangeDecision::FullRebuild;
+    }
+    // Legacy cursor without content_hash — fall back to size+mtime.
+    if state.size == file_size && state.mtime == file_mtime && file_mtime > 0 {
+        DiaryChangeDecision::Unchanged
+    } else {
+        DiaryChangeDecision::Incremental(state.entry_count)
+    }
 }
 
 /// Bundle of constant per-file parameters threaded through section ingestion.
@@ -283,26 +392,6 @@ struct DiarySectionContext<'a> {
     force: bool,
     prev_count: usize,
     date_prefix: &'a str,
-}
-
-/// Called by `diary_ingest_file` to compute the resume index from the cursor.
-///
-/// Returns `0` when `force` is set or when the recorded `(size, mtime)` does
-/// not match the current file. Requires `file_mtime > 0` so a platform that
-/// cannot report mtime (or a pre-upgrade cursor file) re-ingests safely
-/// instead of matching a degenerate zero.
-fn diary_ingest_resume_count(
-    cursor_state: Option<&FileState>,
-    file_size: u64,
-    file_mtime: u64,
-    force: bool,
-) -> usize {
-    if force {
-        return 0;
-    }
-    cursor_state
-        .filter(|state| state.size == file_size && state.mtime == file_mtime && file_mtime > 0)
-        .map_or(0, |state| state.entry_count)
 }
 
 /// Called by `diary_ingest_file` to insert/replace drawers for each section.
@@ -564,6 +653,102 @@ fn diary_ingest_drawer_id(
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn change_decision_force_always_full_rebuild() {
+        let decision = diary_ingest_change_decision(None, "deadbeef", 100, 1_000, true);
+        assert_eq!(decision, DiaryChangeDecision::FullRebuild);
+    }
+
+    #[test]
+    fn change_decision_no_prior_state_is_incremental_from_zero() {
+        let decision = diary_ingest_change_decision(None, "deadbeef", 100, 1_000, false);
+        assert_eq!(decision, DiaryChangeDecision::Incremental(0));
+    }
+
+    #[test]
+    fn change_decision_hash_match_is_unchanged() {
+        let prior = FileState {
+            entry_count: 3,
+            size: 100,
+            mtime: 1_000,
+            content_hash: Some("abc123".to_string()),
+        };
+        let decision = diary_ingest_change_decision(Some(&prior), "abc123", 100, 1_000, false);
+        assert_eq!(decision, DiaryChangeDecision::Unchanged);
+    }
+
+    #[test]
+    fn change_decision_hash_mismatch_forces_full_rebuild() {
+        // Hash diverged — even appended-only edits get a full rebuild because
+        // an in-place section edit would otherwise leave a stale drawer in place.
+        let prior = FileState {
+            entry_count: 3,
+            size: 100,
+            mtime: 1_000,
+            content_hash: Some("abc123".to_string()),
+        };
+        let decision = diary_ingest_change_decision(Some(&prior), "def456", 100, 1_000, false);
+        assert_eq!(decision, DiaryChangeDecision::FullRebuild);
+    }
+
+    #[test]
+    fn change_decision_legacy_size_mtime_match_is_unchanged() {
+        // Legacy cursor with no content_hash — fall back to size+mtime.
+        let prior = FileState {
+            entry_count: 3,
+            size: 100,
+            mtime: 1_000,
+            content_hash: None,
+        };
+        let decision = diary_ingest_change_decision(Some(&prior), "def456", 100, 1_000, false);
+        assert_eq!(decision, DiaryChangeDecision::Unchanged);
+    }
+
+    #[test]
+    fn change_decision_legacy_size_mismatch_is_incremental_from_prev_count() {
+        // Legacy cursor + size differs — incremental from the last known entry count.
+        let prior = FileState {
+            entry_count: 5,
+            size: 100,
+            mtime: 1_000,
+            content_hash: None,
+        };
+        let decision = diary_ingest_change_decision(Some(&prior), "def456", 200, 1_000, false);
+        assert_eq!(decision, DiaryChangeDecision::Incremental(5));
+    }
+
+    #[test]
+    fn change_decision_legacy_mtime_zero_requires_re_ingest() {
+        // mtime=0 means the platform did not report a real mtime; never trust the
+        // match so the file re-ingests safely after a platform/upgrade transition.
+        let prior = FileState {
+            entry_count: 5,
+            size: 100,
+            mtime: 0,
+            content_hash: None,
+        };
+        let decision = diary_ingest_change_decision(Some(&prior), "def456", 100, 0, false);
+        assert_eq!(decision, DiaryChangeDecision::Incremental(5));
+    }
+
+    #[test]
+    fn content_hash_is_deterministic_and_hex_encoded() {
+        let a = diary_ingest_content_hash("hello world");
+        let b = diary_ingest_content_hash("hello world");
+        assert_eq!(a, b, "hash must be deterministic");
+        assert_eq!(a.len(), 64, "SHA-256 hex must be 64 chars");
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()), "hash must be hex");
+    }
+
+    #[test]
+    fn content_hash_distinguishes_same_length_edits() {
+        // Regression guard for the same-size edit false negative — "teh" → "the"
+        // must produce a different hash so the cursor rebuilds.
+        let a = diary_ingest_content_hash("teh");
+        let b = diary_ingest_content_hash("the");
+        assert_ne!(a, b, "same-length edit must change the hash");
+    }
 
     #[test]
     fn is_diary_file_accepts_valid_pattern() {

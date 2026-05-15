@@ -218,8 +218,31 @@ pub async fn run(cli: Cli) -> error::Result<()> {
             let directory = expand_tilde(&directory);
             cli::onboarding::run(&directory)?;
         }
+
+        Command::Sync { dirs, wing, apply } => {
+            run_sync(palace_override, dirs, wing, apply).await?;
+        }
     }
 
+    Ok(())
+}
+
+/// Drive `cli::sync::run` over the resolved palace and print the report.
+async fn run_sync(
+    palace_override: Option<&std::path::Path>,
+    dirs: Vec<std::path::PathBuf>,
+    wing: Option<String>,
+    apply: bool,
+) -> error::Result<()> {
+    let (_db, connection, palace_path) = open_palace(palace_override).await?;
+    assert!(
+        !palace_path.as_os_str().is_empty(),
+        "run_sync: palace_path must not be empty"
+    );
+
+    let expanded_dirs: Vec<std::path::PathBuf> = dirs.iter().map(|p| expand_tilde(p)).collect();
+    let report = cli::sync::run(&connection, &expanded_dirs, wing.as_deref(), apply).await?;
+    cli::sync::print_report(&report, &palace_path, wing.as_deref(), &expanded_dirs);
     Ok(())
 }
 

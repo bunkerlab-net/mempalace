@@ -68,8 +68,19 @@ const SKIP_FILES_EXTRA: &[&str] = &[
     ".gitignore",
     "entities.json",
     "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
     "Cargo.lock",
 ];
+
+/// A single file producing more chunks than this is almost always a generated
+/// artifact (CSV/JSON dump, lockfile not in `SKIP_FILES_EXTRA`, etc.). Embedding
+/// thousands of chunks from one file in one batch has triggered runtime
+/// allocation failures upstream (mempalace-py issue #1296). The cap is
+/// conservative: a 500-chunk file at chunker defaults is ~400 KB of source,
+/// which covers most legitimate hand-written content while bounding the
+/// worst-case batch.
+pub(crate) const MAX_CHUNKS_PER_FILE: usize = 500;
 
 /// Return `true` if a filename should be excluded from mining.
 fn is_skip_file(name: &str) -> bool {
@@ -434,6 +445,19 @@ async fn mine_process_file_one(
         !chunks.is_empty(),
         "mine_process_file_one: chunks must not be empty for readable content"
     );
+
+    // Defensive cap: a file producing more than MAX_CHUNKS_PER_FILE chunks is almost
+    // always a generated artifact that escaped the SKIP_FILES_EXTRA list. Bail with a
+    // visible warning rather than writing thousands of low-signal drawers.
+    if chunks.len() > MAX_CHUNKS_PER_FILE {
+        eprintln!(
+            "  ! [skip] {:.50} produced {} chunks (> {}); add to SKIP_FILES_EXTRA or .gitignore",
+            filepath.display(),
+            chunks.len(),
+            MAX_CHUNKS_PER_FILE,
+        );
+        return Ok(None);
+    }
 
     if !opts.dry_run {
         let source_mtime = mine_get_mtime(filepath);
@@ -1862,6 +1886,11 @@ mod tests {
             is_skip_file("package-lock.json"),
             "package-lock.json must be skipped"
         );
+        assert!(
+            is_skip_file("pnpm-lock.yaml"),
+            "pnpm-lock.yaml must be skipped"
+        );
+        assert!(is_skip_file("yarn.lock"), "yarn.lock must be skipped");
         assert!(is_skip_file("Cargo.lock"), "Cargo.lock must be skipped");
         // Pair assertion: normal source files must not be skipped.
         assert!(!is_skip_file("main.rs"), "main.rs must not be skipped");

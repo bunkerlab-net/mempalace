@@ -677,26 +677,70 @@ impl EntityRegistry {
 // ─────────────────────────────────────────────────────────────────────────────
 
 impl EntityRegistry {
-    /// Persist the registry data to disk.
+    /// Persist the registry data to disk atomically.
     ///
-    /// Creates parent directories as needed. Applies `chmod 0o600` on Unix
-    /// so only the current user can read or write the file.
+    /// Writes JSON to a sibling temp file, fsyncs it, renames over the target,
+    /// then fsyncs the parent directory. A crash anywhere in this sequence either
+    /// leaves the previous registry intact or commits the new one — never a
+    /// half-written file or an empty file from an interrupted truncate. The
+    /// parent-directory fsync is required on ext4 for the rename itself to
+    /// survive power loss. Applies `chmod 0o600` on Unix so only the current
+    /// user can read or write the file.
     fn save(&self) -> Result<()> {
+        use std::io::Write as _;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        // Per-call unique-suffix counter so concurrent saves can't clobber
+        // each other's temp file before either gets renamed; `create_new`
+        // catches the cross-process collision via O_EXCL.
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+
         assert!(
             !self.path.as_os_str().is_empty(),
             "save: path must not be empty"
         );
 
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        let parent = self.path.parent().ok_or_else(|| {
+            crate::error::Error::Other(format!(
+                "entity registry path has no parent directory: {}",
+                self.path.display()
+            ))
+        })?;
+        std::fs::create_dir_all(parent)?;
+
         let json = serde_json::to_string_pretty(&self.data)?;
-        std::fs::write(&self.path, json.as_bytes())?;
+
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let file_name = self.path.file_name().map_or_else(
+            || "entities.json".to_string(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        let tmp_path = parent.join(format!("{file_name}.tmp.{}.{unique}", std::process::id()));
+
+        let mut tmp_file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&tmp_path)?;
+        tmp_file.write_all(json.as_bytes())?;
+        // Persist file bytes before the rename; without sync_all, a power loss
+        // after the rename can leave the directory entry pointing at a file
+        // whose data has not yet hit disk.
+        tmp_file.sync_all()?;
+        drop(tmp_file);
 
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600));
+            let _ = std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600));
+        }
+
+        std::fs::rename(&tmp_path, &self.path)?;
+
+        // Persist the directory entry too: on most filesystems the rename is
+        // journalled separately from the file's data, and fsyncing the parent
+        // commits the rename so a subsequent crash cannot resurrect the old name.
+        if let Ok(dir_file) = std::fs::File::open(parent) {
+            let _ = dir_file.sync_all();
         }
 
         // Pair assertion: registry must exist on disk after write.
@@ -1254,6 +1298,73 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let registry = temp_env::with_var("MEMPALACE_DIR", Some(temp.path()), EntityRegistry::load);
         (temp, registry)
+    }
+
+    // ── save atomicity ───────────────────────────────────────────────────────
+
+    #[test]
+    fn save_writes_target_file_and_cleans_up_temp() {
+        // After a successful save, the registry file exists at the target path
+        // and no `.tmp.*` sibling is left behind.
+        let (temp, mut registry) = test_registry();
+        temp_env::with_var("MEMPALACE_DIR", Some(temp.path()), || {
+            registry
+                .confirm_research("Atomic", "person", "test", "personal")
+                .expect("confirm must succeed to trigger save");
+        });
+
+        let target_path = entity_registry_path_in(temp.path());
+        assert!(
+            target_path.exists(),
+            "target registry path must exist after save"
+        );
+
+        // Pair assertion: no temp file siblings left behind.
+        let parent = target_path
+            .parent()
+            .expect("registry path must have parent");
+        let leftover_temp: Vec<_> = std::fs::read_dir(parent)
+            .expect("read registry parent dir")
+            .filter_map(std::result::Result::ok)
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("entity_registry.json.tmp.")
+            })
+            .collect();
+        assert!(
+            leftover_temp.is_empty(),
+            "atomic save must not leave temp file siblings; found {}",
+            leftover_temp.len()
+        );
+    }
+
+    #[test]
+    fn save_replaces_existing_file_atomically() {
+        // A second save must replace the prior content. If the rename were
+        // skipped, the on-disk JSON would still hold the old entry only.
+        let (temp, mut registry) = test_registry();
+        temp_env::with_var("MEMPALACE_DIR", Some(temp.path()), || {
+            registry
+                .confirm_research("First", "person", "a", "personal")
+                .expect("first confirm must succeed");
+            registry
+                .confirm_research("Second", "person", "b", "personal")
+                .expect("second confirm must succeed");
+        });
+
+        let target_path = entity_registry_path_in(temp.path());
+        let payload = std::fs::read_to_string(&target_path).expect("read registry after replace");
+        assert!(
+            payload.contains("First") && payload.contains("Second"),
+            "atomic replace must preserve all writes; got: {payload}"
+        );
+    }
+
+    /// Resolve the registry path inside `dir`, mirroring `entity_registry_path()`
+    /// under a `MEMPALACE_DIR` override.
+    fn entity_registry_path_in(dir: &std::path::Path) -> std::path::PathBuf {
+        temp_env::with_var("MEMPALACE_DIR", Some(dir), entity_registry_path)
     }
 
     // ── entity_registry_path ──────────────────────────────────────────────────

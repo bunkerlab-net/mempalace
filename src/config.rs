@@ -194,6 +194,102 @@ pub fn normalize_wing_name(name: &str) -> String {
     result
 }
 
+/// Validate an ISO-8601 date or canonical UTC datetime string for KG temporal fields.
+///
+/// Accepts `None` and the empty string as pass-through values so callers can pass
+/// optional fields directly. Accepted non-empty forms:
+///
+/// - `YYYY-MM-DD`
+/// - `YYYY-MM-DDTHH:MM:SSZ`
+/// - `YYYY-MM-DDTHH:MM:SS+00:00` (normalized to `...Z`)
+///
+/// Partial dates (`2026-05`), naive datetimes, non-UTC offsets, fractional seconds,
+/// and SQLite-style space-separated datetimes are rejected. KG stores temporal
+/// values as TEXT; lexicographic comparison is only safe when datetimes use one
+/// canonical shape. Mirrors `mempalace/config.py::sanitize_iso_temporal`.
+pub fn sanitize_iso_temporal(value: Option<&str>, field_name: &str) -> Result<Option<String>> {
+    let Some(raw) = value else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(Some(String::new()));
+    }
+
+    let bytes = trimmed.as_bytes();
+    let is_iso_date = bytes.len() == 10 && is_iso_date_bytes(bytes);
+    let utc_datetime_len = 20; // YYYY-MM-DDTHH:MM:SSZ
+    let offset_datetime_len = 25; // YYYY-MM-DDTHH:MM:SS+00:00
+    let is_utc_datetime_z =
+        bytes.len() == utc_datetime_len && is_iso_datetime_bytes(bytes) && bytes[19] == b'Z';
+    let is_utc_datetime_offset = bytes.len() == offset_datetime_len
+        && is_iso_datetime_bytes(bytes)
+        && &bytes[19..] == b"+00:00";
+
+    let canonical = if is_iso_date {
+        if chrono::NaiveDate::parse_from_str(trimmed, "%Y-%m-%d").is_err() {
+            return Err(invalid_iso_temporal(field_name, trimmed));
+        }
+        trimmed.to_string()
+    } else if is_utc_datetime_z {
+        if chrono::DateTime::parse_from_rfc3339(trimmed).is_err() {
+            return Err(invalid_iso_temporal(field_name, trimmed));
+        }
+        trimmed.to_string()
+    } else if is_utc_datetime_offset {
+        if chrono::DateTime::parse_from_rfc3339(trimmed).is_err() {
+            return Err(invalid_iso_temporal(field_name, trimmed));
+        }
+        // Normalize +00:00 → Z so all stored temporal values share one shape.
+        format!("{}Z", &trimmed[..19])
+    } else {
+        return Err(invalid_iso_temporal(field_name, trimmed));
+    };
+
+    Ok(Some(canonical))
+}
+
+/// Backward-compatible wrapper for ISO temporal validation.
+///
+/// Historically this accepted only full dates. It now also accepts canonical UTC
+/// datetimes, but the old name is kept so existing callers continue to work.
+// Public API parity with the Python port (`mempalace/config.py::sanitize_iso_date`);
+// the Rust internals use `sanitize_iso_temporal` directly.
+#[allow(dead_code)]
+pub fn sanitize_iso_date(value: Option<&str>, field_name: &str) -> Result<Option<String>> {
+    sanitize_iso_temporal(value, field_name)
+}
+
+fn invalid_iso_temporal(field_name: &str, value: &str) -> Error {
+    Error::Other(format!(
+        "{field_name}={value:?} is not a valid ISO-8601 date or UTC datetime \
+         (expected YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ)"
+    ))
+}
+
+fn is_iso_date_bytes(bytes: &[u8]) -> bool {
+    // Layout: YYYY-MM-DD.
+    bytes.len() >= 10
+        && bytes[..4].iter().all(u8::is_ascii_digit)
+        && bytes[4] == b'-'
+        && bytes[5..7].iter().all(u8::is_ascii_digit)
+        && bytes[7] == b'-'
+        && bytes[8..10].iter().all(u8::is_ascii_digit)
+}
+
+fn is_iso_datetime_bytes(bytes: &[u8]) -> bool {
+    // Layout shared by both Z-suffixed and +00:00-suffixed forms:
+    // YYYY-MM-DDTHH:MM:SS followed by Z or +00:00.
+    bytes.len() >= 19
+        && is_iso_date_bytes(&bytes[..10])
+        && bytes[10] == b'T'
+        && bytes[11..13].iter().all(u8::is_ascii_digit)
+        && bytes[13] == b':'
+        && bytes[14..16].iter().all(u8::is_ascii_digit)
+        && bytes[16] == b':'
+        && bytes[17..19].iter().all(u8::is_ascii_digit)
+}
+
 /// Path to the global config file.
 pub fn config_path() -> PathBuf {
     config_dir().join("config.json")
@@ -576,6 +672,82 @@ impl ProjectConfig {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sanitize_iso_temporal_accepts_none_and_empty() {
+        assert!(matches!(sanitize_iso_temporal(None, "as_of"), Ok(None)));
+        let result = sanitize_iso_temporal(Some(""), "as_of");
+        assert!(matches!(result, Ok(Some(ref s)) if s.is_empty()));
+    }
+
+    #[test]
+    fn sanitize_iso_temporal_accepts_iso_date() {
+        let result =
+            sanitize_iso_temporal(Some("2026-05-15"), "as_of").expect("valid ISO date must pass");
+        assert_eq!(result.as_deref(), Some("2026-05-15"));
+    }
+
+    #[test]
+    fn sanitize_iso_temporal_accepts_z_datetime() {
+        let result = sanitize_iso_temporal(Some("2026-05-15T12:30:45Z"), "as_of")
+            .expect("canonical UTC datetime must pass");
+        assert_eq!(result.as_deref(), Some("2026-05-15T12:30:45Z"));
+    }
+
+    #[test]
+    fn sanitize_iso_temporal_normalizes_zero_offset_to_z() {
+        let result = sanitize_iso_temporal(Some("2026-05-15T12:30:45+00:00"), "as_of")
+            .expect("+00:00 datetime must pass and normalize");
+        assert_eq!(result.as_deref(), Some("2026-05-15T12:30:45Z"));
+    }
+
+    #[test]
+    fn sanitize_iso_temporal_rejects_partial_date() {
+        // Reason: lexicographic comparison breaks with mixed-length temporal strings.
+        let result = sanitize_iso_temporal(Some("2026-05"), "valid_from");
+        assert!(result.is_err(), "partial date must be rejected");
+    }
+
+    #[test]
+    fn sanitize_iso_temporal_rejects_naive_datetime() {
+        // Reason: a naive datetime (no Z, no +00:00) has ambiguous timezone.
+        let result = sanitize_iso_temporal(Some("2026-05-15T12:30:45"), "valid_from");
+        assert!(result.is_err(), "naive datetime must be rejected");
+    }
+
+    #[test]
+    fn sanitize_iso_temporal_rejects_non_utc_offset() {
+        let result = sanitize_iso_temporal(Some("2026-05-15T12:30:45+02:00"), "valid_from");
+        assert!(result.is_err(), "non-UTC offset must be rejected");
+    }
+
+    #[test]
+    fn sanitize_iso_temporal_rejects_space_separated_datetime() {
+        // SQLite's default datetime format uses a space; KG only accepts the T separator.
+        let result = sanitize_iso_temporal(Some("2026-05-15 12:30:45Z"), "valid_from");
+        assert!(result.is_err(), "space-separated datetime must be rejected");
+    }
+
+    #[test]
+    fn sanitize_iso_temporal_rejects_impossible_calendar() {
+        // Shape is valid but month=13 is impossible.
+        let result = sanitize_iso_temporal(Some("2026-13-01"), "valid_from");
+        assert!(
+            result.is_err(),
+            "impossible calendar value must be rejected"
+        );
+    }
+
+    #[test]
+    fn sanitize_iso_date_aliases_iso_temporal() {
+        let result =
+            sanitize_iso_date(Some("2026-05-15"), "as_of").expect("alias must accept ISO date");
+        assert_eq!(result.as_deref(), Some("2026-05-15"));
+        // And must also accept canonical datetimes per the new contract.
+        let dt = sanitize_iso_date(Some("2026-05-15T00:00:00Z"), "as_of")
+            .expect("alias must accept canonical datetime");
+        assert_eq!(dt.as_deref(), Some("2026-05-15T00:00:00Z"));
+    }
 
     #[test]
     fn default_config_has_palace_path() {

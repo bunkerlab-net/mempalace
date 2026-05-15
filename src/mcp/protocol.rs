@@ -191,8 +191,12 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
                     "subject": {"type": "string", "description": "The entity doing/being something"},
                     "predicate": {"type": "string", "description": "The relationship type (e.g. 'loves', 'works_on')"},
                     "object": {"type": "string", "description": "The entity being connected to"},
-                    "valid_from": {"type": "string", "description": "When this became true (YYYY-MM-DD, optional)"},
-                    "source_closet": {"type": "string", "description": "Source reference (optional)"}
+                    "valid_from": {"type": "string", "description": "When this became true (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ, optional)"},
+                    "valid_to": {"type": "string", "description": "When this stopped being true (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ, optional). Use for backfilling already-ended historical facts."},
+                    "source_closet": {"type": "string", "description": "Source reference (optional)"},
+                    "source_file": {"type": "string", "description": "RFC 002 provenance: source file path that produced this triple (optional)"},
+                    "source_drawer_id": {"type": "string", "description": "RFC 002 provenance: drawer ID of the source record (optional)"},
+                    "adapter_name": {"type": "string", "description": "RFC 002 provenance: adapter that produced this triple (optional)"}
                 },
                 "required": ["subject", "predicate", "object"]
             }
@@ -206,7 +210,7 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
                     "subject": {"type": "string", "description": "Entity"},
                     "predicate": {"type": "string", "description": "Relationship"},
                     "object": {"type": "string", "description": "Connected entity"},
-                    "ended": {"type": "string", "description": "When it stopped being true (YYYY-MM-DD, default: today)"}
+                    "ended": {"type": "string", "description": "When it stopped being true (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ, default: today)"}
                 },
                 "required": ["subject", "predicate", "object"]
             }
