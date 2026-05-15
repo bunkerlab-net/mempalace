@@ -126,6 +126,16 @@ Before pushing any code, run the CodeRabbit CLI against the committed changes:
 coderabbit review --agent --base master --type committed
 ```
 
+If the CLI itself fails to run (network outage, expired auth, CLI build
+issues), do not silently skip Phase 7:
+
+- Re-try the command once after sanity-checking connectivity, auth/token, and
+  CLI version (`coderabbit --version`).
+- If it still fails, document the failure and any manual verification you ran in
+  a follow-up commit message and the PR body. Escalate to the user (the project
+  owner, addressed as "Tech Priest" in conversation per the global
+  `CLAUDE.md`) before pushing.
+
 Address every issue CodeRabbit raises:
 
 - Apply fixes as new commits on the same branch (do **not** amend prior commits).
@@ -140,8 +150,9 @@ If a finding looks like a false positive or you disagree with it:
 - Document the deviation in the commit message of a follow-up commit (or the PR
   body once Phase 8 opens the PR), quoting the relevant CodeRabbit finding text
   and the reason it does not apply.
-- Escalate when uncertain: ask the user (Tech Priest) to confirm the dispute
-  before pushing, rather than silently dismissing the finding.
+- Escalate when uncertain: ask the user (the project owner; see `CLAUDE.md`
+  for the project's preferred form of address) to confirm the dispute before
+  pushing, rather than silently dismissing the finding.
 - Re-run `coderabbit review --agent --base master --type committed` after
   documenting the dispute so the new commit is on record.
 
