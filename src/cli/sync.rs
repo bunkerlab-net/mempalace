@@ -300,6 +300,14 @@ struct SyncDeleteCounts {
     closets: usize,
 }
 
+/// Per-statement bind cap for the chunked `IN (...)` batch deletes.
+///
+/// `SQLite`'s compiled-in default `SQLITE_LIMIT_VARIABLE_NUMBER` is 999 on
+/// pre-3.32 builds (32 766 on newer ones). 500 keeps every batch comfortably
+/// under both ceilings while still cutting round-trips by ~500× versus the
+/// per-row loop the prune previously used.
+const SYNC_DELETE_CHUNK: usize = 500;
+
 /// Perform the inner deletes inside the open transaction. Splitting this off
 /// keeps `sync_delete` focused on transaction lifecycle.
 async fn sync_delete_inner(
@@ -307,19 +315,26 @@ async fn sync_delete_inner(
     removable_ids: &[String],
     removable_sources: &HashSet<String>,
 ) -> Result<SyncDeleteCounts> {
-    for drawer_id in removable_ids {
-        connection
-            .execute(
-                "DELETE FROM drawers WHERE id = ?1",
-                turso::params![drawer_id.as_str()],
-            )
-            .await?;
+    // Batch deletes via `IN (?,?,?,...)` so a 10k-drawer prune costs ~20 round
+    // trips instead of ~20k. Chunk size is capped so we stay well below
+    // SQLite's variable-bind ceiling on every supported build.
+    for chunk in removable_ids.chunks(SYNC_DELETE_CHUNK) {
+        let placeholders = sync_in_clause_placeholders(chunk.len());
+        let drawers_sql = format!("DELETE FROM drawers WHERE id IN ({placeholders})");
         // drawer_words rows are tied to the drawer id; delete here so an FTS
         // rebuild doesn't surface stale entries for pruned drawers.
+        let words_sql = format!("DELETE FROM drawer_words WHERE drawer_id IN ({placeholders})");
+
         connection
             .execute(
-                "DELETE FROM drawer_words WHERE drawer_id = ?1",
-                turso::params![drawer_id.as_str()],
+                &drawers_sql,
+                turso::params_from_iter(chunk.iter().map(String::as_str).map(turso::Value::from)),
+            )
+            .await?;
+        connection
+            .execute(
+                &words_sql,
+                turso::params_from_iter(chunk.iter().map(String::as_str).map(turso::Value::from)),
             )
             .await?;
     }
@@ -355,6 +370,28 @@ async fn sync_delete_inner(
     Ok(SyncDeleteCounts {
         closets: removed_closets,
     })
+}
+
+/// Build a `?,?,?,...,?` placeholder string of length `count`.
+///
+/// Used by [`sync_delete_inner`] to construct an `IN (...)` clause that binds
+/// each id as a separate parameter (rather than interpolating into SQL, which
+/// would invite injection on a hostile drawer id).
+fn sync_in_clause_placeholders(count: usize) -> String {
+    assert!(
+        count > 0,
+        "sync_in_clause_placeholders: count must be positive"
+    );
+    // Each placeholder is "?" + ",", minus the trailing comma. Pre-reserve so
+    // a 500-id chunk doesn't reallocate during the join.
+    let mut buffer = String::with_capacity(count * 2);
+    for placeholder_index in 0..count {
+        if placeholder_index > 0 {
+            buffer.push(',');
+        }
+        buffer.push('?');
+    }
+    buffer
 }
 
 /// Pretty-print a `SyncReport` to stdout, matching the Python CLI banner shape.
