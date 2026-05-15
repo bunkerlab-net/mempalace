@@ -82,6 +82,11 @@ const SKIP_FILES_EXTRA: &[&str] = &[
 /// worst-case batch.
 pub(crate) const MAX_CHUNKS_PER_FILE: usize = 500;
 
+// Document the intended range at compile time so a future refactor that drops
+// the cap to a tiny value or raises it to a million fails the build.
+const _: () = assert!(MAX_CHUNKS_PER_FILE >= 100);
+const _: () = assert!(MAX_CHUNKS_PER_FILE <= 10_000);
+
 /// Return `true` if a filename should be excluded from mining.
 fn is_skip_file(name: &str) -> bool {
     PROJECT_CONFIG_FILES.contains(&name) || SKIP_FILES_EXTRA.contains(&name)
@@ -414,6 +419,26 @@ fn mine_extract_entities_for_metadata(filepath: &Path) -> Vec<String> {
     names
 }
 
+/// Decide whether a file should be skipped because it produced too many chunks.
+///
+/// Returns `true` and prints a `[skip]` warning to stderr when `chunk_count`
+/// exceeds `MAX_CHUNKS_PER_FILE`; returns `false` otherwise. Extracted from
+/// `mine_process_file_one` so the cap branch is independently testable without
+/// needing a database or a multi-hundred-kilobyte fixture file.
+fn mine_should_skip_oversized(filepath: &Path, chunk_count: usize) -> bool {
+    if chunk_count > MAX_CHUNKS_PER_FILE {
+        eprintln!(
+            "  ! [skip] {:.50} produced {chunk_count} chunks (> {}); \
+             add to SKIP_FILES_EXTRA or .gitignore",
+            filepath.display(),
+            MAX_CHUNKS_PER_FILE,
+        );
+        true
+    } else {
+        false
+    }
+}
+
 /// Process a single file in the mine loop.
 ///
 /// Returns `None` when the file is unreadable or too short. Otherwise returns
@@ -449,13 +474,7 @@ async fn mine_process_file_one(
     // Defensive cap: a file producing more than MAX_CHUNKS_PER_FILE chunks is almost
     // always a generated artifact that escaped the SKIP_FILES_EXTRA list. Bail with a
     // visible warning rather than writing thousands of low-signal drawers.
-    if chunks.len() > MAX_CHUNKS_PER_FILE {
-        eprintln!(
-            "  ! [skip] {:.50} produced {} chunks (> {}); add to SKIP_FILES_EXTRA or .gitignore",
-            filepath.display(),
-            chunks.len(),
-            MAX_CHUNKS_PER_FILE,
-        );
+    if mine_should_skip_oversized(filepath, chunks.len()) {
         return Ok(None);
     }
 
@@ -1876,6 +1895,33 @@ mod tests {
             !is_skip_file("other.yaml"),
             "other.yaml must not be in the skip list"
         );
+    }
+
+    #[test]
+    fn should_skip_oversized_keeps_files_at_the_limit() {
+        // A file producing exactly MAX_CHUNKS_PER_FILE chunks must be kept —
+        // the cap is `>`, not `>=`. Mirrors the boundary condition that the
+        // miner relies on so the "exactly 500 chunks" case ingests normally.
+        let path = std::path::Path::new("/tmp/at_limit.txt");
+        assert!(!mine_should_skip_oversized(path, MAX_CHUNKS_PER_FILE));
+    }
+
+    #[test]
+    fn should_skip_oversized_skips_files_above_the_limit() {
+        // One chunk past the cap must trigger the skip path. The function emits
+        // a stderr warning; we don't assert on stderr here because libtest
+        // doesn't capture it in a stable way across runners — we trust the
+        // function returns true and the eprintln is unconditional.
+        let path = std::path::Path::new("/tmp/oversized.txt");
+        assert!(mine_should_skip_oversized(path, MAX_CHUNKS_PER_FILE + 1));
+    }
+
+    #[test]
+    fn should_skip_oversized_keeps_small_files() {
+        // Pair assertion: small inputs must never trip the cap.
+        let path = std::path::Path::new("/tmp/small.txt");
+        assert!(!mine_should_skip_oversized(path, 1));
+        assert!(!mine_should_skip_oversized(path, 0));
     }
 
     #[test]

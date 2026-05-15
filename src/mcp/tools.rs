@@ -1256,16 +1256,19 @@ async fn tool_kg_add(connection: &Connection, args: &Value) -> Value {
     }
 }
 
-/// Read an optional string argument from the MCP tool args, treating empty as absent.
+/// Read an optional string argument from the MCP tool args, treating empty or
+/// whitespace-only values as absent.
 ///
-/// Mirrors the Python pattern `value if value else None` so callers can supply
-/// `""` or omit the key entirely and get the same `None` result.
+/// Mirrors the Python pattern `value if value else None` and lines up with
+/// `sanitize_opt_name`'s whitespace-stripping behavior so callers can supply
+/// `""`, `"   "`, or omit the key entirely and get the same `None` result.
+/// Returns the trimmed string when non-empty.
 fn optional_str_arg(args: &Value, key: &str) -> Option<String> {
-    let raw = str_arg(args, key);
-    if raw.is_empty() {
+    let trimmed = str_arg(args, key).trim();
+    if trimmed.is_empty() {
         None
     } else {
-        Some(raw.to_string())
+        Some(trimmed.to_string())
     }
 }
 

@@ -258,6 +258,39 @@ async fn sync_delete(
     removable_sources: &HashSet<String>,
     report: &mut SyncReport,
 ) -> Result<()> {
+    // Run the whole prune inside a single transaction so a mid-loop failure
+    // doesn't leave half the drawers deleted with their `drawer_words` /
+    // `compressed` rows still pointing at them. On any error we ROLLBACK and
+    // leave the palace in the state it was in before the apply began.
+    connection.execute("BEGIN", ()).await?;
+    let removed = match sync_delete_inner(connection, removable_ids, removable_sources).await {
+        Ok(value) => value,
+        Err(error) => {
+            // Best-effort rollback; the original error wins regardless.
+            let _ = connection.execute("ROLLBACK", ()).await;
+            return Err(error);
+        }
+    };
+    connection.execute("COMMIT", ()).await?;
+
+    report.removed_drawers = removable_ids.len();
+    report.removed_closets = removed.closets;
+    Ok(())
+}
+
+/// Counts returned from [`sync_delete_inner`]. Kept separate from `SyncReport`
+/// so the caller only commits report state after the transaction commits.
+struct SyncDeleteCounts {
+    closets: usize,
+}
+
+/// Perform the inner deletes inside the open transaction. Splitting this off
+/// keeps `sync_delete` focused on transaction lifecycle.
+async fn sync_delete_inner(
+    connection: &Connection,
+    removable_ids: &[String],
+    removable_sources: &HashSet<String>,
+) -> Result<SyncDeleteCounts> {
     for drawer_id in removable_ids {
         connection
             .execute(
@@ -274,7 +307,6 @@ async fn sync_delete(
             )
             .await?;
     }
-    report.removed_drawers = removable_ids.len();
 
     let mut removed_closets = 0usize;
     for source_file in removable_sources {
@@ -304,8 +336,9 @@ async fn sync_delete(
         let promoted = usize::try_from(count_for_source.max(0)).unwrap_or(usize::MAX);
         removed_closets += promoted;
     }
-    report.removed_closets = removed_closets;
-    Ok(())
+    Ok(SyncDeleteCounts {
+        closets: removed_closets,
+    })
 }
 
 /// Pretty-print a `SyncReport` to stdout, matching the Python CLI banner shape.

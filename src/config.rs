@@ -253,8 +253,11 @@ pub fn sanitize_iso_temporal(value: Option<&str>, field_name: &str) -> Result<Op
 ///
 /// Historically this accepted only full dates. It now also accepts canonical UTC
 /// datetimes, but the old name is kept so existing callers continue to work.
-// Public API parity with the Python port (`mempalace/config.py::sanitize_iso_date`);
-// the Rust internals use `sanitize_iso_temporal` directly.
+// Public API parity with the Python port (`mempalace/config.py::sanitize_iso_date`).
+// Allow dead_code because Rust internals call `sanitize_iso_temporal` directly;
+// this thin alias exists solely so external Rust consumers depending on the
+// historical Python name keep compiling, and so adapter code that round-trips
+// between the two ports can use the same identifier.
 #[allow(dead_code)]
 pub fn sanitize_iso_date(value: Option<&str>, field_name: &str) -> Result<Option<String>> {
     sanitize_iso_temporal(value, field_name)
