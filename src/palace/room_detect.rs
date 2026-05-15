@@ -261,10 +261,13 @@ pub fn detect_room(
     let path_parts: Vec<&str> = relative.split(['/', '\\']).collect();
     for part in &path_parts[..path_parts.len().saturating_sub(1)] {
         for room in rooms {
-            let mut candidates: Vec<String> = vec![room.name.to_lowercase()];
-            candidates.extend(room.keywords.iter().map(|k| k.to_lowercase()));
+            // Stream room.name + room.keywords as &str without allocating a
+            // per-iteration Vec; `name_matches` lowercases internally so we
+            // don't need to materialize lowercase strings up front.
+            let candidates =
+                std::iter::once(room.name.as_str()).chain(room.keywords.iter().map(String::as_str));
             if candidates
-                .iter()
+                .into_iter()
                 .any(|candidate| name_matches(part, candidate))
             {
                 return room.name.clone();

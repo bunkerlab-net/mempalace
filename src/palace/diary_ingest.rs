@@ -323,12 +323,14 @@ async fn diary_ingest_file(
 /// rule to catch same-size edits (e.g. `"teh" → "the"`) that `(size, mtime)`
 /// alone would silently miss when mtime is preserved across the rewrite.
 fn diary_ingest_content_hash(text: &str) -> String {
+    use std::fmt::Write as _;
+    // `GenericArray<u8, _>` in sha2 0.11 does not impl `LowerHex`, so we hex-encode
+    // the digest bytes ourselves. The pre-reserved capacity sidesteps reallocation
+    // for the fixed 64-char output.
     let digest = sha2::Sha256::digest(text.as_bytes());
     digest
         .iter()
         .fold(String::with_capacity(64), |mut acc, byte| {
-            // Hex-encode each byte; capacity is pre-reserved above.
-            use std::fmt::Write as _;
             let _ = write!(&mut acc, "{byte:02x}");
             acc
         })

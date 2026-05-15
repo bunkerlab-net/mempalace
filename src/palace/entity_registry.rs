@@ -676,6 +676,40 @@ impl EntityRegistry {
 // EntityRegistry — private helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// RAII guard that removes a temporary file on `Drop` unless explicitly disarmed.
+///
+/// Used by `EntityRegistry::save` so a failure in `write_all` / `sync_all` /
+/// `set_permissions` / `rename` doesn't leave an orphan `.tmp.<pid>.<n>` sibling
+/// alongside the real registry. Callers `disarm()` only after the rename
+/// completes, since rename consumes the temp file.
+struct TempFileGuard {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl TempFileGuard {
+    fn new(path: &Path) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            // Best-effort cleanup; failures here are not actionable (the file
+            // may already be gone, or `parent` may have been unlinked).
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 impl EntityRegistry {
     /// Persist the registry data to disk atomically.
     ///
@@ -717,6 +751,11 @@ impl EntityRegistry {
         );
         let tmp_path = parent.join(format!("{file_name}.tmp.{}.{unique}", std::process::id()));
 
+        // RAII guard so a failure in write_all / sync_all / set_permissions /
+        // rename leaves no orphan `.tmp.<pid>.<n>` sibling alongside the real
+        // registry. `disarm()` is called only after the rename succeeds.
+        let mut tmp_guard = TempFileGuard::new(&tmp_path);
+
         let mut tmp_file = std::fs::OpenOptions::new()
             .create_new(true)
             .write(true)
@@ -735,6 +774,7 @@ impl EntityRegistry {
         }
 
         std::fs::rename(&tmp_path, &self.path)?;
+        tmp_guard.disarm();
 
         // Persist the directory entry too: on most filesystems the rename is
         // journalled separately from the file's data, and fsyncing the parent
