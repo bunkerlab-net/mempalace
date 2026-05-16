@@ -118,6 +118,62 @@ Ports: <bullet list of what was ported>
 
 If there are no Rust changes to port, no additional commit is needed — Phase 0 is the only commit.
 
+### Phase 7 — CodeRabbit review (required before push)
+
+Before pushing any code, run the CodeRabbit CLI against the committed changes:
+
+```bash
+coderabbit review --agent --base master --type committed
+```
+
+`--base master` matches this repo's default branch. In a repo whose default
+is `main` (or anything else), substitute that name — the CLI compares the
+working branch against `--base` to decide what to review.
+
+If the CLI itself fails to run (network outage, expired auth, CLI build
+issues), do not silently skip Phase 7:
+
+- Re-try the command once after sanity-checking connectivity, auth/token, and
+  CLI version (`coderabbit --version`).
+- If it still fails, document the failure and any manual verification you ran in
+  a follow-up commit message and the PR body. Escalate to the user (the project
+  owner, addressed as "Tech Priest" in conversation per the global
+  `CLAUDE.md`) before pushing.
+
+Address every issue CodeRabbit raises:
+
+- Apply fixes as new commits on the same branch (do **not** amend prior commits).
+  Each round of fixes ships as its own commit so the review history is preserved
+  in `git log` and CodeRabbit's iterative findings stay auditable. Amending would
+  collapse that trail and rewrite hashes that prior CodeRabbit comments referenced.
+- Re-run `coderabbit review --agent --base master --type committed` after every fix
+  or dispute commit so the next review sees the resolution.
+- Phase 8 may proceed only when every finding from the latest review is resolved
+  (either fixed or documented as false positives with user/project-owner approval).
+
+If a finding looks like a false positive or you disagree with it:
+
+- Document the deviation in the commit message of a follow-up commit (or the PR
+  body once Phase 8 opens the PR), quoting the relevant CodeRabbit finding text
+  and the reason it does not apply.
+- Escalate when uncertain: ask the user (the project owner; see `CLAUDE.md`
+  for the project's preferred form of address) to confirm the dispute before
+  pushing, rather than silently dismissing the finding.
+- Re-run `coderabbit review --agent --base master --type committed` after
+  documenting the dispute so the new commit is on record.
+
+### Phase 8 — Push and open a PR
+
+Only after CodeRabbit has signed off — meaning the last
+`coderabbit review --agent --base <default-branch> --type committed`
+invocation exited 0 **and** its JSONL output ends with
+`{"type":"complete","status":"review_completed","findings":0}` (or the
+remaining findings are documented as approved false positives in a
+preceding commit):
+
+1. Push the branch to the remote.
+2. Open a PR following the project's standard PR workflow.
+
 ## Key file mappings (Python → Rust)
 
 | Python file                        | Rust equivalent                                |

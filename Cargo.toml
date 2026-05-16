@@ -1,6 +1,6 @@
 [package]
 name = "mempalace"
-version = "0.1.0"
+version = "3.3.5"
 edition = "2024"
 description = "Local-first memory palace for AI assistants — single static binary backed by embedded SQLite"
 license = "MIT"
@@ -59,6 +59,13 @@ ureq = { version = "3", default-features = false, features = [
   "json",
 ] }
 uuid = { version = "1", default-features = false, features = ["v4"] }
+
+[target.'cfg(unix)'.dependencies]
+# `libc` exposes POSIX constants (e.g. `O_NOFOLLOW`, `ELOOP`) used by the
+# exporter's symlink-rejecting file open helper. Scoped to `cfg(unix)` so
+# non-Unix builds neither pull it in nor need a `#[cfg(unix)]` shim around
+# its uses in `src/palace/exporter.rs`.
+libc = { version = "0.2", default-features = false }
 
 [dev-dependencies]
 temp-env = { version = "0.3", features = ["async_closure"] }

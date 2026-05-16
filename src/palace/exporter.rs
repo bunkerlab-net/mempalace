@@ -12,12 +12,79 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as FmtWrite;
+use std::io::Write as _;
 use std::path::Path;
 
 use turso::Connection;
 
 use crate::db;
-use crate::error::Result;
+use crate::error::{Error, Result};
+
+/// Refuse to write into `path` when it is itself a symbolic link.
+///
+/// Defense-in-depth: a pre-placed symlink at an export target would redirect
+/// writes to wherever the link points (e.g. into system directories). Mirrors
+/// the Python exporter's `_reject_symlink`. `path` may not exist yet; only an
+/// existing symlink is rejected.
+fn reject_symlink(path: &Path, label: &str) -> Result<()> {
+    assert!(!label.is_empty(), "reject_symlink: label must not be empty");
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(Error::Other(format!(
+            "refusing to export: {label} is a symbolic link ({}). \
+             Remove the symlink or choose a different output path.",
+            path.display()
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// Open a file for writing, refusing to follow a symlink at the target path.
+///
+/// On POSIX, `O_NOFOLLOW` makes the open itself fail with `ELOOP` when the
+/// final path component is a symlink — closing the TOCTOU window between an
+/// `is_symlink` check and the open. On Windows we fall back to a pre-check
+/// because `O_NOFOLLOW` isn't available; narrower than no check at all.
+fn safe_open_for_write_truncate(path: &Path) -> Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let result = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path);
+        match result {
+            Ok(file) => Ok(file),
+            Err(err) if err.raw_os_error() == Some(libc::ELOOP) => Err(Error::Other(format!(
+                "refusing to write: {} is a symbolic link.",
+                path.display()
+            ))),
+            Err(err) => Err(err.into()),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(Error::Other(format!(
+                "refusing to write: {} is a symbolic link.",
+                path.display()
+            )));
+        }
+        Ok(std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)?)
+    }
+}
+
+/// `std::fs::write`-style wrapper that refuses to follow a symlink at `path`.
+fn safe_write(path: &Path, content: &[u8]) -> Result<()> {
+    let mut file = safe_open_for_write_truncate(path)?;
+    file.write_all(content)?;
+    Ok(())
+}
 
 /// Stats returned by `export_palace`.
 pub struct ExportStats {
@@ -56,6 +123,9 @@ pub async fn export_palace(
     assert!(room_count <= drawer_count || drawer_count == 0);
 
     if !dry_run {
+        // Refuse to scribble into a pre-placed symlink at output_dir before any
+        // directories are created or files are written.
+        reject_symlink(output_dir, "output_dir")?;
         for ((wing_name, room_name), sections) in &grouped {
             export_write_room(output_dir, wing_name, room_name, sections)?;
         }
@@ -161,6 +231,9 @@ fn export_write_room(
     assert!(!sections.is_empty());
 
     let wing_dir = output_dir.join(sanitize_path_component(wing_name));
+    // Refuse symlinks at the wing directory before create_dir_all silently
+    // succeeds on a pre-placed symlink that targets an unrelated directory.
+    reject_symlink(&wing_dir, &format!("wing directory {wing_name:?}"))?;
     std::fs::create_dir_all(&wing_dir)?;
 
     let file_name = format!("{}.md", sanitize_path_component(room_name));
@@ -180,7 +253,7 @@ fn export_write_room(
         content.push_str("\n\n---\n\n");
     }
 
-    std::fs::write(&file_path, &content)?;
+    safe_write(&file_path, content.as_bytes())?;
     // Pair assertion: file must exist after write.
     assert!(file_path.exists(), "export file must exist after write");
     Ok(())
@@ -217,7 +290,7 @@ fn export_write_index(
     }
 
     let index_path = output_dir.join("index.md");
-    std::fs::write(&index_path, &content)?;
+    safe_write(&index_path, content.as_bytes())?;
     // Pair assertion: index.md must exist after write.
     assert!(index_path.exists(), "index.md must exist after write");
     Ok(())
@@ -381,6 +454,80 @@ mod tests {
         assert!(
             index_content.contains("alpha"),
             "index.md must reference the wing name"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn export_palace_rejects_symlink_output_dir() {
+        // A pre-placed symlink at output_dir must be rejected before any data is written.
+        // Defense-in-depth against an attacker placing a link that redirects exports.
+        let (_db, connection) = crate::test_helpers::test_db().await;
+
+        crate::palace::drawer::add_drawer(
+            &connection,
+            &crate::palace::drawer::DrawerParams {
+                id: "sym-001",
+                wing: "alpha",
+                room: "general",
+                content: "content under a symlink target",
+                source_file: "x.rs",
+                chunk_index: 0,
+                added_by: "test",
+                ingest_mode: "projects",
+                source_mtime: None,
+            },
+        )
+        .await
+        .expect("add_drawer must succeed for symlink rejection test");
+
+        let temp_dir = tempfile::tempdir().expect("create temp parent dir");
+        let real_target = temp_dir.path().join("real_target");
+        std::fs::create_dir(&real_target).expect("create real target dir");
+        let link_path = temp_dir.path().join("link_output");
+        std::os::unix::fs::symlink(&real_target, &link_path).expect("create symlink");
+
+        let result = export_palace(&connection, &link_path, None, false).await;
+        assert!(
+            result.is_err(),
+            "export_palace must refuse a symlinked output_dir"
+        );
+        let message = result.err().expect("error required").to_string();
+        assert!(
+            message.contains("symbolic link"),
+            "error must mention symbolic link; got: {message}"
+        );
+        // Real target must remain untouched — no rooms written via the link.
+        assert!(
+            std::fs::read_dir(&real_target)
+                .expect("read real target")
+                .next()
+                .is_none(),
+            "real symlink target must not receive any exported files"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn safe_open_for_write_rejects_symlink_file() {
+        // safe_open_for_write_truncate must refuse to write through a symlink at the
+        // target path. O_NOFOLLOW closes the TOCTOU window in the open syscall itself.
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let real_file = temp_dir.path().join("real_file.md");
+        std::fs::write(&real_file, b"original content").expect("seed real file");
+        let link_file = temp_dir.path().join("link_file.md");
+        std::os::unix::fs::symlink(&real_file, &link_file).expect("create file symlink");
+
+        let result = safe_open_for_write_truncate(&link_file);
+        assert!(
+            result.is_err(),
+            "open must refuse to follow a symlinked file"
+        );
+        // Pair assertion: original content must be intact.
+        let kept = std::fs::read(&real_file).expect("read real file after rejected open");
+        assert_eq!(
+            kept, b"original content",
+            "symlink target must remain unmodified"
         );
     }
 

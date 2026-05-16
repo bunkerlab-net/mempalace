@@ -14,6 +14,7 @@ pub mod search;
 pub mod split;
 pub mod status;
 pub mod sweep;
+pub mod sync;
 pub mod wakeup;
 
 use std::path::PathBuf;
@@ -292,6 +293,28 @@ pub enum Command {
         /// Harness name: claude-code or codex
         #[arg(long, default_value = "claude-code")]
         harness: String,
+    },
+
+    /// Prune drawers whose source files are gitignored, deleted, or moved
+    ///
+    /// Reuses the same gitignore rules that block ingest, so cleanup and ingest
+    /// stay in sync. By default runs in dry-run mode; pass `--apply` to commit
+    /// deletions.
+    Sync {
+        /// Project directories to scope the scan to. Drawers whose `source_file`
+        /// lives outside every supplied root are classified as out-of-scope
+        /// and left alone.
+        #[arg(long = "dir", short = 'd')]
+        dirs: Vec<PathBuf>,
+
+        /// Restrict the scan to a single wing
+        #[arg(long)]
+        wing: Option<String>,
+
+        /// Commit deletions. Without this flag, sync runs in dry-run mode
+        /// and only reports what would be removed.
+        #[arg(long)]
+        apply: bool,
     },
 
     /// Ingest on-disk markdown diary files (`YYYY-MM-DD*.md`) into the palace

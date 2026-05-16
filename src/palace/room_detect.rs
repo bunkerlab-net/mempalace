@@ -203,6 +203,40 @@ fn general_room() -> RoomConfig {
     }
 }
 
+/// Split `value` into lowercased tokens bounded by `-`, `_`, `.` or `/`.
+///
+/// Token boundaries prevent the "views" / "interviews" substring collision
+/// that a raw `contains` check produces while still matching real tokens
+/// (e.g. "frontend" inside "frontend-app"). Used by [`name_matches`].
+fn tokens(value: &str) -> Vec<String> {
+    assert!(
+        value == value.to_lowercase(),
+        "tokens: input must be lowercase"
+    );
+    value
+        .split(['-', '_', '.', '/'])
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Return `true` when `a` and `b` match as equal strings or as separator-bounded
+/// tokens of each other.
+///
+/// Mirrors Python's `_name_matches` in `mempalace/miner.py`. Prevents incidental
+/// substring collisions (e.g. `"views" in "interviews"`) that the previous raw
+/// `contains` check produced while preserving the intended token-level match
+/// (e.g. `"frontend"` in `"frontend-app"`).
+fn name_matches(a: &str, b: &str) -> bool {
+    let a_lower = a.to_lowercase();
+    let b_lower = b.to_lowercase();
+    if a_lower == b_lower {
+        return true;
+    }
+    tokens(&a_lower).iter().any(|token| token == &b_lower)
+        || tokens(&b_lower).iter().any(|token| token == &a_lower)
+}
+
 /// Route a file to the appropriate room based on path, filename, and content.
 pub fn detect_room(
     filepath: &Path,
@@ -222,21 +256,26 @@ pub fn detect_room(
         .to_string_lossy()
         .to_lowercase();
 
-    // Priority 1: folder path contains room name.
+    // Priority 1: folder path matches a room name OR one of its keywords. Token-boundary
+    // match avoids the "views" ⊂ "interviews" false positive that pure `contains` produces.
     let path_parts: Vec<&str> = relative.split(['/', '\\']).collect();
     for part in &path_parts[..path_parts.len().saturating_sub(1)] {
         for room in rooms {
-            let room_name_lower = room.name.to_lowercase();
-            if room_name_lower.contains(part) || part.contains(&room_name_lower) {
+            // Stream room.name + room.keywords as &str without allocating a
+            // per-iteration Vec; `name_matches` lowercases internally so we
+            // don't need to materialize lowercase strings up front.
+            let mut candidates =
+                std::iter::once(room.name.as_str()).chain(room.keywords.iter().map(String::as_str));
+            if candidates.any(|candidate| name_matches(part, candidate)) {
                 return room.name.clone();
             }
         }
     }
 
-    // Priority 2: filename matches room name.
+    // Priority 2: filename matches room name (token-boundary match, same rationale as P1).
     for room in rooms {
         let room_name_lower = room.name.to_lowercase();
-        if room_name_lower.contains(&filename) || filename.contains(&room_name_lower) {
+        if name_matches(&filename, &room_name_lower) {
             return room.name.clone();
         }
     }
@@ -309,6 +348,83 @@ mod tests {
         assert_eq!(normalize_name("Front-End"), "front_end");
         assert_eq!(normalize_name("MY-PROJECT"), "my_project");
         assert_eq!(normalize_name("already_lower"), "already_lower");
+    }
+
+    #[test]
+    fn tokens_splits_on_separators() {
+        assert_eq!(tokens("frontend-app"), vec!["frontend", "app"]);
+        assert_eq!(tokens("front_end.module"), vec!["front", "end", "module"]);
+        assert_eq!(tokens("foo/bar"), vec!["foo", "bar"]);
+        assert_eq!(tokens("plain"), vec!["plain"]);
+        assert!(tokens("").is_empty());
+        // Consecutive separators must collapse and not yield empty tokens.
+        assert_eq!(tokens("foo--bar"), vec!["foo", "bar"]);
+    }
+
+    #[test]
+    fn name_matches_equal_strings() {
+        assert!(name_matches("frontend", "frontend"));
+        assert!(name_matches("Frontend", "FRONTEND"));
+    }
+
+    #[test]
+    fn name_matches_token_boundary_match() {
+        // "frontend" appears as a token inside "frontend-app".
+        assert!(name_matches("frontend-app", "frontend"));
+        assert!(name_matches("frontend", "frontend-app"));
+    }
+
+    #[test]
+    fn name_matches_rejects_substring_collisions() {
+        // The historical bug: "views" matched "interviews" via raw `contains`.
+        assert!(
+            !name_matches("interviews", "views"),
+            "substring collision must not match"
+        );
+        assert!(
+            !name_matches("views", "interviews"),
+            "substring collision must not match either direction"
+        );
+    }
+
+    #[test]
+    fn detect_room_priority1_skips_substring_collision() {
+        // Regression test for the room_detect substring collision fix.
+        // A folder named "interviews" must not route to the "frontend" room
+        // just because its keywords include "views".
+        let rooms = vec![
+            RoomConfig {
+                name: "frontend".to_string(),
+                description: String::new(),
+                keywords: vec!["views".to_string()],
+            },
+            RoomConfig {
+                name: "interviews".to_string(),
+                description: String::new(),
+                keywords: vec!["interviews".to_string()],
+            },
+        ];
+        let project = PathBuf::from("/project");
+        let filepath = PathBuf::from("/project/interviews/transcript.txt");
+        assert_eq!(
+            detect_room(&filepath, "", &rooms, &project),
+            "interviews",
+            "interviews/ must not collide with views keyword"
+        );
+    }
+
+    #[test]
+    fn detect_room_priority1_matches_keyword_in_folder() {
+        // Priority 1 now checks room.keywords, not just room.name. A folder
+        // matching a keyword must route to the keyword's owning room.
+        let rooms = vec![RoomConfig {
+            name: "backend".to_string(),
+            description: String::new(),
+            keywords: vec!["api".to_string(), "server".to_string()],
+        }];
+        let project = PathBuf::from("/project");
+        let filepath = PathBuf::from("/project/api/handler.rs");
+        assert_eq!(detect_room(&filepath, "", &rooms, &project), "backend");
     }
 
     #[test]

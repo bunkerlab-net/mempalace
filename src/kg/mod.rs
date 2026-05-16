@@ -4,6 +4,7 @@ pub mod query;
 
 use turso::Connection;
 
+use crate::config::sanitize_iso_temporal;
 use crate::db;
 use crate::error::Result;
 
@@ -19,6 +20,65 @@ pub fn entity_id(name: &str) -> String {
     // Callers that need a non-empty ID must validate before calling.
 
     result
+}
+
+/// Return `true` when `value` is a date-only ISO temporal (`YYYY-MM-DD`).
+fn is_date_only_temporal(value: &str) -> bool {
+    value.len() == 10 && value.as_bytes()[4] == b'-' && value.as_bytes()[7] == b'-'
+}
+
+/// Return the comparable instant for a `valid_from`-style temporal value.
+///
+/// Date-only inputs are widened to the start of the day so a date-only `valid_from`
+/// compares correctly against a canonical UTC datetime `valid_to` of the same day.
+/// Mirrors `_temporal_start_key` in `mempalace/knowledge_graph.py`.
+pub(crate) fn temporal_start_key(value: &str) -> String {
+    if is_date_only_temporal(value) {
+        format!("{value}T00:00:00Z")
+    } else {
+        value.to_string()
+    }
+}
+
+/// Return the comparable instant for a `valid_to`-style temporal value.
+///
+/// Date-only inputs are widened to end-of-day so legacy date-only `valid_to`
+/// values remain compatible with canonical UTC datetime queries on the same day.
+/// Mirrors `_temporal_end_key` in `mempalace/knowledge_graph.py`.
+pub(crate) fn temporal_end_key(value: &str) -> String {
+    if is_date_only_temporal(value) {
+        format!("{value}T23:59:59Z")
+    } else {
+        value.to_string()
+    }
+}
+
+/// `SQLite` expression for comparing a `valid_from`-style column with mixed temporal shapes.
+///
+/// Widens date-only stored values (`length = 10`, `-` at positions 4 and 7) to
+/// start-of-day (`T00:00:00Z`) so they compare correctly against canonical UTC
+/// datetime query parameters. Mirrors `_sql_temporal_start_expr` in Python.
+pub(crate) fn sql_temporal_start_expr(column: &str) -> String {
+    format!(
+        "CASE WHEN length({column}) = 10 \
+         AND substr({column}, 5, 1) = '-' \
+         AND substr({column}, 8, 1) = '-' \
+         THEN {column} || 'T00:00:00Z' ELSE {column} END"
+    )
+}
+
+/// `SQLite` expression for comparing a `valid_to`-style column with mixed temporal shapes.
+///
+/// Widens date-only stored values to end-of-day (`T23:59:59Z`) so legacy date-only
+/// `valid_to` values remain inclusive when queried with a same-day datetime.
+/// Mirrors `_sql_temporal_end_expr` in Python.
+pub(crate) fn sql_temporal_end_expr(column: &str) -> String {
+    format!(
+        "CASE WHEN length({column}) = 10 \
+         AND substr({column}, 5, 1) = '-' \
+         AND substr({column}, 8, 1) = '-' \
+         THEN {column} || 'T23:59:59Z' ELSE {column} END"
+    )
 }
 
 #[cfg(test)]
@@ -170,8 +230,104 @@ mod tests {
         assert!(
             result
                 .err()
-                .is_some_and(|error| error.to_string().contains("must not be after")),
+                .is_some_and(|error| error.to_string().contains("inverted interval")),
             "error message must explain the temporal ordering constraint"
+        );
+    }
+
+    #[test]
+    fn temporal_start_key_widens_date_only_to_start_of_day() {
+        assert_eq!(temporal_start_key("2026-05-15"), "2026-05-15T00:00:00Z");
+    }
+
+    #[test]
+    fn temporal_start_key_passes_through_datetime() {
+        assert_eq!(
+            temporal_start_key("2026-05-15T12:30:45Z"),
+            "2026-05-15T12:30:45Z"
+        );
+    }
+
+    #[test]
+    fn temporal_end_key_widens_date_only_to_end_of_day() {
+        assert_eq!(temporal_end_key("2026-05-15"), "2026-05-15T23:59:59Z");
+    }
+
+    #[test]
+    fn temporal_end_key_passes_through_datetime() {
+        assert_eq!(
+            temporal_end_key("2026-05-15T12:30:45Z"),
+            "2026-05-15T12:30:45Z"
+        );
+    }
+
+    #[test]
+    fn sql_temporal_start_expr_emits_case_when_block() {
+        let sql = sql_temporal_start_expr("t.valid_from");
+        assert!(sql.contains("CASE WHEN length(t.valid_from) = 10"));
+        assert!(sql.contains("|| 'T00:00:00Z'"));
+    }
+
+    #[test]
+    fn sql_temporal_end_expr_emits_case_when_block() {
+        let sql = sql_temporal_end_expr("t.valid_to");
+        assert!(sql.contains("CASE WHEN length(t.valid_to) = 10"));
+        assert!(sql.contains("|| 'T23:59:59Z'"));
+    }
+
+    #[test]
+    fn is_date_only_temporal_recognizes_iso_date() {
+        assert!(is_date_only_temporal("2026-05-15"));
+    }
+
+    #[test]
+    fn is_date_only_temporal_rejects_datetime() {
+        assert!(!is_date_only_temporal("2026-05-15T12:30:45Z"));
+        assert!(!is_date_only_temporal("2026-05"));
+    }
+
+    #[test]
+    fn add_triple_validate_params_accepts_canonical_datetime() {
+        // Canonical UTC datetime (Z-suffixed) must pass validation.
+        let params = TripleParams {
+            subject: "Alice",
+            predicate: "joined",
+            object: "Acme",
+            valid_from: Some("2026-05-15T12:30:45Z"),
+            valid_to: None,
+            confidence: 0.9,
+            source_closet: None,
+            source_file: None,
+            source_drawer_id: None,
+            adapter_name: None,
+        };
+        let result = add_triple_validate_params(&params);
+        assert!(
+            result.is_ok(),
+            "canonical UTC datetime must validate successfully"
+        );
+    }
+
+    #[test]
+    fn add_triple_validate_params_normalizes_zero_offset_to_z() {
+        // +00:00 → Z, so the stored row uses the canonical shape.
+        let params = TripleParams {
+            subject: "Alice",
+            predicate: "joined",
+            object: "Acme",
+            valid_from: Some("2026-05-15T12:30:45+00:00"),
+            valid_to: None,
+            confidence: 0.9,
+            source_closet: None,
+            source_file: None,
+            source_drawer_id: None,
+            adapter_name: None,
+        };
+        let validated = add_triple_validate_params(&params).expect("must validate");
+        assert_eq!(
+            validated.valid_from.as_deref(),
+            Some("2026-05-15T12:30:45Z"),
+            "+00:00 must normalize to Z"
         );
     }
 
@@ -484,41 +640,51 @@ pub struct TripleParams<'a> {
     pub adapter_name: Option<&'a str>,
 }
 
-/// Validate confidence and ISO date fields on a `TripleParams`.
-/// Called by `add_triple` to keep that function within the 70-line limit.
-fn add_triple_validate_params(params: &TripleParams<'_>) -> Result<()> {
+/// Canonicalized temporal fields returned by [`add_triple_validate_params`].
+///
+/// Holds the sanitized `valid_from` / `valid_to` strings so the caller writes the
+/// canonical form (e.g. `+00:00` normalized to `Z`) to the database rather than
+/// the raw caller-supplied string.
+pub(crate) struct ValidatedTemporals {
+    pub valid_from: Option<String>,
+    pub valid_to: Option<String>,
+}
+
+/// Validate confidence and ISO temporal fields on a `TripleParams`.
+///
+/// Both `valid_from` and `valid_to` are validated via
+/// [`crate::config::sanitize_iso_temporal`], so date and canonical UTC datetime
+/// forms are accepted. Inverted intervals are rejected using temporal comparison
+/// keys so a date-only `valid_to` of the same day as a datetime `valid_from`
+/// resolves to the end of that day instead of midnight. Called by `add_triple`
+/// to keep that function within the 70-line limit.
+fn add_triple_validate_params(params: &TripleParams<'_>) -> Result<ValidatedTemporals> {
     if params.confidence.is_nan() || params.confidence < 0.0 || params.confidence > 1.0 {
         return Err(crate::error::Error::Other(format!(
             "confidence must be between 0.0 and 1.0, got {}",
             params.confidence
         )));
     }
-    let valid_from_date = params
-        .valid_from
-        .map(|date_str| {
-            chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d").map_err(|_| {
-                crate::error::Error::Other(format!("invalid valid_from date: {date_str}"))
-            })
-        })
-        .transpose()?;
-    let valid_to_date = params
-        .valid_to
-        .map(|date_str| {
-            chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d").map_err(|_| {
-                crate::error::Error::Other(format!("invalid valid_to date: {date_str}"))
-            })
-        })
-        .transpose()?;
-    if let (Some(from), Some(to)) = (valid_from_date, valid_to_date)
-        && from > to
+    let valid_from = sanitize_iso_temporal(params.valid_from, "valid_from")?;
+    let valid_to = sanitize_iso_temporal(params.valid_to, "valid_to")?;
+
+    // Reject inverted intervals using temporal keys: a date-only valid_to
+    // resolves to end-of-day, so `valid_to=2026-05-15` with
+    // `valid_from=2026-05-15T15:00:00Z` is NOT inverted.
+    if let (Some(from), Some(to)) = (valid_from.as_deref(), valid_to.as_deref())
+        && !from.is_empty()
+        && !to.is_empty()
+        && temporal_end_key(to) < temporal_start_key(from)
     {
         return Err(crate::error::Error::Other(format!(
-            "valid_from ({}) must not be after valid_to ({})",
-            params.valid_from.unwrap_or(""),
-            params.valid_to.unwrap_or(""),
+            "valid_to={to:?} is before valid_from={from:?}; \
+             an inverted interval would be invisible to every KG query"
         )));
     }
-    Ok(())
+    Ok(ValidatedTemporals {
+        valid_from,
+        valid_to,
+    })
 }
 
 /// Upsert subject and object entities into the graph (INSERT OR IGNORE).
@@ -590,7 +756,7 @@ pub async fn add_triple(connection: &Connection, params: &TripleParams<'_>) -> R
     );
     assert!(!params.object.is_empty(), "triple object must not be empty");
 
-    add_triple_validate_params(params)?;
+    let validated = add_triple_validate_params(params)?;
 
     let subject_id = entity_id(params.subject);
     let object_id = entity_id(params.object);
@@ -641,6 +807,7 @@ pub async fn add_triple(connection: &Connection, params: &TripleParams<'_>) -> R
         &predicate,
         &object_id,
         params,
+        &validated,
     )
     .await?;
 
@@ -656,15 +823,22 @@ async fn add_triple_insert_row(
     predicate: &str,
     object_id: &str,
     params: &TripleParams<'_>,
+    validated: &ValidatedTemporals,
 ) -> Result<()> {
     assert!(!triple_id.is_empty(), "triple_id must not be empty");
     assert!(!object_id.is_empty(), "object_id must not be empty");
 
-    let valid_from_value: turso::Value = params
+    // Persist the sanitized form (e.g. `+00:00` → `Z`) so the stored row matches
+    // the canonical shape relied on by `temporal_start_key`/`temporal_end_key`.
+    let valid_from_value: turso::Value = validated
         .valid_from
+        .as_deref()
+        .filter(|value| !value.is_empty())
         .map_or(turso::Value::Null, turso::Value::from);
-    let valid_to_value: turso::Value = params
+    let valid_to_value: turso::Value = validated
         .valid_to
+        .as_deref()
+        .filter(|value| !value.is_empty())
         .map_or(turso::Value::Null, turso::Value::from);
     let source_closet_value: turso::Value = params
         .source_closet
@@ -740,10 +914,29 @@ pub async fn invalidate(
     );
 
     // Resolve the date once so the returned value always matches what was written.
-    let persisted_ended = ended.map_or_else(
+    // Falling back to the raw caller-supplied string here would let a
+    // whitespace-only `ended` argument skip sanitization and reach the UPDATE.
+    // Default to today's ISO date when sanitization yields an empty value,
+    // matching the Python port's `ended or date.today().isoformat()` semantics.
+    let raw_ended = ended.map_or_else(
         || chrono::Local::now().format("%Y-%m-%d").to_string(),
-        std::string::ToString::to_string,
+        str::to_string,
     );
+    let persisted_ended = sanitize_iso_temporal(Some(&raw_ended), "ended")?
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d").to_string());
+
+    // Pre-flight: reject if `ended` would invert any matching active triple's
+    // valid_from. Without this check, an UPDATE with `ended < valid_from`
+    // creates a row that's invisible to every temporal KG query.
+    invalidate_check_inverted_intervals(
+        connection,
+        &subject_id,
+        &predicate_normalized,
+        &object_id,
+        &persisted_ended,
+    )
+    .await?;
 
     connection.execute(
         "UPDATE triples SET valid_to=?1 WHERE subject=?2 AND predicate=?3 AND object=?4 AND valid_to IS NULL",
@@ -752,4 +945,50 @@ pub async fn invalidate(
     .await?;
 
     Ok(persisted_ended)
+}
+
+/// Reject `invalidate(...)` calls whose `ended` would create an inverted interval.
+///
+/// Scans the active triples that the UPDATE would touch and compares each
+/// `valid_from` against `ended` using temporal keys, so a date-only `ended` of the
+/// same day as a datetime `valid_from` is treated as end-of-day rather than midnight.
+async fn invalidate_check_inverted_intervals(
+    connection: &Connection,
+    subject_id: &str,
+    predicate: &str,
+    object_id: &str,
+    ended: &str,
+) -> Result<()> {
+    assert!(!subject_id.is_empty());
+    assert!(!predicate.is_empty());
+    assert!(!object_id.is_empty());
+    assert!(!ended.is_empty());
+
+    let rows = db::query_all(
+        connection,
+        "SELECT valid_from FROM triples \
+         WHERE subject=?1 AND predicate=?2 AND object=?3 AND valid_to IS NULL",
+        turso::params![subject_id, predicate, object_id],
+    )
+    .await?;
+
+    let ended_key = temporal_end_key(ended);
+    for row in &rows {
+        let Ok(value) = row.get_value(0) else {
+            continue;
+        };
+        let Some(valid_from) = value.as_text() else {
+            continue;
+        };
+        if valid_from.is_empty() {
+            continue;
+        }
+        if ended_key < temporal_start_key(valid_from) {
+            return Err(crate::error::Error::Other(format!(
+                "valid_to={ended:?} is before valid_from={valid_from:?}; \
+                 an inverted interval would be invisible to every KG query"
+            )));
+        }
+    }
+    Ok(())
 }

@@ -1247,11 +1247,12 @@ dependencies = [
 
 [[package]]
 name = "mempalace"
-version = "0.1.0"
+version = "3.3.5"
 dependencies = [
  "chrono",
  "clap",
  "ignore",
+ "libc",
  "regex",
  "serde",
  "serde_json",

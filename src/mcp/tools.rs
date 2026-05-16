@@ -756,12 +756,19 @@ async fn tool_get_drawer(connection: &Connection, args: &Value) -> Value {
             let room: String = row.get(3).unwrap_or_default();
             let source_file: String = row.get(4).unwrap_or_default();
             let filed_at: String = row.get(5).unwrap_or_default();
+            // Return the basename only — the absolute path that the miner stored
+            // may leak the user's filesystem layout to the LLM. The full path is
+            // still available via `tool_search` results when the LLM asks for it.
+            let source_basename = std::path::Path::new(&source_file)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
             json!({
                 "drawer_id": drawer_id,
                 "content": content,
                 "wing": wing,
                 "room": room,
-                "source_file": source_file,
+                "source_file": source_basename,
                 "filed_at": filed_at,
             })
         }
@@ -781,6 +788,11 @@ async fn tool_list_drawers(connection: &Connection, args: &Value) -> Value {
     let room = match sanitize_opt_name(str_arg(args, "room"), "room") {
         Ok(value) => value,
         Err(error) => return error,
+    };
+
+    let total = match tool_list_drawers_count(connection, wing.as_ref(), room.as_ref()).await {
+        Ok(value) => value,
+        Err(error) => return json!({"error": error.to_string()}),
     };
 
     match tool_list_drawers_query(connection, wing.as_ref(), room.as_ref(), limit, offset).await {
@@ -806,15 +818,74 @@ async fn tool_list_drawers(connection: &Connection, args: &Value) -> Value {
                 })
                 .collect();
             let count = drawers.len();
+            // `total` is the full match count (ignoring offset/limit); `count` is the
+            // size of the current page. Without `total`, callers can't tell whether
+            // another page exists without speculatively requesting the next offset.
             json!({
                 "drawers": drawers,
                 "count": count,
+                "total": total,
                 "offset": offset,
                 "limit": limit,
             })
         }
         Err(error) => json!({"error": error.to_string()}),
     }
+}
+
+/// Total drawer count for the same `(wing, room)` filter as `tool_list_drawers_query`.
+///
+/// Excludes diary entries to match the listing query exactly — without that filter
+/// the `total` count would overshoot the highest reachable offset and confuse paging.
+async fn tool_list_drawers_count(
+    connection: &Connection,
+    wing: Option<&String>,
+    room: Option<&String>,
+) -> crate::error::Result<i64> {
+    let rows = match (wing, room) {
+        (Some(wing_value), Some(room_value)) => {
+            query_all(
+                connection,
+                "SELECT COUNT(*) FROM drawers WHERE wing = ?1 AND room = ?2 AND (ingest_mode IS NULL OR ingest_mode != 'diary')",
+                (wing_value.as_str(), room_value.as_str()),
+            )
+            .await?
+        }
+        (Some(wing_value), None) => {
+            query_all(
+                connection,
+                "SELECT COUNT(*) FROM drawers WHERE wing = ?1 AND (ingest_mode IS NULL OR ingest_mode != 'diary')",
+                [wing_value.as_str()],
+            )
+            .await?
+        }
+        (None, Some(room_value)) => {
+            query_all(
+                connection,
+                "SELECT COUNT(*) FROM drawers WHERE room = ?1 AND (ingest_mode IS NULL OR ingest_mode != 'diary')",
+                [room_value.as_str()],
+            )
+            .await?
+        }
+        (None, None) => {
+            query_all(
+                connection,
+                "SELECT COUNT(*) FROM drawers WHERE (ingest_mode IS NULL OR ingest_mode != 'diary')",
+                (),
+            )
+            .await?
+        }
+    };
+    let total = rows
+        .first()
+        .and_then(|row| row.get_value(0).ok())
+        .and_then(|cell| cell.as_integer().copied())
+        .unwrap_or(0);
+    assert!(
+        total >= 0,
+        "tool_list_drawers_count: total must be non-negative"
+    );
+    Ok(total)
 }
 
 /// Run the parameterized drawer list query for the given wing/room filter combination.
@@ -1118,22 +1189,17 @@ async fn tool_kg_add(connection: &Connection, args: &Value) -> Value {
     let subject = str_arg(args, "subject");
     let predicate = str_arg(args, "predicate");
     let object = str_arg(args, "object");
-    let valid_from = {
-        let valid_from_raw = str_arg(args, "valid_from");
-        if valid_from_raw.is_empty() {
-            None
-        } else {
-            Some(valid_from_raw.to_string())
-        }
-    };
-    let source_closet = {
-        let source_closet_raw = str_arg(args, "source_closet");
-        if source_closet_raw.is_empty() {
-            None
-        } else {
-            Some(source_closet_raw.to_string())
-        }
-    };
+    let valid_from = optional_str_arg(args, "valid_from");
+    // Backfill of already-ended historical facts: caller can supply both
+    // valid_from and valid_to in a single kg_add call rather than a separate
+    // kg_invalidate. Sanitization happens inside `kg::add_triple`.
+    let valid_to = optional_str_arg(args, "valid_to");
+    let source_closet = optional_str_arg(args, "source_closet");
+    // RFC 002 §5.5 provenance: adapters / bulk importers identify the source
+    // drawer and adapter so triples can be traced back to their origin.
+    let source_file = optional_str_arg(args, "source_file");
+    let source_drawer_id = optional_str_arg(args, "source_drawer_id");
+    let adapter_name = optional_str_arg(args, "adapter_name");
 
     let subject = match sanitize_kg_value(subject, "subject") {
         Ok(value) => value,
@@ -1155,7 +1221,11 @@ async fn tool_kg_add(connection: &Connection, args: &Value) -> Value {
             "predicate": predicate,
             "object": object,
             "valid_from": valid_from,
+            "valid_to": valid_to,
             "source_closet": source_closet,
+            "source_file": source_file,
+            "source_drawer_id": source_drawer_id,
+            "adapter_name": adapter_name,
         }),
     )
     .await;
@@ -1167,12 +1237,12 @@ async fn tool_kg_add(connection: &Connection, args: &Value) -> Value {
             predicate: &predicate,
             object: &object,
             valid_from: valid_from.as_deref(),
-            valid_to: None,
+            valid_to: valid_to.as_deref(),
             confidence: 1.0,
             source_closet: source_closet.as_deref(),
-            source_file: None,
-            source_drawer_id: None,
-            adapter_name: None,
+            source_file: source_file.as_deref(),
+            source_drawer_id: source_drawer_id.as_deref(),
+            adapter_name: adapter_name.as_deref(),
         },
     )
     .await
@@ -1183,6 +1253,22 @@ async fn tool_kg_add(connection: &Connection, args: &Value) -> Value {
             "fact": format!("{subject} → {predicate} → {object}"),
         }),
         Err(error) => json!({"success": false, "error": error.to_string()}),
+    }
+}
+
+/// Read an optional string argument from the MCP tool args, treating empty or
+/// whitespace-only values as absent.
+///
+/// Mirrors the Python pattern `value if value else None` and lines up with
+/// `sanitize_opt_name`'s whitespace-stripping behavior so callers can supply
+/// `""`, `"   "`, or omit the key entirely and get the same `None` result.
+/// Returns the trimmed string when non-empty.
+fn optional_str_arg(args: &Value, key: &str) -> Option<String> {
+    let trimmed = str_arg(args, key).trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
 }
 
@@ -1446,8 +1532,12 @@ async fn tool_diary_write(connection: &Connection, args: &Value) -> Value {
         }
     };
 
+    // Lower-case immediately after sanitization so diary reads and writes are
+    // case-insensitive: "Claude", "claude", and "CLAUDE" resolve to the same
+    // agent. Without this, a mixed-case write silently sets `added_by` to a
+    // value that the lower-case-anywhere read filter never matches.
     let agent_name = match sanitize_name(agent_name, "agent_name") {
-        Ok(value) => value,
+        Ok(value) => value.to_lowercase(),
         Err(error) => return error,
     };
     let entry = match sanitize_content(entry) {
@@ -1460,7 +1550,7 @@ async fn tool_diary_write(connection: &Connection, args: &Value) -> Value {
     // fall through to the derived wing rather than returning an error.
     let wing = match sanitize_opt_name(str_arg(args, "wing"), "wing") {
         Ok(Some(w)) => w,
-        Ok(None) => format!("wing_{}", agent_name.to_lowercase().replace(' ', "_")),
+        Ok(None) => format!("wing_{}", agent_name.replace(' ', "_")),
         Err(error) => return error,
     };
     let now = Utc::now();
@@ -1505,12 +1595,24 @@ async fn tool_diary_write(connection: &Connection, args: &Value) -> Value {
 /// requesting agent (`added_by`), so agents cannot read each other's entries
 /// even when they share a wing name. When `wing` is absent the query returns
 /// all diary entries written by the agent across all wings.
+///
+/// **Migration note (pre-#1243 data):** `tool_diary_write` previously stored
+/// `added_by` verbatim from `sanitize_name`, which preserved case. Diary rows
+/// written before the case-insensitive fix won't match the lower-cased filter
+/// below. To migrate legacy data, run once against the palace:
+///
+/// ```sql
+/// UPDATE drawers SET added_by = LOWER(added_by) WHERE room = 'diary';
+/// ```
 async fn tool_diary_read(connection: &Connection, args: &Value) -> Value {
     let agent_name = str_arg(args, "agent_name");
     let last_n = int_arg(args, "last_n", 10).clamp(1, 100);
 
+    // Lower-case for case-insensitive reads — must match the write-side
+    // normalization in `tool_diary_write`. Entries written under pre-fix
+    // mixed-case agent names will not match this filter.
     let agent_name = match sanitize_name(agent_name, "agent_name") {
-        Ok(value) => value,
+        Ok(value) => value.to_lowercase(),
         Err(error) => return error,
     };
 
@@ -2958,7 +3060,8 @@ mod tests {
             .await;
             assert_eq!(result["success"], true);
             assert!(result["entry_id"].is_string(), "must return entry_id");
-            assert_eq!(result["agent"], "TestAgent");
+            // Agent name normalizes to lowercase so diary reads are case-insensitive (#1243).
+            assert_eq!(result["agent"], "testagent");
             assert_eq!(result["topic"], "general");
         })
         .await;
@@ -3000,7 +3103,8 @@ mod tests {
             let result = tool_diary_read(&connection, &json!({"agent_name": "TestAgent"})).await;
             assert!(result.get("error").is_none(), "must not error");
             assert_eq!(result["total"], 0);
-            assert_eq!(result["agent"], "TestAgent");
+            // Agent name normalizes to lowercase so diary reads are case-insensitive (#1243).
+            assert_eq!(result["agent"], "testagent");
         })
         .await;
     }

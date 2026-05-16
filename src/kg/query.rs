@@ -3,7 +3,8 @@
 use serde::Serialize;
 use turso::Connection;
 
-use super::entity_id;
+use super::{entity_id, sql_temporal_end_expr, sql_temporal_start_expr, temporal_start_key};
+use crate::config::sanitize_iso_temporal;
 use crate::db;
 use crate::error::Result;
 
@@ -83,6 +84,11 @@ fn query_entity_row_to_fact(
 }
 
 /// Build the SQL and params for one direction of a `query_entity` call.
+///
+/// When `as_of` is provided, the `valid_from`/`valid_to` comparison uses the
+/// temporal-aware SQL expressions so legacy date-only stored values stay
+/// compatible with canonical-UTC datetime query parameters. Caller is responsible
+/// for sanitizing `as_of` via [`crate::config::sanitize_iso_temporal`].
 fn query_entity_sql(
     eid: &str,
     as_of: Option<&str>,
@@ -95,14 +101,19 @@ fn query_entity_sql(
          WHERE t.{filter_col} = ?1"
     );
     if let Some(date) = as_of {
+        // Compare via temporal keys so date-only stored values widen to whole-day
+        // ranges (start-of-day for valid_from, end-of-day for valid_to).
+        let valid_from_expr = sql_temporal_start_expr("t.valid_from");
+        let valid_to_expr = sql_temporal_end_expr("t.valid_to");
         let sql = format!(
-            "{base} AND (t.valid_from IS NULL OR t.valid_from <= ?2) \
-             AND (t.valid_to IS NULL OR t.valid_to >= ?3)"
+            "{base} AND (t.valid_from IS NULL OR {valid_from_expr} <= ?2) \
+             AND (t.valid_to IS NULL OR {valid_to_expr} >= ?3)"
         );
+        let key = temporal_start_key(date);
         let params = vec![
             turso::Value::from(eid),
-            turso::Value::from(date),
-            turso::Value::from(date),
+            turso::Value::from(key.clone()),
+            turso::Value::from(key),
         ];
         (sql, params)
     } else {
@@ -130,11 +141,16 @@ pub async fn query_entity(
         ));
     }
 
+    // Sanitize as_of through the strict ISO temporal validator so callers can't
+    // smuggle in malformed strings that would break lexicographic comparison.
+    let sanitized_as_of = sanitize_iso_temporal(as_of, "as_of")?;
+    let as_of_filter = sanitized_as_of.as_deref().filter(|value| !value.is_empty());
+
     let entity_identifier = entity_id(name);
     let mut results = Vec::new();
 
     if direction == "outgoing" || direction == "both" {
-        let (sql, params) = query_entity_sql(&entity_identifier, as_of, "object", "subject");
+        let (sql, params) = query_entity_sql(&entity_identifier, as_of_filter, "object", "subject");
         let rows = db::query_all(connection, &sql, turso::params_from_iter(params)).await?;
         for row in &rows {
             let obj_name = row
@@ -147,7 +163,7 @@ pub async fn query_entity(
     }
 
     if direction == "incoming" || direction == "both" {
-        let (sql, params) = query_entity_sql(&entity_identifier, as_of, "subject", "object");
+        let (sql, params) = query_entity_sql(&entity_identifier, as_of_filter, "subject", "object");
         let rows = db::query_all(connection, &sql, turso::params_from_iter(params)).await?;
         for row in &rows {
             let sub_name = row
