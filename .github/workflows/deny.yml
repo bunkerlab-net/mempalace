@@ -1,9 +1,7 @@
-name: Audit
+name: Deny
 
 on:
   workflow_call:
-  schedule:
-    - cron: "0 0 * * *" # daily at midnight
 
 permissions: {}
 
@@ -29,4 +27,4 @@ jobs:
           experimental: true
           install: true
 
-      - run: mise x cargo:cargo-audit -- cargo audit --deny warnings
+      - run: mise x cargo:cargo-deny -- cargo deny check bans sources

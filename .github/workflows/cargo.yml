@@ -16,7 +16,12 @@ jobs:
     uses: ./.github/workflows/audit.yml
     permissions:
       contents: read
-      issues: write
+
+  deny:
+    name: Deny
+    uses: ./.github/workflows/deny.yml
+    permissions:
+      contents: read
 
   lint:
     name: Lint
