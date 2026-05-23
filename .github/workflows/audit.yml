@@ -13,20 +13,11 @@ jobs:
 
     permissions:
       contents: read
+      issues: write
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
 
-      - name: Setup Mise
-        uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4.0.1
-        env:
-          MISE_JOBS: 4
-        with:
-          cache_key_prefix: mise-audit
-          cache: true
-          experimental: true
-          install: true
-
-      - run: mise x cargo:cargo-audit -- cargo audit --deny warnings
+      - uses: actions-rust-lang/audit@72c09e02f132669d52284a3323acdb503cfc1a24 # v1.2.7

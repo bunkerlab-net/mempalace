@@ -16,6 +16,7 @@ jobs:
     uses: ./.github/workflows/audit.yml
     permissions:
       contents: read
+      issues: write
 
   deny:
     name: Deny
