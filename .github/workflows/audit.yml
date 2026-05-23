@@ -24,7 +24,7 @@ jobs:
         env:
           MISE_JOBS: 4
         with:
-          cache_key_prefix: mise
+          cache_key_prefix: mise-audit
           cache: true
           experimental: true
           install: true
