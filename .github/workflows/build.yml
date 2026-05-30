@@ -47,7 +47,7 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-build-${{ matrix.arch }}-${{ steps.rustc.outputs.fingerprint }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-build-${{ matrix.arch }}-
+            ${{ runner.os }}-cargo-build-${{ matrix.arch }}-${{ steps.rustc.outputs.fingerprint }}
 
       - run: cargo build --release
 
