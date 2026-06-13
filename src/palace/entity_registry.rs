@@ -1098,9 +1098,7 @@ fn lookup_disambiguate(
         .iter()
         .filter(|pat| {
             let pattern = pat.replace("{name}", &escaped);
-            Regex::new(&pattern)
-                .ok()
-                .is_some_and(|re| re.is_match(&ctx_lower))
+            Regex::new(&pattern).is_ok_and(|re| re.is_match(&ctx_lower))
         })
         .count();
 
@@ -1108,9 +1106,7 @@ fn lookup_disambiguate(
         .iter()
         .filter(|pat| {
             let pattern = pat.replace("{name}", &escaped);
-            Regex::new(&pattern)
-                .ok()
-                .is_some_and(|re| re.is_match(&ctx_lower))
+            Regex::new(&pattern).is_ok_and(|re| re.is_match(&ctx_lower))
         })
         .count();
 
