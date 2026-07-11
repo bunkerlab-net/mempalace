@@ -5,12 +5,12 @@ minimum_release_age = "7d"
 npm.package_manager = "bun"
 
 [tools]
-"npm:markdownlint-cli" = "0.48"
+"npm:markdownlint-cli" = "0.49"
 
 actionlint = "1.7"
 bun = "1"
 gh = "2"
-hk = "1.46.0"
+hk = "1.49.0"
 jq = "latest"
 node = "24"
 pkl = "0.31"
