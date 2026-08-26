@@ -959,10 +959,10 @@ async fn invalidate_check_inverted_intervals(
     object_id: &str,
     ended: &str,
 ) -> Result<()> {
-    assert!(!subject_id.is_empty());
-    assert!(!predicate.is_empty());
-    assert!(!object_id.is_empty());
-    assert!(!ended.is_empty());
+    assert_ne!(subject_id, "");
+    assert_ne!(predicate, "");
+    assert_ne!(object_id, "");
+    assert_ne!(ended, "");
 
     let rows = db::query_all(
         connection,

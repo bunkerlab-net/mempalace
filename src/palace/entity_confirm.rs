@@ -74,8 +74,8 @@ pub fn confirm_entities(detected: &DetectedDict, yes: bool) -> ConfirmedEntities
 /// Called by [`confirm_entities`] when `yes=true`.
 fn confirm_entities_auto(detected: &DetectedDict, confirmed: &mut ConfirmedEntities) {
     // Preconditions: confirmed lists must start empty (fresh ConfirmedEntities).
-    debug_assert!(confirmed.people.is_empty());
-    debug_assert!(confirmed.projects.is_empty());
+    debug_assert_eq!(confirmed.people, [] as [String; 0]);
+    debug_assert_eq!(confirmed.projects, [] as [String; 0]);
 
     for entity in &detected.people {
         if entity.confidence >= CONFIDENCE_THRESHOLD && !entity.name.is_empty() {
@@ -96,8 +96,8 @@ fn confirm_entities_auto(detected: &DetectedDict, confirmed: &mut ConfirmedEntit
 /// name. Entities below the threshold are skipped without prompting.
 fn confirm_entities_interactive(detected: &DetectedDict, confirmed: &mut ConfirmedEntities) {
     // Preconditions: confirmed lists must start empty (fresh ConfirmedEntities).
-    debug_assert!(confirmed.people.is_empty());
-    debug_assert!(confirmed.projects.is_empty());
+    debug_assert_eq!(confirmed.people, [] as [String; 0]);
+    debug_assert_eq!(confirmed.projects, [] as [String; 0]);
 
     // Only print the header when at least one entity passes the threshold and
     // has a non-empty name. An all-below-threshold list would otherwise print
@@ -140,8 +140,8 @@ fn confirm_entities_interactive(detected: &DetectedDict, confirmed: &mut Confirm
 /// the user declines (`n` or `no`). Any other input is treated as acceptance.
 /// Called by [`confirm_entities_interactive`].
 fn confirm_entities_prompt_name(name: &str, entity_type: &str) -> bool {
-    assert!(!name.is_empty());
-    assert!(!entity_type.is_empty());
+    assert_ne!(name, "");
+    assert_ne!(entity_type, "");
 
     print!("    {entity_type} \"{name}\" — Accept? [Y/n] ");
     // stdout must be flushed before reading stdin or the prompt may not appear.
@@ -232,8 +232,8 @@ mod tests {
         // Empty DetectedDict must yield empty ConfirmedEntities with yes=true.
         let detected = make_dict(vec![], vec![]);
         let confirmed = confirm_entities(&detected, true);
-        assert!(confirmed.people.is_empty());
-        assert!(confirmed.projects.is_empty());
+        assert_eq!(confirmed.people, [] as [String; 0]);
+        assert_eq!(confirmed.projects, [] as [String; 0]);
     }
 
     #[test]
@@ -378,8 +378,8 @@ mod tests {
                 .contains(&"distributed_systems".to_string())
         );
         // Pair assertion: topics are not duplicated into people/projects.
-        assert!(confirmed.people.is_empty());
-        assert!(confirmed.projects.is_empty());
+        assert_eq!(confirmed.people, [] as [String; 0]);
+        assert_eq!(confirmed.projects, [] as [String; 0]);
     }
 
     #[test]

@@ -209,7 +209,7 @@ fn decode_slug_fallback(slug: &str) -> String {
     let result = parts.last().copied().unwrap_or(slug);
 
     // Postcondition: result is non-empty (we fall back to the original slug).
-    debug_assert!(!result.is_empty());
+    debug_assert_ne!(result, "");
     result.to_string()
 }
 
@@ -311,7 +311,7 @@ mod tests {
         // A slug with only one non-empty segment returns that segment.
         let result = decode_slug_fallback("-myproject");
         assert_eq!(result, "myproject");
-        assert!(!result.is_empty());
+        assert_ne!(result, "");
     }
 
     // -- extract_cwd_from_session --

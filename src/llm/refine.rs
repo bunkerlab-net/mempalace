@@ -258,7 +258,7 @@ fn refine_entities_batch(
     provider: &dyn LlmProvider,
     system_prompt: &str,
 ) -> Option<HashMap<String, (String, String)>> {
-    assert!(!batch.is_empty());
+    assert_ne!(batch, []);
     assert!(batch.len() <= BATCH_SIZE);
     assert!(!system_prompt.is_empty(), "system_prompt must not be empty");
 
@@ -266,7 +266,7 @@ fn refine_entities_batch(
     let response = provider.classify(system_prompt, &user_prompt, true).ok()?;
 
     let expected_names: Vec<&str> = batch.iter().map(|(name, _)| *name).collect();
-    assert!(!expected_names.is_empty());
+    assert_ne!(expected_names, [] as [&str; 0]);
     parse_response(&response.text, &expected_names)
 }
 
@@ -275,7 +275,7 @@ fn refine_entities_batch(
 /// Lists each candidate with its detected type and corpus context snippets.
 /// Called by [`refine_entities_batch`].
 fn build_user_prompt(batch: &[(&str, &str)], corpus_lines: &[&str]) -> String {
-    assert!(!batch.is_empty());
+    assert_ne!(batch, []);
     assert!(batch.len() <= BATCH_SIZE);
 
     let mut prompt = String::from("Classify the following entities:\n\n");
@@ -298,7 +298,7 @@ fn build_user_prompt(batch: &[(&str, &str)], corpus_lines: &[&str]) -> String {
 
     prompt.push_str("Respond with JSON decisions for ALL of the above entities.");
 
-    assert!(!prompt.is_empty());
+    assert_ne!(prompt, "");
     assert!(
         prompt.contains("decisions"),
         "prompt must reference the required JSON key"
@@ -310,7 +310,7 @@ fn build_user_prompt(batch: &[(&str, &str)], corpus_lines: &[&str]) -> String {
 ///
 /// Matching is case-insensitive. Called by [`build_user_prompt`].
 fn collect_contexts(corpus_lines: &[&str], name: &str) -> Vec<String> {
-    assert!(!name.is_empty());
+    assert_ne!(name, "");
 
     let name_lower = name.to_lowercase();
     let mut contexts: Vec<String> = Vec::new();
@@ -337,7 +337,7 @@ fn collect_contexts(corpus_lines: &[&str], name: &str) -> Vec<String> {
 /// brace-depth matching. Returns `None` when no JSON structure is found.
 /// Called by [`parse_response`].
 fn extract_json_block(text: &str) -> Option<&str> {
-    assert!(!text.is_empty());
+    assert_ne!(text, "");
 
     // 1. Prefer an explicit ```json ... ``` fence.
     if let Some(fence_start) = text.find("```json") {
@@ -367,7 +367,7 @@ fn extract_json_block(text: &str) -> Option<&str> {
 /// No recursion — uses a `usize` depth counter. Called by [`extract_json_block`]
 /// as a last resort.
 fn extract_json_block_by_braces(text: &str) -> Option<&str> {
-    assert!(!text.is_empty());
+    assert_ne!(text, "");
 
     let brace_start = text.find('{')?;
     let mut depth: usize = 0;
@@ -402,8 +402,8 @@ fn parse_response(
     text: &str,
     expected_names: &[&str],
 ) -> Option<HashMap<String, (String, String)>> {
-    assert!(!text.is_empty());
-    assert!(!expected_names.is_empty());
+    assert_ne!(text, "");
+    assert_ne!(expected_names, [] as [&str; 0]);
 
     let json_text = extract_json_block(text)?;
     let data: Value = serde_json::from_str(json_text).ok()?;
@@ -558,7 +558,7 @@ fn collect_corpus_text_process_entries(
     depth: usize,
 ) {
     assert!(depth < CORPUS_WALK_DEPTH_LIMIT);
-    assert!(!prose_extensions.is_empty());
+    assert_ne!(prose_extensions, [] as [&str; 0]);
 
     for entry in entries.flatten() {
         if text.len() >= MAX_CORPUS_BYTES {
@@ -586,7 +586,7 @@ fn collect_corpus_text_process_entries(
 /// Called by [`collect_corpus_text_process_entries`].
 fn collect_corpus_text_read_file(path: &Path, prose_extensions: &[&str], text: &mut String) {
     assert!(text.len() <= MAX_CORPUS_BYTES);
-    assert!(!prose_extensions.is_empty());
+    assert_ne!(prose_extensions, [] as [&str; 0]);
 
     let has_prose_ext = path
         .extension()
@@ -660,7 +660,7 @@ mod tests {
         let text = "Result:\n```\n{\"decisions\":{}}\n```";
         let block = extract_json_block(text).expect("must find bare fence");
         assert!(block.starts_with('{'));
-        assert!(!block.is_empty());
+        assert_ne!(block, "");
     }
 
     #[test]
@@ -914,7 +914,7 @@ mod tests {
             prompt.contains("decisions"),
             "prompt must reference the required JSON key"
         );
-        assert!(!prompt.is_empty());
+        assert_ne!(prompt, "");
     }
 
     // -- Mock providers for refine_entities tests --
@@ -1045,7 +1045,7 @@ mod tests {
             corpus.contains("Alice wrote this project."),
             "must include prose file content"
         );
-        assert!(!corpus.is_empty());
+        assert_ne!(corpus, "");
     }
 
     #[test]

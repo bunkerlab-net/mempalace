@@ -495,8 +495,8 @@ pub async fn create_tunnel(
     // Normalize wing slugs so "my-project" and "my_project" resolve identically.
     let source_wing_norm = normalize_wing(params.source_wing);
     let target_wing_norm = normalize_wing(params.target_wing);
-    assert!(!source_wing_norm.is_empty());
-    assert!(!target_wing_norm.is_empty());
+    assert_ne!(source_wing_norm, "");
+    assert_ne!(target_wing_norm, "");
 
     let norm_params = CreateTunnelParams {
         source_wing: &source_wing_norm,
@@ -698,7 +698,7 @@ pub async fn follow_tunnels(
 
     // Normalize so "my-project" and "my_project" resolve to the same wing.
     let wing = normalize_wing(wing);
-    assert!(!wing.is_empty());
+    assert_ne!(wing, "");
 
     let rows = query_all(
         connection,

@@ -160,7 +160,7 @@ mod tests {
     fn messages_to_transcript_empty() {
         let msgs: Vec<(&str, &str)> = vec![];
         let result = messages_to_transcript(&msgs);
-        assert!(result.is_empty());
+        assert_eq!(result, "");
     }
 
     #[test]

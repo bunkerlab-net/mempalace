@@ -566,7 +566,7 @@ fn collect_manifest_names_parse_dir(directory: &Path, found: &mut Vec<(String, S
             _ => None,
         };
         if let Some(project_name) = parsed {
-            assert!(!project_name.is_empty());
+            assert_ne!(project_name, "");
             found.push((fname, project_name, directory.to_path_buf()));
         }
     }
@@ -638,7 +638,7 @@ fn dedupe_people_build_components(
     all_commits: &[(String, String, String)],
     uf: &mut UnionFind,
 ) -> HashMap<String, ComponentEntry> {
-    assert!(!all_commits.is_empty());
+    assert_ne!(all_commits, []);
 
     let mut components: HashMap<String, ComponentEntry> = HashMap::new();
     for (name, email, repo) in all_commits {
@@ -723,7 +723,7 @@ fn dedupe_people(all_commits: &[(String, String, String)]) -> HashMap<String, Pe
     if all_commits.is_empty() {
         return HashMap::new();
     }
-    assert!(!all_commits.is_empty());
+    assert_ne!(all_commits, []);
 
     let mut uf = UnionFind::new();
     for (name, email, _repo) in all_commits {

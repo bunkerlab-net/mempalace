@@ -356,7 +356,7 @@ mod tests {
         assert_eq!(tokens("front_end.module"), vec!["front", "end", "module"]);
         assert_eq!(tokens("foo/bar"), vec!["foo", "bar"]);
         assert_eq!(tokens("plain"), vec!["plain"]);
-        assert!(tokens("").is_empty());
+        assert_eq!(tokens(""), [] as [String; 0]);
         // Consecutive separators must collapse and not yield empty tokens.
         assert_eq!(tokens("foo--bar"), vec!["foo", "bar"]);
     }

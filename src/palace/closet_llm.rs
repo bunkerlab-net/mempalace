@@ -415,8 +415,8 @@ mod tests {
     #[test]
     fn parse_response_invalid_json_returns_default() {
         let output = regenerate_closets_parse_response("not json");
-        assert!(output.topics.is_empty());
-        assert!(output.summary.is_empty());
+        assert_eq!(output.topics, [] as [String; 0]);
+        assert_eq!(output.summary, "");
     }
 
     // ── regenerate_closets_format_content ────────────────────────────

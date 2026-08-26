@@ -173,7 +173,7 @@ fn onboarding_ask_mode(reader: &mut impl BufRead) -> Result<String> {
                 continue;
             }
         };
-        assert!(!mode.is_empty());
+        assert_ne!(mode, "");
         return Ok(mode.to_string());
     }
 }
@@ -183,7 +183,7 @@ fn onboarding_ask_mode(reader: &mut impl BufRead) -> Result<String> {
 /// For "combo" mode the context (personal vs work) is asked per person.
 /// Returns up to `PEOPLE_LIMIT` entries.
 fn onboarding_ask_people(mode: &str, reader: &mut impl BufRead) -> Result<Vec<PersonEntry>> {
-    assert!(!mode.is_empty());
+    assert_ne!(mode, "");
     println!(
         "\n  Who are the people in your {}? (enter to finish)",
         if mode == "work" { "team" } else { "life" }
@@ -215,7 +215,7 @@ fn onboarding_ask_people_one(
     index: usize,
     reader: &mut impl BufRead,
 ) -> Result<PersonEntry> {
-    assert!(!mode.is_empty());
+    assert_ne!(mode, "");
     assert!(index > 0);
 
     let name = onboarding_readline(&format!("  Person {index}"), None, reader)?;
@@ -249,7 +249,7 @@ fn onboarding_ask_people_one(
         }
     };
 
-    assert!(!name.is_empty());
+    assert_ne!(name, "");
     Ok(PersonEntry {
         name,
         relationship,
@@ -262,7 +262,7 @@ fn onboarding_ask_people_one(
 ///
 /// Returns up to `PROJECTS_LIMIT` project name strings.
 fn onboarding_ask_projects(mode: &str, reader: &mut impl BufRead) -> Result<Vec<String>> {
-    assert!(!mode.is_empty());
+    assert_ne!(mode, "");
     if mode == "personal" {
         println!("\n  Any creative projects or personal goals? (enter to skip)");
     } else {
@@ -290,14 +290,14 @@ fn onboarding_ask_projects(mode: &str, reader: &mut impl BufRead) -> Result<Vec<
 ///
 /// The user may accept the defaults (enter) or type comma-separated names.
 fn onboarding_ask_wings(mode: &str, reader: &mut impl BufRead) -> Result<Vec<String>> {
-    assert!(!mode.is_empty());
+    assert_ne!(mode, "");
     let defaults: &[&str] = match mode {
         "work" => DEFAULT_WINGS_WORK,
         "personal" => DEFAULT_WINGS_PERSONAL,
         _ => DEFAULT_WINGS_COMBO,
     };
 
-    assert!(!defaults.is_empty());
+    assert_ne!(defaults, [] as [&str; 0]);
     println!("\n  Default wings for {mode} mode: {}", defaults.join(", "));
 
     let input = onboarding_readline(
@@ -344,7 +344,7 @@ fn onboarding_maybe_scan(
     mode: &str,
     reader: &mut impl BufRead,
 ) -> Result<Vec<PersonEntry>> {
-    assert!(!mode.is_empty());
+    assert_ne!(mode, "");
     if !onboarding_readline_yn(
         "Scan your files for additional names we might have missed?",
         true,
@@ -361,7 +361,7 @@ fn onboarding_maybe_scan(
     } else {
         config.entity_languages.iter().map(String::as_str).collect()
     };
-    assert!(!language_refs.is_empty());
+    assert_ne!(language_refs, [] as [&str; 0]);
     let detected = onboarding_scan_directory(directory, &people, &language_refs);
     if detected.is_empty() {
         println!("  No additional candidates found.");
@@ -415,7 +415,7 @@ fn onboarding_prompt_detected(
     mode: &str,
     reader: &mut impl BufRead,
 ) -> Result<Vec<PersonEntry>> {
-    assert!(!mode.is_empty());
+    assert_ne!(mode, "");
     println!("\n  Found {} additional name candidates:\n", detected.len());
 
     for entity in &detected {
@@ -577,7 +577,7 @@ fn onboarding_generate_entity_codes(people: &[PersonEntry]) -> Vec<(String, Stri
     let mut codes: Vec<(String, String)> = Vec::with_capacity(people.len());
 
     for person in people {
-        assert!(!person.name.is_empty());
+        assert_ne!(person.name, "");
         let base: String = person
             .name
             .chars()
@@ -642,8 +642,8 @@ fn onboarding_generate_aaak_bootstrap(
     wings: &[String],
     mode: &str,
 ) -> Result<()> {
-    assert!(!mode.is_empty());
-    assert!(!wings.is_empty());
+    assert_ne!(mode, "");
+    assert_ne!(wings, [] as [String; 0]);
 
     let codes = onboarding_generate_entity_codes(people);
     let config = config_dir();
@@ -729,8 +729,8 @@ fn onboarding_write_critical_facts_file(
     mode: &str,
     codes: &[(String, String)],
 ) -> Result<()> {
-    assert!(!mode.is_empty());
-    assert!(!wings.is_empty());
+    assert_ne!(mode, "");
+    assert_ne!(wings, [] as [String; 0]);
     assert_eq!(codes.len(), people.len());
 
     let mut lines: Vec<String> = vec![
@@ -806,7 +806,7 @@ fn onboarding_readline(
     default: Option<&str>,
     reader: &mut impl BufRead,
 ) -> Result<String> {
-    assert!(!prompt.is_empty());
+    assert_ne!(prompt, "");
     let suffix = match default {
         Some(default_val) if !default_val.is_empty() => format!(" [{default_val}]"),
         _ => String::new(),
@@ -840,7 +840,7 @@ fn onboarding_readline_yn(
     default_yes: bool,
     reader: &mut impl BufRead,
 ) -> Result<bool> {
-    assert!(!prompt.is_empty());
+    assert_ne!(prompt, "");
     let hint = if default_yes { "Y/n" } else { "y/N" };
     print!("  {prompt} [{hint}]: ");
     std::io::stdout().flush()?;

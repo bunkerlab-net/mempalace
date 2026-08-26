@@ -201,8 +201,8 @@ fn add_to_known_entities_merge_category(
     category: &str,
     names: &[String],
 ) {
-    assert!(!category.is_empty());
-    assert!(!names.is_empty());
+    assert_ne!(category, "");
+    assert_ne!(names, [] as [String; 0]);
 
     match existing.get_mut(category) {
         Some(Value::Array(list)) => {
@@ -224,7 +224,7 @@ fn add_to_known_entities_merge_category(
 /// Original order of pre-existing entries is preserved; new names are appended.
 /// Called by [`add_to_known_entities_merge_category`] when the on-disk shape is a JSON array.
 fn add_to_known_entities_merge_list(list: &mut Vec<Value>, names: &[String]) {
-    assert!(!names.is_empty());
+    assert_ne!(names, [] as [String; 0]);
 
     let mut seen_lower: HashSet<String> = list
         .iter()
@@ -257,7 +257,7 @@ fn add_to_known_entities_merge_list(list: &mut Vec<Value>, names: &[String]) {
 /// are appended without overwriting existing code assignments.
 /// Called by [`add_to_known_entities_merge_category`] when the on-disk shape is a JSON object.
 fn add_to_known_entities_merge_dict(dict: &mut Map<String, Value>, names: &[String]) {
-    assert!(!names.is_empty());
+    assert_ne!(names, [] as [String; 0]);
 
     let mut seen_lower: HashSet<String> = dict.keys().map(|k| k.to_lowercase()).collect();
     let len_before = dict.len();
@@ -285,7 +285,7 @@ fn add_to_known_entities_merge_dict(dict: &mut Map<String, Value>, names: &[Stri
 /// the first occurrence. Called by [`add_to_known_entities_merge_category`]
 /// when the category does not yet exist in the registry.
 fn add_to_known_entities_new_list(names: &[String]) -> Vec<Value> {
-    assert!(!names.is_empty());
+    assert_ne!(names, [] as [String; 0]);
 
     let mut seen: HashSet<String> = HashSet::new();
     let mut result: Vec<Value> = Vec::with_capacity(names.len().min(NAMES_PER_CATEGORY_LIMIT));

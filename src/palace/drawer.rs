@@ -197,13 +197,13 @@ mod tests {
     fn tokenize_filters_short_words() {
         let tokens = tokenize("I am OK hi no");
         // All words are < 3 chars.
-        assert!(tokens.is_empty());
+        assert_eq!(tokens, [] as [String; 0]);
     }
 
     #[test]
     fn tokenize_filters_stop_words() {
         let tokens = tokenize("the and for are but not you");
-        assert!(tokens.is_empty());
+        assert_eq!(tokens, [] as [String; 0]);
     }
 
     #[test]

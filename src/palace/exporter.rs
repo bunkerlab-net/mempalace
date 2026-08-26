@@ -226,9 +226,9 @@ fn export_write_room(
     room_name: &str,
     sections: &[(String, String)],
 ) -> Result<()> {
-    assert!(!wing_name.is_empty());
-    assert!(!room_name.is_empty());
-    assert!(!sections.is_empty());
+    assert_ne!(wing_name, "");
+    assert_ne!(room_name, "");
+    assert_ne!(sections, []);
 
     let wing_dir = output_dir.join(sanitize_path_component(wing_name));
     // Refuse symlinks at the wing directory before create_dir_all silently
@@ -324,7 +324,7 @@ fn sanitize_path_component(name: &str) -> String {
     } else {
         sanitized
     };
-    assert!(!sanitized.is_empty());
+    assert_ne!(sanitized, "");
     sanitized
 }
 

@@ -297,7 +297,7 @@ mod tests {
             route_hint: None,
         };
         assert_eq!(record.chunk_index, 0);
-        assert!(!record.content.is_empty());
+        assert_ne!(record.content, "");
     }
 
     #[test]

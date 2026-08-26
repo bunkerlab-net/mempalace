@@ -202,7 +202,7 @@ fn hook_validate_transcript_path(input: &str) -> Option<PathBuf> {
 
 /// Session-start hook: create state directory, log the event, and pass through.
 fn hook_session_start(input: &HookInput, state_dir: &Path) {
-    assert!(!input.session_id.is_empty());
+    assert_ne!(input.session_id, "");
     hook_log(
         state_dir,
         &format!("SESSION START for session {}", input.session_id),
@@ -216,7 +216,7 @@ fn hook_session_start(input: &HookInput, state_dir: &Path) {
 /// `systemMessage`. In block mode, returns `{"decision":"block"}` to ask Claude
 /// to save via MCP tools.
 async fn hook_stop(input: &HookInput, state_dir: &Path) {
-    assert!(!input.session_id.is_empty());
+    assert_ne!(input.session_id, "");
 
     // In block mode, guard against the re-entry loop that would trigger after
     // Claude finishes the MCP save and the harness fires the hook again.
@@ -345,7 +345,7 @@ fn hook_stop_save_blocking(
 /// blocking but use distinct pid file conventions (no pid file for sync calls)
 /// so neither suppresses the other.
 fn hook_precompact(input: &HookInput, state_dir: &Path) {
-    assert!(!input.session_id.is_empty());
+    assert_ne!(input.session_id, "");
     hook_log(
         state_dir,
         &format!("PRE-COMPACT triggered for session {}", input.session_id),
@@ -365,8 +365,8 @@ async fn hook_save_diary(
     wing: &str,
     state_dir: &Path,
 ) -> (usize, Vec<String>) {
-    assert!(!session_id.is_empty());
-    assert!(!wing.is_empty());
+    assert_ne!(session_id, "");
+    assert_ne!(wing, "");
 
     let messages = hook_extract_recent_messages(transcript_path);
     if messages.is_empty() {
@@ -414,9 +414,9 @@ async fn hook_save_diary(
 async fn hook_write_diary_to_db(id: &str, wing: &str, entry: &str, agent: &str) -> Option<String> {
     use crate::{db, palace::drawer, schema};
 
-    assert!(!id.is_empty());
-    assert!(!wing.is_empty());
-    assert!(!entry.is_empty());
+    assert_ne!(id, "");
+    assert_ne!(wing, "");
+    assert_ne!(entry, "");
 
     let config = crate::config::MempalaceConfig::init().ok()?;
     let db_path = config.palace_db_path();
@@ -1147,7 +1147,7 @@ mod tests {
         // Empty sanitized output must fall back to "unknown" to keep state files valid.
         let result = hook_sanitize_session_id("///..");
         assert_eq!(result, "unknown");
-        assert!(!result.is_empty());
+        assert_ne!(result, "");
     }
 
     #[test]
@@ -1155,7 +1155,7 @@ mod tests {
         // Alphanumeric, dash, and underscore must survive sanitization unchanged.
         let result = hook_sanitize_session_id("abc-123_xyz");
         assert_eq!(result, "abc-123_xyz");
-        assert!(!result.is_empty());
+        assert_ne!(result, "");
     }
 
     #[test]
@@ -1212,7 +1212,7 @@ mod tests {
         ];
         let themes = hook_extract_themes(&messages);
         // "database" and "migration" should both appear in top themes.
-        assert!(!themes.is_empty());
+        assert_ne!(themes, [] as [String; 0]);
         assert!(
             themes.contains(&"database".to_string()) || themes.contains(&"migration".to_string())
         );
@@ -1416,7 +1416,7 @@ mod tests {
         let path = dir.path().join("empty.jsonl");
         std::fs::write(&path, "").expect("must write");
         let messages = hook_extract_recent_messages(&path);
-        assert!(messages.is_empty());
+        assert_eq!(messages, [] as [String; 0]);
     }
 
     #[test]
@@ -1674,7 +1674,7 @@ mod tests {
         let count_str = std::fs::read_to_string(&last_save_file).expect("must read");
         assert_eq!(count_str.trim(), "20");
         // Pair assertion: the file was not zero-length.
-        assert!(!count_str.is_empty());
+        assert_ne!(count_str, "");
     }
 
     // -------- hook_save_diary --------
@@ -1691,7 +1691,7 @@ mod tests {
         )
         .await;
         assert_eq!(count, 0);
-        assert!(themes.is_empty());
+        assert_eq!(themes, [] as [String; 0]);
     }
 
     #[tokio::test]
@@ -2324,7 +2324,7 @@ mod tests {
             result, "session2024",
             "only alnum chars must remain: {result}"
         );
-        assert!(!result.is_empty());
+        assert_ne!(result, "");
     }
 
     // -------- hook_extract_recent_messages: window limiting --

@@ -188,7 +188,7 @@ pub fn normalize_wing_name(name: &str) -> String {
         "normalize_wing_name: name must not be empty"
     );
     let result = name.to_lowercase().replace([' ', '-'], "_");
-    assert!(!result.is_empty());
+    assert_ne!(result, "");
     assert!(!result.contains(' '));
     assert!(!result.contains('-'));
     result
@@ -1627,7 +1627,7 @@ rooms:
         // Default config must contain exactly ["en"] as entity_languages.
         let config = MempalaceConfig::default();
         assert_eq!(config.entity_languages, vec!["en".to_string()]);
-        assert!(!config.entity_languages.is_empty());
+        assert_ne!(config.entity_languages, [] as [String; 0]);
     }
 
     #[test]
@@ -1645,7 +1645,7 @@ rooms:
         let json = r#"{"palace_path":"/tmp/p.db","collection_name":"x","people_map":{}}"#;
         let config: MempalaceConfig = serde_json::from_str(json).expect("parse json");
         assert_eq!(config.entity_languages, vec!["en".to_string()]);
-        assert!(!config.entity_languages.is_empty());
+        assert_ne!(config.entity_languages, [] as [String; 0]);
     }
 
     // -- normalize_wing_name --------------------------------------------------

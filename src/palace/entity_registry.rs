@@ -403,15 +403,15 @@ impl EntityRegistry {
         assert!(!word.is_empty(), "lookup: word must not be empty");
 
         if let Some(result) = self.lookup_check_people(word, context) {
-            assert!(!result.entity_type.is_empty());
+            assert_ne!(result.entity_type, "");
             return result;
         }
         if let Some(result) = self.lookup_check_projects(word) {
-            assert!(!result.entity_type.is_empty());
+            assert_ne!(result.entity_type, "");
             return result;
         }
         if let Some(result) = self.lookup_check_wiki_cache(word) {
-            assert!(!result.entity_type.is_empty());
+            assert_ne!(result.entity_type, "");
             return result;
         }
         LookupResult {
@@ -441,7 +441,7 @@ impl EntityRegistry {
 
         // Local-only path: return from cache without touching the network.
         if let Some(cached) = self.data.wiki_cache.get(word) {
-            assert!(!cached.inferred_type.is_empty());
+            assert_ne!(cached.inferred_type, "");
             return cached.clone();
         }
 
@@ -1734,7 +1734,7 @@ mod tests {
     fn url_encode_leaves_ascii_letters_unchanged() {
         let encoded = entity_registry_url_encode("Riley");
         assert_eq!(encoded, "Riley", "ASCII letters must not be encoded");
-        assert!(!encoded.is_empty());
+        assert_ne!(encoded, "");
     }
 
     #[test]

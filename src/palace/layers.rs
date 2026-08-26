@@ -430,7 +430,7 @@ async fn layer3_add_neighbor_context(
     anchor: &search::SearchResult,
     lines: &mut Vec<String>,
 ) -> Result<()> {
-    assert!(!anchor.source_path.is_empty());
+    assert_ne!(anchor.source_path, "");
 
     let neighbors =
         search::search_expand_neighbors(connection, &anchor.source_path, anchor.chunk_index, 2)
@@ -451,7 +451,7 @@ async fn layer3_add_neighbor_context(
     }
 
     // Postcondition: adding neighbors must produce more lines.
-    assert!(!lines.is_empty());
+    assert_ne!(lines.as_slice(), [] as [String; 0]);
     Ok(())
 }
 
