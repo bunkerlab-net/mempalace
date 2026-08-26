@@ -98,7 +98,7 @@ pub async fn run(connection: &Connection) -> Result<()> {
 /// Returns `Ok(Value)` on success, or `Err(Value)` containing a JSON-RPC
 /// parse-error response ready to send to the client.
 fn run_parse_request(trimmed: &str) -> std::result::Result<Value, Value> {
-    assert!(!trimmed.is_empty());
+    assert_ne!(trimmed, "");
     serde_json::from_str(trimmed).map_err(|e| {
         json!({
             "jsonrpc": "2.0",

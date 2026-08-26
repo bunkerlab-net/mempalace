@@ -15,7 +15,10 @@ use super::adapter::SourceAdapter;
 /// Stable name returned by [`resolve_adapter_name`] when no explicit name is given.
 pub const DEFAULT_ADAPTER: &str = "filesystem";
 
-const _: () = assert!(!DEFAULT_ADAPTER.is_empty());
+// Compile-time check that the default adapter name has at least one byte. A slice
+// pattern is used because `assert_ne!` cannot run in const context: `PartialEq` is
+// not yet const-stable.
+const _: () = assert!(matches!(DEFAULT_ADAPTER.as_bytes(), [_, ..]));
 
 /// Maps adapter name → constructor function.
 type RegistryMap = HashMap<&'static str, fn() -> Box<dyn SourceAdapter>>;
@@ -42,7 +45,7 @@ pub fn register(name: &'static str, constructor: fn() -> Box<dyn SourceAdapter>)
 
 /// Remove an adapter registration (primarily for tests).
 pub fn unregister(name: &'static str) {
-    assert!(!name.is_empty());
+    assert_ne!(name, "");
     let mut map = REGISTRY.write().unwrap_or_else(PoisonError::into_inner);
     map.remove(name);
 }

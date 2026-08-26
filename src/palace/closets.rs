@@ -183,7 +183,7 @@ async fn search_closet_boost_fetch(
         .map(|path| turso::Value::from(path.as_str()))
         .collect();
 
-    assert!(!sql.is_empty());
+    assert_ne!(sql, "");
     db::query_all(connection, &sql, turso::params_from_iter(params)).await
 }
 

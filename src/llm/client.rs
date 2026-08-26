@@ -110,12 +110,12 @@ impl OllamaProvider {
     ///
     /// Called by [`get_provider`] when `name == "ollama"`.
     pub fn new(model: String, endpoint: Option<String>, timeout_secs: u64) -> Self {
-        assert!(!model.is_empty());
+        assert_ne!(model, "");
         assert!(timeout_secs > 0);
         let resolved_endpoint = endpoint
             .filter(|e| !e.is_empty())
             .unwrap_or_else(|| OLLAMA_DEFAULT_ENDPOINT.to_string());
-        assert!(!resolved_endpoint.is_empty());
+        assert_ne!(resolved_endpoint, "");
         Self {
             model,
             endpoint: resolved_endpoint,
@@ -139,8 +139,8 @@ impl LlmProvider for OllamaProvider {
     }
 
     fn check_available(&self) -> (bool, String) {
-        assert!(!self.endpoint.is_empty());
-        assert!(!self.model.is_empty());
+        assert_ne!(self.endpoint, "");
+        assert_ne!(self.model, "");
 
         let url = format!("{}/api/tags", self.endpoint);
         let Ok(data) = http_get(&url, CHECK_TIMEOUT_SECS) else {
@@ -174,8 +174,8 @@ impl LlmProvider for OllamaProvider {
     }
 
     fn classify(&self, system: &str, user: &str, json_mode: bool) -> Result<LlmResponse> {
-        assert!(!system.is_empty());
-        assert!(!user.is_empty());
+        assert_ne!(system, "");
+        assert_ne!(user, "");
 
         let mut body = json!({
             "model": self.model,
@@ -231,7 +231,7 @@ impl OpenAICompatProvider {
         api_key: Option<String>,
         timeout_secs: u64,
     ) -> Self {
-        assert!(!model.is_empty());
+        assert_ne!(model, "");
         assert!(timeout_secs > 0);
         // Treat blank or whitespace-only flag and env values as missing — shells
         // routinely export empty vars when users clear them, and accepting a
@@ -267,7 +267,7 @@ impl OpenAICompatProvider {
     /// [`LlmProvider::check_available`] on `OpenAICompatProvider`.
     fn resolve_url(&self) -> Result<String> {
         // model invariant: model must always be set (construction assert enforces this).
-        assert!(!self.model.is_empty());
+        assert_ne!(self.model, "");
         if self.endpoint.is_empty() {
             return Err(Error::Llm(
                 "openai-compat provider requires --llm-endpoint".to_string(),
@@ -281,7 +281,7 @@ impl OpenAICompatProvider {
         } else {
             format!("{base}/v1/chat/completions")
         };
-        assert!(!url.is_empty());
+        assert_ne!(url, "");
         Ok(url)
     }
 }
@@ -300,7 +300,7 @@ impl LlmProvider for OpenAICompatProvider {
     }
 
     fn check_available(&self) -> (bool, String) {
-        assert!(!self.model.is_empty());
+        assert_ne!(self.model, "");
         if self.endpoint.is_empty() {
             return (false, "no --llm-endpoint configured".to_string());
         }
@@ -324,8 +324,8 @@ impl LlmProvider for OpenAICompatProvider {
     }
 
     fn classify(&self, system: &str, user: &str, json_mode: bool) -> Result<LlmResponse> {
-        assert!(!system.is_empty());
-        assert!(!user.is_empty());
+        assert_ne!(system, "");
+        assert_ne!(user, "");
 
         let mut body = json!({
             "model": self.model,
@@ -393,7 +393,7 @@ impl AnthropicProvider {
         api_key: Option<String>,
         timeout_secs: u64,
     ) -> Self {
-        assert!(!model.is_empty());
+        assert_ne!(model, "");
         assert!(timeout_secs > 0);
         // Treat blank or whitespace-only flag and env values as missing — shells
         // routinely export empty vars when users clear them, and accepting a
@@ -415,7 +415,7 @@ impl AnthropicProvider {
         let resolved_endpoint = endpoint
             .filter(|e| !e.is_empty())
             .unwrap_or_else(|| ANTHROPIC_DEFAULT_ENDPOINT.to_string());
-        assert!(!resolved_endpoint.is_empty());
+        assert_ne!(resolved_endpoint, "");
         Self {
             model,
             endpoint: resolved_endpoint,
@@ -440,8 +440,8 @@ impl LlmProvider for AnthropicProvider {
     }
 
     fn check_available(&self) -> (bool, String) {
-        assert!(!self.model.is_empty());
-        assert!(!self.endpoint.is_empty());
+        assert_ne!(self.model, "");
+        assert_ne!(self.endpoint, "");
         // Anthropic: don't probe the network — a live request costs money.
         // Surface auth errors on the first actual classify call instead.
         if self.api_key.is_none() {
@@ -454,8 +454,8 @@ impl LlmProvider for AnthropicProvider {
     }
 
     fn classify(&self, system: &str, user: &str, json_mode: bool) -> Result<LlmResponse> {
-        assert!(!system.is_empty());
-        assert!(!user.is_empty());
+        assert_ne!(system, "");
+        assert_ne!(user, "");
 
         let Some(api_key) = &self.api_key else {
             return Err(Error::Llm(
@@ -528,8 +528,8 @@ pub fn get_provider(
     api_key: Option<String>,
     timeout_secs: u64,
 ) -> Result<Box<dyn LlmProvider>> {
-    assert!(!name.is_empty());
-    assert!(!model.is_empty());
+    assert_ne!(name, "");
+    assert_ne!(model, "");
     assert!(timeout_secs > 0);
 
     let provider: Box<dyn LlmProvider> = match name {
@@ -572,7 +572,7 @@ fn http_post_json(
     extra_headers: &[(&str, &str)],
     timeout_secs: u64,
 ) -> Result<Value> {
-    assert!(!url.is_empty());
+    assert_ne!(url, "");
     assert!(timeout_secs > 0);
 
     let agent = ureq::Agent::config_builder()
@@ -607,7 +607,7 @@ fn http_post_json(
 /// Used by availability probes that only need to reach a URL, not send a body.
 /// Called by [`OllamaProvider::check_available`].
 fn http_get(url: &str, timeout_secs: u64) -> Result<Value> {
-    assert!(!url.is_empty());
+    assert_ne!(url, "");
     assert!(timeout_secs > 0);
 
     let agent = ureq::Agent::config_builder()
@@ -634,7 +634,7 @@ fn http_get(url: &str, timeout_secs: u64) -> Result<Value> {
 /// Used by [`OpenAICompatProvider::check_available`] which needs to send an
 /// `Authorization` header. Called by `check_available` on `OpenAICompatProvider`.
 fn http_get_with_headers(url: &str, headers: &[(&str, &str)], timeout_secs: u64) -> Result<Value> {
-    assert!(!url.is_empty());
+    assert_ne!(url, "");
     assert!(timeout_secs > 0);
 
     let agent = ureq::Agent::config_builder()
@@ -728,7 +728,7 @@ pub fn endpoint_is_local(url: &str) -> bool {
 /// Strips scheme, port, and path. Handles IPv6 bracketed addresses (`[::1]`).
 /// Returns an empty string when the URL is malformed. Called by [`endpoint_is_local`].
 fn extract_endpoint_hostname(url: &str) -> String {
-    assert!(!url.is_empty());
+    assert_ne!(url, "");
     // Strip scheme: "https://host:port/path" → "host:port/path"
     let after_scheme = url.find("://").map_or(url, |position| &url[position + 3..]);
 
@@ -761,7 +761,7 @@ mod tests {
         let provider =
             get_provider("ollama", "gemma3:4b", None, None, 60).expect("get_provider must succeed");
         assert_eq!(provider.name(), "ollama");
-        assert!(!provider.name().is_empty());
+        assert_ne!(provider.name(), "");
     }
 
     #[test]
@@ -776,7 +776,7 @@ mod tests {
         )
         .expect("get_provider must succeed");
         assert_eq!(provider.name(), "openai-compat");
-        assert!(!provider.name().is_empty());
+        assert_ne!(provider.name(), "");
     }
 
     #[test]
@@ -791,7 +791,7 @@ mod tests {
         )
         .expect("get_provider must succeed");
         assert_eq!(provider.name(), "anthropic");
-        assert!(!provider.name().is_empty());
+        assert_ne!(provider.name(), "");
     }
 
     #[test]
@@ -1061,7 +1061,7 @@ mod tests {
         let data = serde_json::json!({"content": [{"type": "text", "text": "Hello world"}]});
         let result = anthropic_extract_text(&data);
         assert_eq!(result, "Hello world");
-        assert!(!result.is_empty());
+        assert_ne!(result, "");
     }
 
     #[test]
@@ -1075,7 +1075,7 @@ mod tests {
         });
         let result = anthropic_extract_text(&data);
         assert_eq!(result, "Hello world");
-        assert!(!result.is_empty());
+        assert_ne!(result, "");
     }
 
     #[test]
@@ -1089,7 +1089,7 @@ mod tests {
         });
         let result = anthropic_extract_text(&data);
         assert_eq!(result, "Only this");
-        assert!(!result.is_empty());
+        assert_ne!(result, "");
     }
 
     #[test]
@@ -1216,7 +1216,7 @@ mod tests {
         let result = provider
             .classify("system prompt", "user prompt", true)
             .expect("json_mode must succeed with mock server");
-        assert!(!result.text.is_empty());
+        assert_ne!(result.text, "");
     }
 
     // -- OpenAICompatProvider::check_available --
@@ -1308,7 +1308,7 @@ mod tests {
         let result = provider
             .classify("system prompt", "user prompt", true)
             .expect("json_mode must succeed with mock server");
-        assert!(!result.text.is_empty());
+        assert_ne!(result.text, "");
     }
 
     // -- AnthropicProvider::classify --
@@ -1372,7 +1372,7 @@ mod tests {
         let result = provider
             .classify("system prompt", "user prompt", true)
             .expect("json_mode must succeed with mock server");
-        assert!(!result.text.is_empty());
+        assert_ne!(result.text, "");
     }
 
     // -- endpoint_is_local --

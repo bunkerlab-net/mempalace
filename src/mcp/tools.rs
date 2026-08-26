@@ -177,7 +177,7 @@ fn sanitize_name(value: &str, field_name: &str) -> Result<String, Value> {
     let result = trimmed.to_string();
 
     // Postconditions: result is non-empty, trimmed, and has no path-traversal chars.
-    debug_assert!(!result.is_empty());
+    debug_assert_ne!(result, "");
     debug_assert_eq!(result, result.trim());
     debug_assert!(!result.contains(".."));
     debug_assert!(!result.contains('/'));
@@ -225,7 +225,7 @@ fn sanitize_kg_value(value: &str, field_name: &str) -> Result<String, Value> {
     let result = trimmed.to_string();
 
     // Postconditions: result is non-empty, trimmed, and has no path-traversal chars.
-    debug_assert!(!result.is_empty());
+    debug_assert_ne!(result, "");
     debug_assert_eq!(result, result.trim());
     debug_assert!(!result.contains(".."));
     debug_assert!(!result.contains('/'));
@@ -267,7 +267,7 @@ fn sanitize_label(value: &str) -> Result<String, Value> {
     let result = trimmed.to_string();
 
     // Postconditions: result is non-empty, trimmed, and safe.
-    debug_assert!(!result.is_empty());
+    debug_assert_ne!(result, "");
     debug_assert_eq!(result, result.trim());
     debug_assert!(!result.contains('\0'));
     debug_assert!(result.chars().count() <= LABEL_LEN_MAX);
@@ -297,7 +297,7 @@ fn sanitize_content(value: &str) -> Result<String, Value> {
     let result = trimmed.to_string();
 
     // Postconditions: result is non-empty and has no null bytes.
-    debug_assert!(!result.is_empty());
+    debug_assert_ne!(result, "");
     debug_assert!(!result.contains('\0'));
 
     Ok(result)
@@ -1829,7 +1829,7 @@ fn tool_research_entity(args: &Value) -> Value {
     // Check local registry first — fast path with context disambiguation.
     let local = registry.lookup(word, context);
     if local.entity_type != "unknown" {
-        assert!(!local.entity_type.is_empty());
+        assert_ne!(local.entity_type, "");
         return json!({
             "word": local.name,
             "inferred_type": local.entity_type,
@@ -1844,7 +1844,7 @@ fn tool_research_entity(args: &Value) -> Value {
     }
 
     let entry = registry.research(word, auto_confirm, allow_network);
-    assert!(!entry.inferred_type.is_empty());
+    assert_ne!(entry.inferred_type, "");
     json!({
         "word": word,
         "inferred_type": entry.inferred_type,
@@ -2316,12 +2316,7 @@ mod tests {
             )
             .await;
             assert_eq!(result["is_duplicate"], false);
-            assert!(
-                result["matches"]
-                    .as_array()
-                    .expect("matches must be array")
-                    .is_empty()
-            );
+            assert_eq!(result["matches"], json!([]));
         })
         .await;
     }
@@ -2431,12 +2426,7 @@ mod tests {
         with_isolated_env(|connection| async move {
             let result = tool_list_drawers(&connection, &json!({})).await;
             assert_eq!(result["count"], 0);
-            assert!(
-                result["drawers"]
-                    .as_array()
-                    .expect("drawers must be array")
-                    .is_empty()
-            );
+            assert_eq!(result["drawers"], json!([]));
         })
         .await;
     }
@@ -2912,12 +2902,7 @@ mod tests {
             let result =
                 tool_follow_tunnels(&connection, &json!({"wing": "alpha", "room": "code"})).await;
             assert!(result.get("error").is_none(), "must not error");
-            assert!(
-                result["connections"]
-                    .as_array()
-                    .expect("connections must be array")
-                    .is_empty()
-            );
+            assert_eq!(result["connections"], json!([]));
         })
         .await;
     }
@@ -2987,12 +2972,7 @@ mod tests {
         with_isolated_env(|connection| async move {
             let result = tool_find_tunnels(&connection, &json!({})).await;
             assert!(result.get("error").is_none(), "must not error");
-            assert!(
-                result["tunnels"]
-                    .as_array()
-                    .expect("tunnels must be array")
-                    .is_empty()
-            );
+            assert_eq!(result["tunnels"], json!([]));
         })
         .await;
     }

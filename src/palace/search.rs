@@ -156,7 +156,7 @@ async fn search_memories_candidates(
     room: Option<&str>,
     n_candidates: usize,
 ) -> Result<Vec<Candidate>> {
-    assert!(!words.is_empty());
+    assert_ne!(words, [] as [String; 0]);
     assert!(n_candidates > 0);
 
     let placeholders: Vec<String> = (1..=words.len()).map(|i| format!("?{i}")).collect();
@@ -214,8 +214,8 @@ async fn search_memories_tf_data(
     candidate_ids: &[String],
     words: &[String],
 ) -> Result<HashMap<String, HashMap<String, i64>>> {
-    assert!(!candidate_ids.is_empty());
-    assert!(!words.is_empty());
+    assert_ne!(candidate_ids, [] as [String; 0]);
+    assert_ne!(words, [] as [String; 0]);
 
     let id_phs: Vec<String> = (1..=candidate_ids.len()).map(|i| format!("?{i}")).collect();
     let word_offset = candidate_ids.len();
@@ -267,7 +267,7 @@ async fn search_memories_doc_lengths(
     connection: &Connection,
     candidate_ids: &[String],
 ) -> Result<HashMap<String, i64>> {
-    assert!(!candidate_ids.is_empty());
+    assert_ne!(candidate_ids, [] as [String; 0]);
 
     let placeholders: Vec<String> = (1..=candidate_ids.len()).map(|i| format!("?{i}")).collect();
     let sql = format!(
@@ -422,7 +422,7 @@ fn search_memories_to_result(score: f64, candidate: Candidate) -> SearchResult {
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
-    assert!(!candidate.id.is_empty());
+    assert_ne!(candidate.id, "");
     SearchResult {
         text: candidate.text,
         wing: candidate.wing,
@@ -868,13 +868,13 @@ mod tests {
     #[test]
     fn tokenize_query_filters_stop_words() {
         let tokens = tokenize_query("the and for");
-        assert!(tokens.is_empty());
+        assert_eq!(tokens, [] as [String; 0]);
     }
 
     #[test]
     fn tokenize_query_empty_input() {
-        assert!(tokenize_query("").is_empty());
-        assert!(tokenize_query("   ").is_empty());
+        assert_eq!(tokenize_query(""), [] as [String; 0]);
+        assert_eq!(tokenize_query("   "), [] as [String; 0]);
     }
 
     #[test]

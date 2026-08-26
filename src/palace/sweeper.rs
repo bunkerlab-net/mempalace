@@ -674,14 +674,14 @@ mod tests {
     #[test]
     fn flatten_content_array_empty_returns_empty_string() {
         let content = serde_json::json!([]);
-        assert!(flatten_content(&content).is_empty());
+        assert_eq!(flatten_content(&content), "");
     }
 
     #[test]
     fn flatten_content_null_returns_string_representation() {
         let result = flatten_content(&Value::Null);
         assert_eq!(result, "null");
-        assert!(!result.is_empty());
+        assert_ne!(result, "");
     }
 
     // ── parse_claude_jsonl_record ────────────────────────────────────────────
@@ -806,7 +806,7 @@ mod tests {
         let msg = parse_claude_jsonl_record(&record)
             .expect("must parse when session_id snake_case key is used");
         assert_eq!(msg.session_id, "fallback");
-        assert!(!msg.session_id.is_empty());
+        assert_ne!(msg.session_id, "");
     }
 
     // ── parse_claude_jsonl ───────────────────────────────────────────────────
@@ -1023,7 +1023,7 @@ mod tests {
     fn collect_files_empty_directory_returns_empty_vec() {
         let dir = tempfile::tempdir().expect("tempdir");
         let files = sweep_directory_collect_files(dir.path());
-        assert!(files.is_empty());
+        assert_eq!(files, [] as [PathBuf; 0]);
     }
 
     #[test]

@@ -454,9 +454,9 @@ async fn diary_ingest_file_purge_orphans(
     current_count: usize,
     previous_count: usize,
 ) -> Result<()> {
-    assert!(!wing.is_empty());
-    assert!(!agent.is_empty());
-    assert!(!date_prefix.is_empty());
+    assert_ne!(wing, "");
+    assert_ne!(agent, "");
+    assert_ne!(date_prefix, "");
     if current_count >= previous_count {
         return Ok(());
     }
@@ -617,9 +617,9 @@ fn diary_ingest_drawer_id(
     date: &str,
     index: usize,
 ) -> String {
-    assert!(!wing.is_empty());
-    assert!(!agent.is_empty());
-    assert!(!date.is_empty());
+    assert_ne!(wing, "");
+    assert_ne!(agent, "");
+    assert_ne!(date, "");
 
     let wing_prefix: String = wing
         .chars()
@@ -646,7 +646,7 @@ fn diary_ingest_drawer_id(
         "identity hash must be 8 hex chars"
     );
     let id = format!("diary-{wing_prefix}-{identity_hash}-{date}-{index}");
-    assert!(!id.is_empty());
+    assert_ne!(id, "");
     id
 }
 
@@ -827,7 +827,7 @@ mod tests {
             0,
         );
         assert_eq!(id1, id2, "drawer ID must be deterministic");
-        assert!(!id1.is_empty());
+        assert_ne!(id1, "");
         assert!(id1.starts_with("diary-"));
     }
 

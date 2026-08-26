@@ -413,8 +413,8 @@ fn run_setup_llm(opts: &LlmOpts) -> Result<Option<Box<dyn LlmProvider>>> {
     if !opts.enabled {
         return Ok(None);
     }
-    assert!(!opts.provider.is_empty());
-    assert!(!opts.model.is_empty());
+    assert_ne!(opts.provider, "");
+    assert_ne!(opts.model, "");
 
     let provider = get_provider(
         &opts.provider,
@@ -434,7 +434,7 @@ fn run_setup_llm(opts: &LlmOpts) -> Result<Option<Box<dyn LlmProvider>>> {
         return Ok(None);
     }
 
-    assert!(!provider.name().is_empty());
+    assert_ne!(provider.name(), "");
     eprintln!("  LLM: {} ({}) ready", opts.provider, opts.model);
     Ok(Some(provider))
 }
@@ -581,7 +581,7 @@ fn run_prompt_mine(auto_mine: bool) -> Result<bool> {
 ///
 /// Called by [`run`] after the user confirms.
 fn run_write_config(wing_name: &str, rooms: Vec<RoomConfig>, directory: &Path) -> Result<()> {
-    assert!(!wing_name.is_empty());
+    assert_ne!(wing_name, "");
     assert!(directory.is_dir());
 
     let config = ProjectConfig {
@@ -625,7 +625,7 @@ fn run_confirm_and_save(
 ) -> Result<()> {
     assert!(directory.is_dir());
     assert!(!directory.as_os_str().is_empty());
-    assert!(!wing_name.is_empty());
+    assert_ne!(wing_name, "");
 
     let confirmed = confirm_entities(detected, yes);
 
@@ -822,7 +822,7 @@ fn run_print_summary(
     rooms: &[crate::config::RoomConfig],
     detected: &DetectedDict,
 ) {
-    assert!(!wing_name.is_empty());
+    assert_ne!(wing_name, "");
 
     // Format bytes as "<1 MB" when under 1 MiB, or the integer MiB count otherwise.
     // Integer division on `total_bytes` is intentional: the summary reports whole
@@ -865,14 +865,14 @@ fn run_print_summary(
 
 /// Print a labelled entity list.  Called by [`run_print_summary`].
 fn run_print_entities(label: &str, entities: &[DetectedEntity]) {
-    assert!(!label.is_empty());
+    assert_ne!(label, "");
     if entities.is_empty() {
         return;
     }
     println!("\n    {label}:");
     for entity in entities {
-        assert!(!entity.name.is_empty());
-        assert!(!entity.entity_type.is_empty());
+        assert_ne!(entity.name, "");
+        assert_ne!(entity.entity_type, "");
         // Show confidence (e.g. 99%) and the first evidence signal.
         // `frequency` is the occurrence/commit count — shown when > 0.
         // Confidence is in [0.0, 1.0]; * 100 then round gives 0.0–100.0, safely fits u32.
@@ -1157,7 +1157,7 @@ mod tests {
             result, "my_awesome_project",
             "hyphens must be converted to underscores"
         );
-        assert!(!result.is_empty());
+        assert_ne!(result, "");
     }
 
     #[test]
@@ -1372,7 +1372,7 @@ mod tests {
             content.contains("Alice"),
             "entities.json must name the confirmed person"
         );
-        assert!(!content.is_empty());
+        assert_ne!(content, "");
         // Pair assertion: known_entities.json must be in the isolated registry dir.
         assert!(
             registry_dir.path().join("known_entities.json").exists(),

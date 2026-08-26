@@ -46,7 +46,7 @@ fn current_locale_quote_re() -> Option<Regex> {
     let compiled = Regex::new(&pattern).ok()?;
     // Pair assertion: a successful compile must produce a non-trivial pattern
     // (the locale JSON should never define an empty regex).
-    debug_assert!(!compiled.as_str().is_empty());
+    debug_assert_ne!(compiled.as_str(), "");
     Some(compiled)
 }
 
@@ -383,7 +383,7 @@ impl Dialect {
         let result = lines.join("\n");
 
         // Postcondition: compressed output is never empty.
-        debug_assert!(!result.is_empty());
+        debug_assert_ne!(result, "");
 
         result
     }

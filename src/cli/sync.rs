@@ -731,7 +731,7 @@ mod tests {
             &mut sources,
         );
         assert_eq!(report.no_source, 1);
-        assert!(ids.is_empty());
+        assert_eq!(ids, [] as [String; 0]);
     }
 
     #[test]
@@ -748,7 +748,7 @@ mod tests {
             &mut sources,
         );
         assert_eq!(report.out_of_scope, 1);
-        assert!(ids.is_empty());
+        assert_eq!(ids, [] as [String; 0]);
     }
 
     #[test]
