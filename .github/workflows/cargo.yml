@@ -13,27 +13,27 @@ permissions: {}
 jobs:
   audit:
     name: Audit
-    uses: ./.github/workflows/audit.yml
+    uses: $/.github/workflows/audit.yml
     permissions:
       contents: read
       issues: write
 
   deny:
     name: Deny
-    uses: ./.github/workflows/deny.yml
+    uses: $/.github/workflows/deny.yml
     permissions:
       contents: read
 
   lint:
     name: Lint
-    uses: ./.github/workflows/lint.yml
+    uses: $/.github/workflows/lint.yml
     permissions:
       contents: read
 
   test:
     name: Test
     needs: [lint]
-    uses: ./.github/workflows/test.yml
+    uses: $/.github/workflows/test.yml
     permissions:
       contents: read
       id-token: write
@@ -41,6 +41,6 @@ jobs:
   build:
     name: Build
     needs: [test]
-    uses: ./.github/workflows/build.yml
+    uses: $/.github/workflows/build.yml
     permissions:
       contents: read
