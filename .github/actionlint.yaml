@@ -1,0 +1,8 @@
+# https://github.com/rhysd/actionlint/blob/main/docs/config.md
+paths:
+  .github/workflows/*.yml:
+    ignore:
+      # actionlint does not yet recognise GitHub's self-repository `uses: $/...`
+      # syntax, shipped 2026-07-30, so it reports every such call as malformed.
+      # Tracked upstream in https://github.com/rhysd/actionlint/issues/711.
+      - 'reusable workflow call "\$/[^"]+" at "uses" is not following the format'
