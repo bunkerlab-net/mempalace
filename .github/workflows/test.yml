@@ -16,11 +16,11 @@ jobs:
 
     strategy:
       matrix:
-        runs-on: [ubuntu-24.04, ubuntu-24.04-arm, macos-26]
+        runs-on: [ubuntu-26.04, ubuntu-26.04-arm, macos-26]
         include:
-          - runs-on: ubuntu-24.04
+          - runs-on: ubuntu-26.04
             arch: x86-64
-          - runs-on: ubuntu-24.04-arm
+          - runs-on: ubuntu-26.04-arm
             arch: arm64
           - runs-on: macos-26
             arch: arm64
@@ -81,14 +81,14 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: cargo binstall -y --force cargo-nextest cargo-llvm-cov
 
-      - if: matrix.runs-on != 'ubuntu-24.04'
+      - if: matrix.runs-on != 'ubuntu-26.04'
         run: cargo llvm-cov --all-features nextest
-      - if: matrix.runs-on == 'ubuntu-24.04'
+      - if: matrix.runs-on == 'ubuntu-26.04'
         run: cargo llvm-cov --all-features --lcov --output-path lcov.info nextest
 
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
-        if: matrix.runs-on == 'ubuntu-24.04'
+        if: matrix.runs-on == 'ubuntu-26.04'
         with:
           fail_ci_if_error: false
           files: lcov.info
