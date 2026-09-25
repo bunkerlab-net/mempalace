@@ -1,4 +1,9 @@
 # https://github.com/rhysd/actionlint/blob/main/docs/config.md
+self-hosted-runner:
+  # GitHub-hosted labels newer than actionlint's built-in list.
+  labels:
+    - ubuntu-26.04
+    - ubuntu-26.04-arm
 paths:
   .github/workflows/*.yml:
     ignore:
