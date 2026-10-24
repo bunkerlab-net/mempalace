@@ -65,7 +65,7 @@ uuid = { version = "1", default-features = false, features = ["v4"] }
 # removed, so the build fails. Turning on `std` here unifies the feature for
 # `turso_core` too, and `branches::abort` then uses `std::process::abort`.
 # Remove once `turso_core` moves to `branches` 0.5 or enables `std` itself.
-branches = { version = "0.4", default-features = false, features = ["std"] }
+branches = { version = "0.5", default-features = false, features = ["std"] }
 
 [target.'cfg(unix)'.dependencies]
 # `libc` exposes POSIX constants (e.g. `O_NOFOLLOW`, `ELOOP`) used by the
